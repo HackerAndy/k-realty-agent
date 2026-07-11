@@ -13,13 +13,20 @@ from pydantic import BaseModel, Field
 
 
 class Transaction(BaseModel):
-    """Starter schema for the primary domain object this agent works on.
-    Rename/extend fields to match K-Realty's actual data."""
+    """A single financial transaction extracted from one of K-Realty's
+    financial sources (property manager, bank, loan servicers, insurance,
+    business services), normalized for Schedule E categorization and
+    monthly per-property P&L reporting."""
 
     entity_id: str
+    source_system: str  # e.g. "epic_property_management", "dfcu_bank"
     source_uri: str | None = None
-    received_at: datetime
-    amount: float | None = None
+    property_id: str
+    unit_id: str | None = None  # duplex: which of the 2 doors, if applicable
+    transaction_date: datetime
+    amount: float
+    description: str
+    schedule_e_category: str | None = None  # set once categorized
     metadata: dict[str, str] = Field(default_factory=dict)
 
 
