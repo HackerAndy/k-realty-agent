@@ -1,0 +1,25 @@
+[tool.poetry]
+name = "k-realty"
+version = "0.1.0"
+description = "Browser automation agent that extracts transactions from 8 financial sources (property manager, bank, loans, insurance, services), categorizes them against a Schedule E-aligned tax category list, and delivers a monthly P&L report per property — replacing a manual process that currently goes undone."
+authors = ["Hacker Andy <kaminski.andy@gmail.com>"]
+readme = "README.md"
+packages = [
+    { include = "core" },
+    { include = "evals" },
+    { include = "orchestration" },
+    { include = "interfaces" },
+]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+pydantic = ">=2.7"
+pyyaml = ">=6.0"
+langgraph = ">=0.2"
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=8.0"
+ruff = ">=0.5"
+
+[tool.ruff]
+line-length = 100
