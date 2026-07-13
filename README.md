@@ -42,6 +42,31 @@ run in CI on every push/PR (see [.github/workflows/ci.yml](.github/workflows/ci.
 poetry install
 ```
 
+## Running the agent
+
+Everything is controlled from one TUI:
+
+```bash
+poetry run agent
+```
+
+Menu: run the monthly cycle (Owner Statement PDF → categorized transactions →
+per-property P&L), review flagged transactions (assign Schedule E categories;
+every resolution is audit-logged), view the latest P&L, manage services &
+credentials, and status. All data stays local: runs in `data/` (gitignored),
+credentials encrypted in `.secrets/`.
+
+First-time credential setup (also reachable from the TUI menu):
+
+```bash
+poetry run python scripts/manage_secrets.py generate-key   # once; save the key
+poetry run python scripts/manage_secrets.py setup          # guided, all 9 services
+```
+
+Note: the Schedule E category list and vendor rules in `core/policies/` are
+drafts (`needs_review: true`) pending review against current federal and
+Michigan tax treatment.
+
 ## Portability check
 
 ```bash

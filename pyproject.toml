@@ -11,6 +11,9 @@ packages = [
     { include = "interfaces" },
 ]
 
+[tool.poetry.scripts]
+agent = "interfaces.tui:main"
+
 [tool.poetry.dependencies]
 python = "^3.11"
 pydantic = ">=2.7"
