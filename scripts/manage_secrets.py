@@ -8,8 +8,10 @@ Two things this manages, kept deliberately separate:
   client intake.yaml once (`init --intake <path>`), then maintained by hand
   going forward (`services add/edit/remove/list`) — it's not re-derived
   from the intake automatically after that first bootstrap.
-- the encrypted credential store — actual username/password values, entered
-  via getpass (masked, never printed/logged/transmitted).
+- the encrypted credential store — actual username/password values. Only the
+  password is ever masked; username/email is always shown as you type it, so
+  you can see and verify exactly what's being entered — never printed to a
+  log or transmitted anywhere else either way.
 
 Usage:
     poetry run python scripts/manage_secrets.py generate-key
@@ -25,7 +27,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import getpass
 import os
 import re
 import sys
@@ -134,6 +135,23 @@ def _prompt_service(service: Service | None = None) -> Service:
     return Service(key=key, label=label, login_url=login_url or None, notes=notes or None)
 
 
+def _prompt_credentials(label: str) -> tuple[str, str] | None:
+    """Prompt for a username/email and password. Only the password is ever
+    masked — username/email is shown as you type it, since it isn't a secret
+    and you need to be able to see and verify it (typos here silently break
+    login later). Returns None if the user cancels (e.g. Ctrl+C)."""
+    print(f"  Entering credentials for {label}:")
+    print("  - username/email is shown as you type (not a secret)")
+    print("  - password is hidden as you type (this one is a secret)")
+    username = questionary.text("  username/email:").ask()
+    if username is None:
+        return None
+    password = questionary.password("  password:").ask()
+    if password is None:
+        return None
+    return username, password
+
+
 def cmd_services_list(_args: argparse.Namespace) -> int:
     services = ServiceManifest().load()
     if not services:
@@ -192,7 +210,14 @@ def cmd_setup(_args: argparse.Namespace) -> int:
     if not services:
         print("No services in the manifest. Run 'init --intake <path>' or 'services add' first.")
         return 1
+
     store = CredentialStore()
+    print(f"About to walk through {len(services)} service(s) from {ServiceManifest().manifest_path}.")
+    print(f"Credentials are encrypted and saved to {store.store_path},")
+    print(f"readable only with the {SECRET_KEY_ENV_VAR} you have set in this shell.")
+    print("For each service: username/email is shown as you type it (not a")
+    print("secret); only the password is hidden.")
+
     stored = set(store.list_services()) if os.environ.get(SECRET_KEY_ENV_VAR) else set()
     total = len(services)
     for i, service in enumerate(services, start=1):
@@ -205,8 +230,11 @@ def cmd_setup(_args: argparse.Namespace) -> int:
             ).ask()
             if action != "Update":
                 continue
-        username = getpass.getpass("  username/email: ")
-        password = getpass.getpass("  password: ")
+        credentials = _prompt_credentials(service.label)
+        if credentials is None:
+            print("  Cancelled — leaving this service as-is.")
+            continue
+        username, password = credentials
         store.set(service.key, username=username, password=password)
         print("  Saved.")
     print(f"\nDone. {total} service(s) reviewed.")
@@ -214,9 +242,11 @@ def cmd_setup(_args: argparse.Namespace) -> int:
 
 
 def cmd_set(args: argparse.Namespace) -> int:
-    print(f"Setting credentials for '{args.service_key}'. Input is hidden.")
-    username = getpass.getpass("username/email: ")
-    password = getpass.getpass("password: ")
+    credentials = _prompt_credentials(args.service_key)
+    if credentials is None:
+        print("Cancelled.")
+        return 0
+    username, password = credentials
     CredentialStore().set(args.service_key, username=username, password=password)
     print(f"Saved encrypted credentials for '{args.service_key}'.")
     return 0
