@@ -1,0 +1,68 @@
+# Deterministic categorization rules: match a transaction's description
+# (case-insensitive substring) to a Schedule E category key from
+# schedule_e_categories.yaml.
+#
+# DRAFT — starter rules derived from the intake's known vendors. Needs
+# Andy's review before being trusted, especially the mortgage entries.
+#
+# Fields per rule:
+#   match:    list of case-insensitive substrings; any hit applies the rule
+#   category: category key from schedule_e_categories.yaml
+#   review:   optional; true forces NEEDS_REVIEW even on a match (used where
+#             a matched vendor still needs a human decision — e.g. mortgage
+#             payments mix non-deductible principal with deductible interest)
+#   note:     optional; carried onto the decision for the reviewer
+#
+# Anything matching NO rule is always flagged NEEDS_REVIEW — the agent never
+# guesses (intake: 100% accuracy for known vendors, flag unknowns).
+
+version: 1
+needs_review: true  # flip to false once Andy signs off
+
+rules:
+  - match: ["rent payment", "rent income", "tenant payment"]
+    category: rents_received
+
+  - match: ["epic property management", "management fee"]
+    category: management_fees
+
+  - match: ["dfcu"]
+    category: mortgage_interest
+    review: true
+    note: "DFCU payment likely mixes principal (not deductible), interest, and escrow — needs the loan statement breakdown."
+
+  - match: ["shellpoint"]
+    category: mortgage_interest
+    review: true
+    note: "Shellpoint mortgage payment mixes principal/interest/escrow — needs the loan statement breakdown."
+
+  - match: ["first federal", "ffl.bank"]
+    category: mortgage_interest
+    review: true
+    note: "First Federal loan payment mixes principal/interest/escrow — needs the loan statement breakdown."
+
+  - match: ["steadily"]
+    category: insurance
+
+  - match: ["homeserve"]
+    category: insurance
+
+  - match: ["squarespace"]
+    category: advertising
+    note: "Domain/website hosting — drafted as Advertising; confirm treatment."
+
+  - match: ["google workspace", "google llc"]
+    category: other
+    note: "Business software/email — Schedule E line 19 (Other); confirm treatment."
+
+  - match: ["repair", "plumbing", "electrical", "hvac", "handyman"]
+    category: repairs
+
+  - match: ["cleaning", "lawn", "landscap", "snow removal", "pest"]
+    category: cleaning_and_maintenance
+
+  - match: ["property tax", "county treasurer", "city treasurer"]
+    category: taxes
+
+  - match: ["water", "sewer", "dte", "consumers energy", "gas bill", "electric bill"]
+    category: utilities
