@@ -1,23 +1,25 @@
 # Template candidate: platform-reusable (tier 2) — parses the Buildium
-# (managebuilding.com) Owner Statement PDF layout; reusable for any future
-# client whose property manager runs on Buildium.
+# (managebuilding.com) Rental Owner Statement PDF layout; reusable for any
+# future client whose property manager runs on Buildium.
 # See agent-harness-template/docs/promotion-log.md.
-"""Parse a Buildium-style Owner Statement PDF into Transactions.
+"""Parse a Buildium-style Rental Owner Statement PDF into Transactions.
 
-Layout assumptions (verified against the checked-in fixture at
-tests/fixtures/sample_owner_statement.pdf, which mimics the standard
-managebuilding.com Owner Statement):
+Known quirks of the real statements (learned from Andy's actual PDF,
+2026-07-13):
 
-- "Property: <name>" lines start a per-property section
-- transaction rows are "MM/DD/YYYY  <description>  <amount>"
-- "Beginning/Ending cash balance" rows are running balances, not
-  transactions, and are skipped
-- negative amounts are expenses, positive are income (rent)
+- Bold text is fake-bolded by double-printing glyphs, so naive extraction
+  yields doubled characters ("BBeeggiinnnniinngg ccaasshh bbaallaannccee").
+  Fixed by pdfplumber's dedupe_chars() before extract_text().
+- Dates are NOT zero-padded: "5/16/2026".
+- The statement opens with a columnar "Summary by property" section; the
+  row-level transaction detail comes later in the document.
 
-IMPORTANT: built against the fixture, not yet against one of Andy's real
-statements. The row/heading regexes are the first thing to revisit once a
-real PDF is available — parse_statement() raises StatementParseError with
-the offending page text rather than silently returning partial data.
+The row/heading patterns below still need finishing against the full text
+of a real statement (we've only seen its first page so far). On failure,
+parse_statement() raises StatementParseError carrying the complete
+extracted text so the caller can save it for inspection (see
+core/monthly_cycle.py, which writes it to data/debug/) — and so the LLM
+extraction fallback can take over without re-reading the PDF.
 
 This module must stay framework-free (no langgraph/langchain imports).
 """
@@ -35,25 +37,30 @@ from core.models import Transaction
 SOURCE_SYSTEM = "epic_property_management_statement"
 
 PROPERTY_RE = re.compile(r"^Property:\s*(.+?)\s*$")
-ROW_RE = re.compile(r"^(\d{2}/\d{2}/\d{4})\s+(.+?)\s+\(?(-?)\$?([\d,]+\.\d{2})\)?$")
+ROW_RE = re.compile(r"^(\d{1,2}/\d{1,2}/\d{4})\s+(.+?)\s+\(?(-?)\$?([\d,]+\.\d{2})\)?$")
 BALANCE_RE = re.compile(r"(beginning|ending)\s+cash\s+balance", re.IGNORECASE)
 UNIT_RE = re.compile(r"\bunit\s+([A-Za-z0-9]+)\b", re.IGNORECASE)
 
 
 class StatementParseError(RuntimeError):
-    pass
+    def __init__(self, message: str, extracted_text: str = ""):
+        super().__init__(message)
+        self.extracted_text = extracted_text
 
 
 def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
 
 
-def parse_statement(pdf_path: Path) -> list[Transaction]:
+def extract_text(pdf_path: Path) -> str:
+    """Extract text with doubled-glyph (fake-bold) deduplication."""
     with pdfplumber.open(pdf_path) as pdf:
-        text = "\n".join(page.extract_text() or "" for page in pdf.pages)
-    if not text.strip():
-        raise StatementParseError(f"No extractable text in {pdf_path} — scanned image PDF?")
+        return "\n".join(page.dedupe_chars().extract_text() or "" for page in pdf.pages)
 
+
+def parse_statement_text(text: str, source_uri: str) -> list[Transaction]:
+    """Parse already-extracted statement text. Split out from the PDF layer
+    so layouts can be tested/iterated on as plain text."""
     transactions: list[Transaction] = []
     current_property: str | None = None
     seq = 0
@@ -73,8 +80,9 @@ def parse_statement(pdf_path: Path) -> list[Transaction]:
             continue
         if current_property is None:
             raise StatementParseError(
-                f"Transaction row found before any 'Property:' heading: {line!r}. "
-                "Statement layout differs from expectations — revisit the parser."
+                f"Transaction row found before any property heading: {line!r}. "
+                "Statement layout differs from expectations — revisit the parser.",
+                extracted_text=text,
             )
 
         amount = float(amount_str.replace(",", ""))
@@ -86,7 +94,7 @@ def parse_statement(pdf_path: Path) -> list[Transaction]:
             Transaction(
                 entity_id=f"stmt-{_slug(current_property)}-{seq:03d}",
                 source_system=SOURCE_SYSTEM,
-                source_uri=str(pdf_path),
+                source_uri=source_uri,
                 property_id=_slug(current_property),
                 unit_id=unit_match.group(1).upper() if unit_match else None,
                 transaction_date=datetime.strptime(date_str, "%m/%d/%Y"),
@@ -97,7 +105,15 @@ def parse_statement(pdf_path: Path) -> list[Transaction]:
 
     if not transactions:
         raise StatementParseError(
-            f"Parsed zero transactions from {pdf_path}. Extracted text began:\n"
-            f"{text[:500]}\n— statement layout differs from expectations; revisit the parser."
+            f"Parsed zero transactions from {source_uri}. Extracted text began:\n"
+            f"{text[:500]}\n— statement layout differs from expectations; revisit the parser.",
+            extracted_text=text,
         )
     return transactions
+
+
+def parse_statement(pdf_path: Path) -> list[Transaction]:
+    text = extract_text(pdf_path)
+    if not text.strip():
+        raise StatementParseError(f"No extractable text in {pdf_path} — scanned image PDF?")
+    return parse_statement_text(text, source_uri=str(pdf_path))

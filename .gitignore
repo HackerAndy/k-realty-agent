@@ -10,3 +10,5 @@ venv/
 .secrets/
 .browser_profiles/
 data/
+*.pdf
+!tests/fixtures/*.pdf

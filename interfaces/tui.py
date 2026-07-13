@@ -10,7 +10,9 @@ One entry point controls everything:
 
 Everything runs locally: statement PDFs are read from wherever you point
 at, results are written to data/ inside this repo, and credentials stay in
-the encrypted local store. Nothing is transmitted anywhere.
+the encrypted local store. One deliberate exception to local-only: the AI
+extraction fallback sends statement text to the Anthropic API, gated behind
+an explicit per-run consent prompt.
 
 Architecture note: menu items call the plain business functions in core/
 directly for now. Once orchestration/graph.py is built out (checkpointing,
@@ -21,6 +23,7 @@ instead — the menu itself shouldn't need to change.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from datetime import UTC, datetime
@@ -79,8 +82,27 @@ def action_run_cycle() -> None:
     try:
         run = run_monthly_cycle(pdf)
     except StatementParseError as exc:
-        print(f"Could not parse the statement:\n{exc}")
-        return
+        print(f"The built-in parser could not read this statement layout:\n{exc}\n")
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            print("LLM fallback unavailable: ANTHROPIC_API_KEY is not set in this shell.")
+            print("Set it and re-run, or share the extracted text above so the parser can be fixed.")
+            return
+        consent = questionary.confirm(
+            "Try the AI extraction fallback? This sends the statement's TEXT "
+            "to the Anthropic API (the only step where data leaves this machine). "
+            "Every extracted transaction will be flagged for your review, never auto-approved.",
+            default=False,
+        ).ask()
+        if not consent:
+            print("Skipped. The extracted text was saved under data/debug/ for inspection.")
+            return
+        print("Extracting via Anthropic API (claude-opus-4-8)...")
+        try:
+            run = run_monthly_cycle(pdf, allow_llm_fallback=True)
+        except Exception as llm_exc:
+            print(f"LLM fallback failed: {llm_exc}")
+            return
+        print("Extraction complete — ALL transactions below are flagged for review.")
     print(f"\n{run['report']}\n")
     print(f"Run saved to {run['run_path']} (stays on this machine).")
     if run["needs_review_count"]:
@@ -190,7 +212,9 @@ def action_status() -> None:
 
 def main() -> int:
     print("K-Realty Property Finance Tracker")
-    print("All data stays on this machine: runs in data/, credentials encrypted in .secrets/.\n")
+    print("Data stays on this machine (runs in data/, credentials encrypted in .secrets/),")
+    print("with one exception: the optional AI extraction fallback sends statement text")
+    print("to the Anthropic API — and only ever asks for your consent first.\n")
     actions = {
         "Run monthly cycle (Owner Statement PDF → P&L)": action_run_cycle,
         "Review flagged transactions": action_review,
