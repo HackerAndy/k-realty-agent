@@ -45,9 +45,37 @@ from core.ingest import (
 )
 from core.models import Transaction
 from core.parsers import ParseError
+from core.tools import llm_provider
+from core.tools.credential_store import ensure_master_key
 from core.tools.service_manifest import ServiceManifest
 
 MANAGE_SECRETS = Path(__file__).resolve().parent.parent / "scripts" / "manage_secrets.py"
+
+
+def ensure_llm_ready() -> bool:
+    """Make sure the harness has an LLM key to work with — loaded from the
+    encrypted store, or prompted for and stored on first run. The LLM key is
+    just another secret; the harness sets itself up so this is the only place
+    the operator ever needs to go. Returns True if an LLM is ready."""
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return True  # provided via environment (advanced / CI path)
+    ensure_master_key()
+    if llm_provider.load_into_env():
+        return True
+
+    # First run (or key never stored): prompt and store it.
+    print("This harness runs on the Claude API, which isn't set up yet.")
+    print("Paste your Anthropic API key to enable the agent and AI extraction.")
+    print("It's stored encrypted in .secrets/ alongside your other secrets and")
+    print("loaded automatically on future runs — you'll only be asked once.")
+    key = questionary.password("Anthropic API key:").ask()
+    if not key or not key.strip():
+        print("No key entered — agent/AI features stay unavailable this session.\n")
+        return False
+    llm_provider.store_llm_credential(key.strip())
+    llm_provider.load_into_env()
+    print("Saved. You won't be asked again.\n")
+    return True
 
 
 def _print_transactions(transactions: list[Transaction]) -> None:
@@ -112,8 +140,7 @@ def _ingest_with_parser(source_key: str, doc: Path) -> None:
         run = ingest_source(source_key, doc)
     except ParseError as exc:
         print(f"The built-in parser could not read this layout:\n{exc}\n")
-        if not os.environ.get("ANTHROPIC_API_KEY"):
-            print("AI fallback unavailable: ANTHROPIC_API_KEY is not set in this shell.")
+        if not ensure_llm_ready():
             return
         if not questionary.confirm(
             "Try the AI extraction fallback? This sends the document's TEXT to the "
@@ -137,9 +164,7 @@ def _handle_new_source(source_key: str, source, doc: Path, manifest: ServiceMani
     """No parser for this source yet — the harness handles it itself: extract
     now with the LLM and/or have the embedded agent write a reusable parser."""
     print(f"\n'{source.label}' has no parser yet — the harness can handle it itself.")
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        print("This needs ANTHROPIC_API_KEY set in this shell (the agent and the AI")
-        print("extraction both use it). Set it and re-run.")
+    if not ensure_llm_ready():
         return
     choice = questionary.select(
         "What should the harness do with this source?",
@@ -243,9 +268,19 @@ def action_services() -> None:
 
 
 def action_status() -> None:
+    from core.tools.credential_store import MASTER_KEY_PATH
+
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        print("\nLLM provider: anthropic (from ANTHROPIC_API_KEY in the environment)")
+    elif llm_provider.is_configured():
+        print(f"\nLLM provider: {llm_provider.configured_provider()} "
+              f"(stored encrypted in {MASTER_KEY_PATH.parent}/)")
+    else:
+        print("\nLLM provider: not configured — you'll be prompted on the next agent/AI action")
+
     services = ServiceManifest().load()
     implemented = [s for s in services if s.status == "implemented"]
-    print(f"\nSources (core/policies/services.yaml): {len(implemented)} of {len(services)} have a parser.")
+    print(f"Sources (core/policies/services.yaml): {len(implemented)} of {len(services)} have a parser.")
     for s in services:
         marker = "✓" if s.status == "implemented" else " "
         parser = s.parser or "-"
@@ -267,8 +302,10 @@ def action_status() -> None:
 def main() -> int:
     print("K-Realty Property Finance Tracker")
     print("Ingests a source document into transactions. Data stays on this machine")
-    print("(parsed output in data/, credentials encrypted in .secrets/), except the")
-    print("optional AI parse fallback, which asks consent before sending text out.\n")
+    print("(parsed output in data/, credentials encrypted in .secrets/); the agent")
+    print("and AI extraction send document/code text to the LLM after you consent.\n")
+    # First-run setup: make sure the harness has an LLM key (prompt + store if not).
+    ensure_llm_ready()
     actions = {
         "Ingest a source (document → transactions)": action_ingest,
         "View latest parsed transactions": action_view_latest,
