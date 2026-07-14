@@ -20,11 +20,56 @@ version: 1
 needs_review: true  # flip to false once Andy signs off
 
 rules:
-  - match: ["rent payment", "rent income", "tenant payment"]
+  # --- Buildium statement ACCOUNT-anchored rules (from Andy's real statement) ---
+  # Statement descriptions are formatted "Account | Name | Memo", so a
+  # pattern ending in " |" matches the account column specifically. These
+  # must come first: vendor/keyword matching alone misroutes rows (e.g.
+  # "Epic Property Management, LLC" appears as the VENDOR on repairs and
+  # cleaning they bill through themselves, and a memo like "Q C Repair
+  # Supplies" would drag a Supplies row into Repairs). First match wins.
+  - match: ["repairs income"]
+    category: rents_received
+    note: "Tenant reimbursement for repairs — drafted as rental income; confirm treatment."
+
+  - match: ["utility income"]
+    category: rents_received
+    note: "Tenant utility reimbursement — drafted as rental income; confirm treatment."
+
+  - match: ["pet deposit"]
+    category: rents_received
+    note: "Non-refundable deposit — income when non-refundable; confirm treatment."
+
+  - match: ["lease up fee", "leasing fee"]
+    category: management_fees
+    note: "Drafted under Management fees (line 11) — confirm vs. Commissions (line 8)."
+
+  - match: ["owner contribution", "owner draw"]
+    category: other
+    review: true
+    note: "Capital transaction (owner's own money in/out) — normally excluded from P&L income/expense entirely; confirm."
+
+  - match: ["rent income |", "rent payment", "tenant payment"]
     category: rents_received
 
-  - match: ["epic property management", "management fee"]
+  - match: ["management fees |", "management fee |"]
     category: management_fees
+
+  - match: ["repairs |"]
+    category: repairs
+
+  - match: ["cleaning |"]
+    category: cleaning_and_maintenance
+
+  - match: ["supplies |"]
+    category: supplies
+
+  - match: ["advertising |"]
+    category: advertising
+
+  - match: ["utilities -", "utilities |"]
+    category: utilities
+
+  # --- Generic vendor/keyword fallbacks (other sources: bank, loans, etc.) ---
 
   - match: ["dfcu"]
     category: mortgage_interest
@@ -61,8 +106,14 @@ rules:
   - match: ["cleaning", "lawn", "landscap", "snow removal", "pest"]
     category: cleaning_and_maintenance
 
+  - match: ["supplies"]
+    category: supplies
+
+  - match: ["advertising", "zillow"]
+    category: advertising
+
   - match: ["property tax", "county treasurer", "city treasurer"]
     category: taxes
 
-  - match: ["water", "sewer", "dte", "consumers energy", "gas bill", "electric bill"]
+  - match: ["utilities", "water", "sewer", "dte", "consumers energy", "gas bill", "electric bill"]
     category: utilities
