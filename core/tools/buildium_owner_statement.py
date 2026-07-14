@@ -22,7 +22,7 @@ Built against Andy's real statement (2026-07-13). The document layout:
 - Fake-bold doubled glyphs are removed via pdfplumber's dedupe_chars().
 
 On failure, parse_statement() raises StatementParseError carrying the
-full extracted text so core/monthly_cycle.py can dump it to data/debug/
+full extracted text so core/ingest.py can dump it to data/debug/
 and offer the LLM extraction fallback.
 
 This module must stay framework-free (no langgraph/langchain imports).

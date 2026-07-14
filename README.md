@@ -1,6 +1,9 @@
 # Property Finance Tracker Agent
 
-Browser automation agent that extracts transactions from 8 financial sources (property manager, bank, loans, insurance, services), categorizes them against a Schedule E-aligned tax category list, and delivers a monthly P&L report per property — replacing a manual process that currently goes undone.
+Property finance agent for K-Realty. **Current scope:** parse a Buildium
+Owner Statement PDF into clean transactions. Categorization, P&L, and the
+other financial sources are planned but deliberately left out of the
+starting flow to keep it focused on getting parsing right first.
 
 Client: K-Realty
 
@@ -50,22 +53,22 @@ Everything is controlled from one TUI:
 poetry run agent
 ```
 
-Menu: run the monthly cycle (Owner Statement PDF → categorized transactions →
-per-property P&L), review flagged transactions (assign Schedule E categories;
-every resolution is audit-logged), view the latest P&L, manage services &
-credentials, and status. All data stays local: runs in `data/` (gitignored),
-credentials encrypted in `.secrets/`.
+Menu: parse a statement (Owner Statement PDF → transactions), view the
+latest parsed transactions, manage services & credentials, and status. All
+data stays local: parsed output in `data/` (gitignored), credentials
+encrypted in `.secrets/`.
 
-First-time credential setup (also reachable from the TUI menu):
+If the built-in parser can't read a statement's layout and `ANTHROPIC_API_KEY`
+is set, the TUI offers an AI extraction fallback — the one step where data
+leaves the machine, gated behind an explicit consent prompt.
+
+Credential setup (also reachable from the TUI menu) is for the future portal
+scrapers; parsing a statement PDF needs no credentials:
 
 ```bash
 poetry run python scripts/manage_secrets.py generate-key   # once; save the key
 poetry run python scripts/manage_secrets.py setup          # guided, all 9 services
 ```
-
-Note: the Schedule E category list and vendor rules in `core/policies/` are
-drafts (`needs_review: true`) pending review against current federal and
-Michigan tax treatment.
 
 ## Portability check
 
