@@ -7,18 +7,20 @@ One entry point:
 
     poetry run agent
 
-Right now it does one job: ingest a source document (pick a source, point
-at its file) into transactions. Each source's parser lives in core/parsers/
-and is registered against that source in core/policies/services.yaml — so
-the source picker doubles as the build-out map (every source is selectable;
-each shows whether its parser is ready or still needed). Categorization,
-P&L, and thresholds were deliberately left out of the starting flow.
+Ingest a source document into transactions. If the source already has a
+committed parser (core/parsers/, registered in core/policies/services.yaml),
+it runs that. If it DOESN'T, the harness handles it itself: extract now with
+the LLM, and/or have the embedded agent (orchestration/agent.py) write a
+reusable deterministic parser, verify it, and — with your approval in this
+menu — activate it. That's the point: after onboarding you work with the
+harness, not a code editor.
 
 Everything runs locally: documents are read from wherever you point at,
 parsed transactions are written to data/ inside this repo, and credentials
-stay in the encrypted local store. One deliberate exception to local-only:
-the optional AI extraction fallback sends document text to the Anthropic
-API, and only ever after you consent.
+stay in the encrypted local store. The exceptions to local-only are the LLM
+extraction and the agent — both send document/code text to the Anthropic API,
+and only ever after you consent. Categorization and P&L were deliberately
+left out of the starting flow.
 
 Architecture note: menu items call the plain functions in core/ directly
 for now. Once orchestration/graph.py is built out, this file switches to
@@ -36,8 +38,8 @@ import questionary
 
 from core.ingest import (
     DATA_DIR,
-    IngestError,
     ingest_source,
+    ingest_via_llm,
     load_latest_parsed,
     transactions_from_run,
 )
@@ -82,51 +84,132 @@ def action_ingest() -> None:
     source_key = _pick_source()
     if not source_key:
         return
-    source = ServiceManifest().get(source_key)
-    if source.status != "implemented" or not source.parser:
-        print(f"\n'{source.label}' doesn't have a parser yet (status: {source.status}).")
-        print("To handle this source: get a real sample document, add a parser in")
-        print("core/parsers/<name>.py exposing (path) -> list[Transaction], register it in")
-        print("core/parsers/__init__.py, and set this source's parser + status: implemented")
-        print("in core/policies/services.yaml. See the README 'Adding a source' section.")
+    manifest = ServiceManifest()
+    source = manifest.get(source_key)
+    doc = _ask_document()
+    if doc is None:
         return
+    if source.status == "implemented" and source.parser:
+        _ingest_with_parser(source_key, doc)
+    else:
+        _handle_new_source(source_key, source, doc, manifest)
+
+
+def _ask_document() -> Path | None:
     path_str = questionary.path("Path to the document (PDF/CSV):").ask()
     if not path_str:
-        return
+        return None
     doc = Path(path_str).expanduser()
     if not doc.exists():
         print(f"No file at {doc}")
-        return
+        return None
+    return doc
+
+
+def _ingest_with_parser(source_key: str, doc: Path) -> None:
     print(f"Ingesting {source_key} from {doc}...")
     try:
         run = ingest_source(source_key, doc)
-    except IngestError as exc:
-        print(exc)
-        return
     except ParseError as exc:
         print(f"The built-in parser could not read this layout:\n{exc}\n")
         if not os.environ.get("ANTHROPIC_API_KEY"):
             print("AI fallback unavailable: ANTHROPIC_API_KEY is not set in this shell.")
-            print("Set it and re-run, or share the extracted text above so the parser can be fixed.")
             return
-        consent = questionary.confirm(
+        if not questionary.confirm(
             "Try the AI extraction fallback? This sends the document's TEXT to the "
             "Anthropic API — the only step where data leaves this machine.",
             default=False,
-        ).ask()
-        if not consent:
+        ).ask():
             print("Skipped. The extracted text was saved under data/debug/ for inspection.")
             return
-        print("Extracting via Anthropic API (claude-opus-4-8)...")
         try:
             run = ingest_source(source_key, doc, allow_llm_fallback=True)
-        except Exception as llm_exc:
-            print(f"AI fallback failed: {llm_exc}")
+        except Exception as exc2:
+            print(f"AI fallback failed: {exc2}")
             return
-
+    labels = {"llm_fallback": "AI fallback", "deterministic_parser": "built-in parser"}
     _print_transactions(transactions_from_run(run))
-    method = "AI fallback" if run["extraction_method"] == "llm_fallback" else "built-in parser"
-    print(f"\nParsed via {method}. Saved to {run['run_path']} (stays on this machine).")
+    print(f"\nParsed via {labels.get(run['extraction_method'], run['extraction_method'])}. "
+          f"Saved to {run['run_path']} (stays on this machine).")
+
+
+def _handle_new_source(source_key: str, source, doc: Path, manifest: ServiceManifest) -> None:
+    """No parser for this source yet — the harness handles it itself: extract
+    now with the LLM and/or have the embedded agent write a reusable parser."""
+    print(f"\n'{source.label}' has no parser yet — the harness can handle it itself.")
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        print("This needs ANTHROPIC_API_KEY set in this shell (the agent and the AI")
+        print("extraction both use it). Set it and re-run.")
+        return
+    choice = questionary.select(
+        "What should the harness do with this source?",
+        choices=[
+            "Extract transactions now, and build a reusable parser",
+            "Extract transactions now (LLM only)",
+            "Build a reusable parser now (no extraction yet)",
+            "Cancel",
+        ],
+    ).ask()
+    if choice in (None, "Cancel"):
+        return
+    if not questionary.confirm(
+        "This sends the document's TEXT to the Anthropic API — the step where data "
+        "leaves this machine. Proceed?",
+        default=False,
+    ).ask():
+        return
+
+    if choice.startswith("Extract"):
+        _extract_now(source_key, doc)
+    if "build a reusable parser" in choice.lower():
+        _build_parser_via_agent(source_key, source, doc, manifest)
+
+
+def _extract_now(source_key: str, doc: Path) -> None:
+    print("\nExtracting via the LLM (claude-opus-4-8)...")
+    try:
+        run = ingest_via_llm(source_key, doc)
+    except Exception as exc:
+        print(f"LLM extraction failed: {exc}")
+        return
+    _print_transactions(transactions_from_run(run))
+    print(f"\nExtracted via LLM — treat as lower-confidence than a verified parser. "
+          f"Saved to {run['run_path']}.")
+
+
+def _build_parser_via_agent(source_key: str, source, doc: Path, manifest: ServiceManifest) -> None:
+    from orchestration.build_parser import build_parser_for_source
+
+    print(f"\nThe agent will now write a parser for {source.label}. Its actions:\n")
+    try:
+        result = build_parser_for_source(source_key, doc, source_label=source.label, on_event=print)
+    except Exception as exc:
+        print(f"\nThe agent run failed: {exc}")
+        return
+
+    verification = result["verification"]
+    print()
+    if not verification["ok"]:
+        print("The agent's parser did not verify:")
+        print(verification.get("error", "(no detail)"))
+        print(f"The code it wrote is at {result['parser_path']} — review it or try again.")
+        return
+
+    txns = [Transaction.model_validate(t) for t in verification["transactions"]]
+    print(f"The agent wrote {result['parser_path']}; it produced {len(txns)} transactions:")
+    _print_transactions(txns)
+    if result["agent_summary"]:
+        print(f"\nAgent's summary:\n{result['agent_summary']}")
+    if questionary.confirm(
+        f"\nActivate this parser for '{source_key}'? (marks the source implemented so future "
+        "runs use it automatically)",
+        default=False,
+    ).ask():
+        manifest.update(source_key, parser=source_key, status="implemented")
+        print(f"Activated. '{source.label}' now has a parser; future ingests use it.")
+    else:
+        print("Left inactive. The parser code stays in core/parsers/ for review; the source is "
+              "still marked as needing a parser.")
 
 
 def action_view_latest() -> None:
@@ -175,8 +258,10 @@ def action_status() -> None:
         print(f"Latest ingest: {run['source_key']} {run['month']} — "
               f"{run['transaction_count']} transaction(s).")
     print(f"Parsed data lives in {DATA_DIR}/ (gitignored, local only).")
-    print("Deliberately not built yet: categorization, P&L, thresholds, the parsers for "
-          "the other sources above, automated fetching, orchestration graph.")
+    print("Sources without a parser: pick one under 'Ingest a source' and the harness "
+          "will extract it now and/or write a parser for it (with your approval).")
+    print("Deliberately not built yet: categorization, P&L, automated fetching of the "
+          "source documents, orchestration graph.")
 
 
 def main() -> int:
