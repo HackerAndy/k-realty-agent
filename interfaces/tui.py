@@ -48,15 +48,6 @@ from core.tools.service_manifest import ServiceManifest
 MANAGE_SECRETS = Path(__file__).resolve().parent.parent / "scripts" / "manage_secrets.py"
 
 
-def _select(message: str, choices):
-    """questionary.select with number-key shortcuts instead of arrow keys.
-    Some terminals don't forward arrow escape sequences to prompt_toolkit;
-    number keys (and Enter) always get through."""
-    return questionary.select(
-        message, choices=choices, use_shortcuts=True, use_jk_keys=False
-    ).ask()
-
-
 def _print_transactions(transactions: list[Transaction]) -> None:
     print(f"\n{'Date':8} {'Property':22} {'Unit':8} {'Amount':>12}  Description")
     print("-" * 100)
@@ -86,7 +77,7 @@ def _pick_source() -> str | None:
                     title=f"{s.label}  [{s.status}]", value=s.key, disabled=s.status
                 )
             )
-    return _select("Which source do you want to ingest?", choices)
+    return questionary.select("Which source do you want to ingest?", choices=choices).ask()
 
 
 def action_ingest() -> None:
@@ -142,10 +133,10 @@ def action_view_latest() -> None:
 
 
 def action_services() -> None:
-    choice = _select(
+    choice = questionary.select(
         "Services & credentials (runs scripts/manage_secrets.py):",
-        ["list", "setup", "add", "edit", "remove", "generate-key", "back"],
-    )
+        choices=["list", "setup", "add", "edit", "remove", "generate-key", "back"],
+    ).ask()
     if choice in (None, "back"):
         return
     if choice in ("add", "edit", "remove"):
@@ -194,7 +185,7 @@ def main() -> int:
         "Status": action_status,
     }
     while True:
-        choice = _select("What would you like to do?", [*actions, "Quit"])
+        choice = questionary.select("What would you like to do?", choices=[*actions, "Quit"]).ask()
         if choice in (None, "Quit"):
             return 0
         actions[choice]()

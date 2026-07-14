@@ -46,14 +46,6 @@ from core.tools.credential_store import (  # noqa: E402
 from core.tools.service_manifest import Service, ServiceManifest, ServiceManifestError  # noqa: E402
 
 
-def _select(message: str, choices):
-    """questionary.select with number-key shortcuts instead of arrow keys —
-    some terminals don't forward arrow escape sequences to prompt_toolkit."""
-    return questionary.select(
-        message, choices=choices, use_shortcuts=True, use_jk_keys=False
-    ).ask()
-
-
 def cmd_generate_key(_args: argparse.Namespace) -> int:
     key = generate_key()
     print("Generated key. Store it somewhere safe (e.g. your password manager),")
@@ -118,10 +110,10 @@ def cmd_init(args: argparse.Namespace) -> int:
         print(f"  Login URL: {candidate.login_url or '(none — see notes)'}")
         if candidate.notes:
             print(f"  Notes:     {candidate.notes}")
-        action = _select(
+        action = questionary.select(
             "Add this service to the manifest?",
-            ["Accept as-is", "Edit before adding", "Skip"],
-        )
+            choices=["Accept as-is", "Edit before adding", "Skip"],
+        ).ask()
         if action in (None, "Skip"):
             continue
         if action == "Edit before adding":
@@ -233,9 +225,9 @@ def cmd_setup(_args: argparse.Namespace) -> int:
         if service.login_url:
             print(f"  {service.login_url}")
         if service.key in stored:
-            action = _select(
-                "Credentials already set for this service.", ["Skip", "Update"]
-            )
+            action = questionary.select(
+                "Credentials already set for this service.", choices=["Skip", "Update"]
+            ).ask()
             if action != "Update":
                 continue
         credentials = _prompt_credentials(service.label)
