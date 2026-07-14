@@ -28,6 +28,16 @@ class Service(BaseModel):
     login_url: str | None = None
     notes: str | None = None
 
+    # How this source's data is handled (seeded from intake, refined per source):
+    #   input_type: pdf_statement | csv_export | html_scrape | email_trigger | unknown
+    #   access:     email_attachment | portal_login | download | api
+    #   parser:     name registered in core/parsers/REGISTRY, or null if not built
+    #   status:     implemented | needs_parser | planned
+    input_type: str | None = None
+    access: str | None = None
+    parser: str | None = None
+    status: str = "planned"
+
 
 class ServiceManifestError(RuntimeError):
     pass

@@ -7,15 +7,18 @@ One entry point:
 
     poetry run agent
 
-Right now it does one job: parse an Owner Statement PDF into transactions
-and let you review them. Categorization, P&L, and thresholds were
-deliberately left out of the starting flow — the focus is clean parsing.
+Right now it does one job: ingest a source document (pick a source, point
+at its file) into transactions. Each source's parser lives in core/parsers/
+and is registered against that source in core/policies/services.yaml — so
+the source picker doubles as the build-out map (implemented sources are
+selectable; the rest are greyed with their status). Categorization, P&L,
+and thresholds were deliberately left out of the starting flow.
 
-Everything runs locally: statement PDFs are read from wherever you point
-at, parsed transactions are written to data/ inside this repo, and
-credentials stay in the encrypted local store. One deliberate exception to
-local-only: the optional AI extraction fallback sends statement text to the
-Anthropic API, and only ever after you consent.
+Everything runs locally: documents are read from wherever you point at,
+parsed transactions are written to data/ inside this repo, and credentials
+stay in the encrypted local store. One deliberate exception to local-only:
+the optional AI extraction fallback sends document text to the Anthropic
+API, and only ever after you consent.
 
 Architecture note: menu items call the plain functions in core/ directly
 for now. Once orchestration/graph.py is built out, this file switches to
@@ -31,9 +34,15 @@ from pathlib import Path
 
 import questionary
 
-from core.ingest import DATA_DIR, ingest_statement, load_latest_parsed, transactions_from_run
+from core.ingest import (
+    DATA_DIR,
+    IngestError,
+    ingest_source,
+    load_latest_parsed,
+    transactions_from_run,
+)
 from core.models import Transaction
-from core.tools.buildium_owner_statement import StatementParseError
+from core.parsers import ParseError
 from core.tools.service_manifest import ServiceManifest
 
 MANAGE_SECRETS = Path(__file__).resolve().parent.parent / "scripts" / "manage_secrets.py"
@@ -54,25 +63,48 @@ def _print_transactions(transactions: list[Transaction]) -> None:
     print(f"{len(transactions)} transactions | money in {money_in:,.2f} | money out {money_out:,.2f}")
 
 
-def action_parse() -> None:
-    pdf_path = questionary.path("Path to the Owner Statement PDF:").ask()
-    if not pdf_path:
+def _pick_source() -> str | None:
+    """Show every source from the manifest; only implemented ones are
+    selectable, the rest are greyed with their build status."""
+    services = ServiceManifest().load()
+    choices = []
+    for s in services:
+        if s.status == "implemented":
+            choices.append(questionary.Choice(title=f"{s.label}  ({s.input_type})", value=s.key))
+        else:
+            choices.append(
+                questionary.Choice(
+                    title=f"{s.label}  [{s.status}]", value=s.key, disabled=s.status
+                )
+            )
+    return questionary.select("Which source do you want to ingest?", choices=choices).ask()
+
+
+def action_ingest() -> None:
+    source_key = _pick_source()
+    if not source_key:
         return
-    pdf = Path(pdf_path).expanduser()
-    if not pdf.exists():
-        print(f"No file at {pdf}")
+    path_str = questionary.path("Path to the document (PDF/CSV):").ask()
+    if not path_str:
         return
-    print(f"Parsing {pdf}...")
+    doc = Path(path_str).expanduser()
+    if not doc.exists():
+        print(f"No file at {doc}")
+        return
+    print(f"Ingesting {source_key} from {doc}...")
     try:
-        run = ingest_statement(pdf)
-    except StatementParseError as exc:
-        print(f"The built-in parser could not read this statement layout:\n{exc}\n")
+        run = ingest_source(source_key, doc)
+    except IngestError as exc:
+        print(exc)
+        return
+    except ParseError as exc:
+        print(f"The built-in parser could not read this layout:\n{exc}\n")
         if not os.environ.get("ANTHROPIC_API_KEY"):
             print("AI fallback unavailable: ANTHROPIC_API_KEY is not set in this shell.")
             print("Set it and re-run, or share the extracted text above so the parser can be fixed.")
             return
         consent = questionary.confirm(
-            "Try the AI extraction fallback? This sends the statement's TEXT to the "
+            "Try the AI extraction fallback? This sends the document's TEXT to the "
             "Anthropic API — the only step where data leaves this machine.",
             default=False,
         ).ask()
@@ -81,7 +113,7 @@ def action_parse() -> None:
             return
         print("Extracting via Anthropic API (claude-opus-4-8)...")
         try:
-            run = ingest_statement(pdf, allow_llm_fallback=True)
+            run = ingest_source(source_key, doc, allow_llm_fallback=True)
         except Exception as llm_exc:
             print(f"AI fallback failed: {llm_exc}")
             return
@@ -123,25 +155,31 @@ def action_services() -> None:
 
 def action_status() -> None:
     services = ServiceManifest().load()
-    print(f"\nServices in manifest: {len(services)} (core/policies/services.yaml)")
+    implemented = [s for s in services if s.status == "implemented"]
+    print(f"\nSources (core/policies/services.yaml): {len(implemented)} of {len(services)} have a parser.")
+    for s in services:
+        marker = "✓" if s.status == "implemented" else " "
+        parser = s.parser or "-"
+        print(f"  [{marker}] {s.key:28} {s.status:13} parser={parser}")
     run = load_latest_parsed()
+    print()
     if run is None:
-        print("Statement parsing: never run.")
+        print("Nothing ingested yet.")
     else:
-        print(f"Latest parse: {run['month']} — {run['transaction_count']} transaction(s).")
+        print(f"Latest ingest: {run['source_key']} {run['month']} — "
+              f"{run['transaction_count']} transaction(s).")
     print(f"Parsed data lives in {DATA_DIR}/ (gitignored, local only).")
-    print("Not yet built (deliberately kept out of the starting flow): categorization, "
-          "P&L reporting, dollar thresholds, the other 7 source scrapers, Telegram "
-          "alerts, orchestration graph.")
+    print("Deliberately not built yet: categorization, P&L, thresholds, the parsers for "
+          "the other sources above, automated fetching, orchestration graph.")
 
 
 def main() -> int:
     print("K-Realty Property Finance Tracker")
-    print("Parses an Owner Statement PDF into transactions. Data stays on this machine")
+    print("Ingests a source document into transactions. Data stays on this machine")
     print("(parsed output in data/, credentials encrypted in .secrets/), except the")
     print("optional AI parse fallback, which asks consent before sending text out.\n")
     actions = {
-        "Parse a statement (PDF → transactions)": action_parse,
+        "Ingest a source (document → transactions)": action_ingest,
         "View latest parsed transactions": action_view_latest,
         "Manage services & credentials": action_services,
         "Status": action_status,

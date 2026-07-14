@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from core.tools.buildium_owner_statement import parse_statement
+from core.parsers.buildium_owner_statement import parse_statement
 
 FIXTURE = Path(__file__).parent / "fixtures" / "sample_owner_statement.pdf"
 

@@ -21,9 +21,10 @@ Built against Andy's real statement (2026-07-13). The document layout:
   across page breaks. "Balance" is a running total and is ignored.
 - Fake-bold doubled glyphs are removed via pdfplumber's dedupe_chars().
 
-On failure, parse_statement() raises StatementParseError carrying the
-full extracted text so core/ingest.py can dump it to data/debug/
-and offer the LLM extraction fallback.
+On failure, parse_statement() raises ParseError (the shared parser
+exception from core.parsers.base) carrying the full extracted text so
+core/ingest.py can dump it to data/debug/ and offer the LLM extraction
+fallback.
 
 This module must stay framework-free (no langgraph/langchain imports).
 """
@@ -37,6 +38,7 @@ from pathlib import Path
 import pdfplumber
 
 from core.models import Transaction
+from core.parsers.base import ParseError
 
 SOURCE_SYSTEM = "epic_property_management_statement"
 
@@ -51,12 +53,6 @@ SKIP_PREFIXES = (
     "Date Property Unit",  # repeated header caught positionally, belt+braces
 )
 X_TOLERANCE = 3.0  # right-aligned amounts can start slightly left of their header
-
-
-class StatementParseError(RuntimeError):
-    def __init__(self, message: str, extracted_text: str = ""):
-        super().__init__(message)
-        self.extracted_text = extracted_text
 
 
 def _slug(text: str) -> str:
@@ -186,14 +182,14 @@ def parse_statement(pdf_path: Path) -> list[Transaction]:
                     if current:
                         finalize(current)
                     if sign is None:
-                        raise StatementParseError(
+                        raise ParseError(
                             f"Transaction row before any cash section: {joined!r} — "
                             "layout differs from expectations; revisit the parser.",
                             extracted_text=extract_text(pdf_path),
                         )
                     amount_str = cells[6].strip()
                     if not AMOUNT_RE.match(amount_str):
-                        raise StatementParseError(
+                        raise ParseError(
                             f"Row has a date but no parseable amount: {joined!r}",
                             extracted_text=extract_text(pdf_path),
                         )
@@ -212,7 +208,7 @@ def parse_statement(pdf_path: Path) -> list[Transaction]:
                 current = None
 
     if not transactions:
-        raise StatementParseError(
+        raise ParseError(
             f"Parsed zero transactions from {pdf_path} — no 'Detail transactions' "
             "table found, or the layout differs from expectations.",
             extracted_text=extract_text(pdf_path),

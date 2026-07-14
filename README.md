@@ -11,10 +11,13 @@ Client: K-Realty
 
 ```
 core/            zero framework imports — 100% portable
-├── tools/       external API, email/Slack, doc parsing (plain Python)
+├── parsers/     one module per source: document → transactions
+│                (base.py = Parser contract + ParseError; __init__ = REGISTRY)
+├── tools/       credential store, browser session, service manifest, LLM fallback
 ├── validators/  deterministic business-rule checks
 ├── prompts/     all prompts as versioned text/YAML files
-├── policies/    escalation rules, approval thresholds (config)
+├── policies/    services.yaml = the source registry (which source, format, parser, status)
+├── ingest.py    source-driven: look up a source's parser, run it, persist
 └── models.py    Pydantic schemas: Transaction, Decision, AuditRecord
 
 evals/           standalone harness — runs against core/, not LangGraph
@@ -53,12 +56,20 @@ Everything is controlled from one TUI:
 poetry run agent
 ```
 
-Menu: parse a statement (Owner Statement PDF → transactions), view the
-latest parsed transactions, manage services & credentials, and status. All
-data stays local: parsed output in `data/` (gitignored), credentials
-encrypted in `.secrets/`.
+Menu: ingest a source (pick a source, point at its document → transactions),
+view the latest parsed transactions, manage services & credentials, and
+status. All data stays local: parsed output in `data/` (gitignored),
+credentials encrypted in `.secrets/`.
 
-If the built-in parser can't read a statement's layout and `ANTHROPIC_API_KEY`
+**Adding a source.** `core/policies/services.yaml` lists all 8 financial
+sources from the onboarding form, each with an `input_type`, `access`, a
+`parser` name, and a `status`. To handle a new one: get a real sample
+document, write a parser in `core/parsers/<source>.py` exposing
+`(path) -> list[Transaction]`, register it in `core/parsers/__init__.py`,
+and set that source's `parser` + `status: implemented` in `services.yaml`.
+The Status screen shows how many sources have parsers (1 of 8 today).
+
+If a source's parser can't read a document's layout and `ANTHROPIC_API_KEY`
 is set, the TUI offers an AI extraction fallback — the one step where data
 leaves the machine, gated behind an explicit consent prompt.
 
