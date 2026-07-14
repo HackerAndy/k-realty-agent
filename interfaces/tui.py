@@ -10,9 +10,9 @@ One entry point:
 Right now it does one job: ingest a source document (pick a source, point
 at its file) into transactions. Each source's parser lives in core/parsers/
 and is registered against that source in core/policies/services.yaml — so
-the source picker doubles as the build-out map (implemented sources are
-selectable; the rest are greyed with their status). Categorization, P&L,
-and thresholds were deliberately left out of the starting flow.
+the source picker doubles as the build-out map (every source is selectable;
+each shows whether its parser is ready or still needed). Categorization,
+P&L, and thresholds were deliberately left out of the starting flow.
 
 Everything runs locally: documents are read from wherever you point at,
 parsed transactions are written to data/ inside this repo, and credentials
@@ -64,25 +64,31 @@ def _print_transactions(transactions: list[Transaction]) -> None:
 
 
 def _pick_source() -> str | None:
-    """Show every source from the manifest; only implemented ones are
-    selectable, the rest are greyed with their build status."""
+    """Show every source from the manifest, all selectable. Implemented ones
+    note their format; the rest note their build status so you can see, at
+    the moment of picking, which still need a parser."""
     services = ServiceManifest().load()
     choices = []
     for s in services:
         if s.status == "implemented":
-            choices.append(questionary.Choice(title=f"{s.label}  ({s.input_type})", value=s.key))
+            title = f"{s.label}  ({s.input_type}, parser ready)"
         else:
-            choices.append(
-                questionary.Choice(
-                    title=f"{s.label}  [{s.status}]", value=s.key, disabled=s.status
-                )
-            )
+            title = f"{s.label}  ({s.status} — no parser yet)"
+        choices.append(questionary.Choice(title=title, value=s.key))
     return questionary.select("Which source do you want to ingest?", choices=choices).ask()
 
 
 def action_ingest() -> None:
     source_key = _pick_source()
     if not source_key:
+        return
+    source = ServiceManifest().get(source_key)
+    if source.status != "implemented" or not source.parser:
+        print(f"\n'{source.label}' doesn't have a parser yet (status: {source.status}).")
+        print("To handle this source: get a real sample document, add a parser in")
+        print("core/parsers/<name>.py exposing (path) -> list[Transaction], register it in")
+        print("core/parsers/__init__.py, and set this source's parser + status: implemented")
+        print("in core/policies/services.yaml. See the README 'Adding a source' section.")
         return
     path_str = questionary.path("Path to the document (PDF/CSV):").ask()
     if not path_str:
