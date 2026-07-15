@@ -12,3 +12,5 @@ venv/
 data/
 *.pdf
 !tests/fixtures/*.pdf
+dfcu_ckecking_20260714csv
+dfcu_savings_20260714csv
