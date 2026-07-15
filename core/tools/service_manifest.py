@@ -16,10 +16,19 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import yaml
 from pydantic import BaseModel
+from ruamel.yaml import YAML
+from ruamel.yaml.comments import CommentedMap
 
 DEFAULT_MANIFEST_PATH = Path("core/policies/services.yaml")
+
+# Round-trip YAML preserves comments (the header roadmap, any inline notes) and
+# formatting across edits — activating a parser no longer wipes the docs.
+_yaml = YAML()
+_yaml.preserve_quotes = True
+_yaml.width = 4096  # don't hard-wrap long note lines
+
+_FIELD_ORDER = ["key", "label", "login_url", "notes", "input_type", "access", "parser", "status"]
 
 
 class Service(BaseModel):
@@ -47,39 +56,64 @@ class ServiceManifest:
     def __init__(self, manifest_path: Path = DEFAULT_MANIFEST_PATH):
         self.manifest_path = manifest_path
 
-    def load(self) -> list[Service]:
+    def _load_doc(self) -> CommentedMap:
+        """Load the raw round-trip document (comments intact)."""
         if not self.manifest_path.exists():
-            return []
-        data = yaml.safe_load(self.manifest_path.read_text()) or {}
-        return [Service.model_validate(entry) for entry in data.get("services", [])]
+            doc = CommentedMap()
+            doc["services"] = []
+            return doc
+        with self.manifest_path.open() as f:
+            doc = _yaml.load(f) or CommentedMap()
+        if not doc.get("services"):
+            doc["services"] = []
+        return doc
 
-    def save(self, services: list[Service]) -> None:
+    def _dump_doc(self, doc: CommentedMap) -> None:
         self.manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        data = {"services": [s.model_dump(exclude_none=True) for s in services]}
-        self.manifest_path.write_text(yaml.safe_dump(data, sort_keys=False))
+        with self.manifest_path.open("w") as f:
+            _yaml.dump(doc, f)
+
+    def _entry(self, service: Service) -> CommentedMap:
+        entry = CommentedMap()
+        for field in _FIELD_ORDER:
+            value = getattr(service, field)
+            if value is not None:
+                entry[field] = value
+        return entry
+
+    def load(self) -> list[Service]:
+        return [Service.model_validate(dict(e)) for e in self._load_doc()["services"]]
 
     def add(self, service: Service) -> None:
-        services = self.load()
-        if any(s.key == service.key for s in services):
+        doc = self._load_doc()
+        if any(e.get("key") == service.key for e in doc["services"]):
             raise ServiceManifestError(f"Service '{service.key}' already exists.")
-        services.append(service)
-        self.save(services)
+        doc["services"].append(self._entry(service))
+        self._dump_doc(doc)
 
     def update(self, key: str, **fields: str | None) -> None:
-        services = self.load()
-        for i, service in enumerate(services):
-            if service.key == key:
-                services[i] = service.model_copy(update=fields)
-                self.save(services)
+        """Change fields on one service IN PLACE — only the touched keys move,
+        so that entry's (and the file's) comments are preserved."""
+        doc = self._load_doc()
+        for entry in doc["services"]:
+            if entry.get("key") == key:
+                for field, value in fields.items():
+                    if value is None:
+                        entry.pop(field, None)
+                    else:
+                        entry[field] = value
+                self._dump_doc(doc)
                 return
         raise ServiceManifestError(f"Service '{key}' not found.")
 
     def remove(self, key: str) -> None:
-        services = self.load()
-        remaining = [s for s in services if s.key != key]
-        if len(remaining) == len(services):
-            raise ServiceManifestError(f"Service '{key}' not found.")
-        self.save(remaining)
+        doc = self._load_doc()
+        for i, entry in enumerate(doc["services"]):
+            if entry.get("key") == key:
+                del doc["services"][i]
+                self._dump_doc(doc)
+                return
+        raise ServiceManifestError(f"Service '{key}' not found.")
 
     def get(self, key: str) -> Service:
         for service in self.load():

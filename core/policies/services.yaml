@@ -7,93 +7,75 @@
 #   parser      code that turns it into transactions — a key in core/parsers/REGISTRY, or null
 #   status      implemented | needs_parser | planned
 #
-# This doubles as the build-out roadmap: 1 of 8 financial sources has a parser today.
-# Values other than Epic's are declarations from the onboarding form — they need a
-# real sample document before a parser can be built and verified.
+# This doubles as the build-out roadmap: 2 of 8 financial sources have a parser today
+# (Epic, DFCU). The rest are declarations from the onboarding form — they need a real
+# sample document before a parser can be built and verified.
+#
+# Comments here are preserved across edits (activating a parser, etc.) — ServiceManifest
+# uses a round-trip YAML writer, so this documentation is safe to rely on.
 
 services:
 - key: email
   label: Email
-  notes: 'Account: andy.kaminski@krealtyllc.org. Monthly kickoff signal — the Epic
-    Owner Statement PDF arrives here from donotreply@managebuilding.com. Not itself
-    a transaction source; it triggers the epic_property_management ingest.'
+  notes: "Account: andy.kaminski@krealtyllc.org. Monthly kickoff signal — the Epic Owner Statement PDF arrives here from donotreply@managebuilding.com. Not itself a transaction source; it triggers the epic_property_management ingest."
   input_type: email_trigger
   access: portal_login
-  parser: null
   status: planned
-
 - key: epic_property_management
   label: Epic Property Management
   login_url: https://epicpropertymanagement.managebuilding.com
-  notes: 'Buildium-powered owner portal. PDF Owner Statement is the primary monthly
-    source; parser verified against a real statement (reconciles to statement totals).'
+  notes: Buildium-powered owner portal. PDF Owner Statement is the primary monthly source; parser verified against a real statement (reconciles to statement totals).
   input_type: pdf_statement
   access: email_attachment
   parser: buildium_owner_statement
   status: implemented
-
 - key: dfcu_financial_bank
   label: DFCU Financial bank
   login_url: https://dfcufinancial.com
-  notes: 'Bank transactions (mortgage payments + other business activity). Next most
-    valuable source after Epic. Needs a real CSV/PDF export to build the parser.'
+  notes: Bank transactions (mortgage payments + other business activity). CSV export; parser walks the running-balance chain to the penny.
   input_type: csv_export
   access: portal_login
-  parser: null
-  status: needs_parser
-
+  parser: dfcu_financial_bank
+  status: implemented
 - key: first_federal_loan
   label: First Federal loan
   login_url: https://ffl.bank
-  notes: 'Loan servicer. Statement format unknown — needs a real sample. Payment mixes
-    principal/interest/escrow, so the eventual parser must surface the breakdown.'
+  notes: "Loan servicer. Statement format unknown — needs a real sample. Payment mixes principal/interest/escrow, so the eventual parser must surface the breakdown."
   input_type: unknown
   access: portal_login
-  parser: null
   status: planned
-
 - key: shellpoint_mortgage
   label: Shellpoint mortgage
   login_url: https://myaccount.shellpointmtg.com
-  notes: 'Mortgage servicer. Statement format unknown — needs a real sample. Payment
-    mixes principal/interest/escrow.'
+  notes: "Mortgage servicer. Statement format unknown — needs a real sample. Payment mixes principal/interest/escrow."
   input_type: unknown
   access: portal_login
-  parser: null
   status: planned
-
 - key: steadily_insurance
   label: Steadily insurance
   login_url: https://steadily.com
-  notes: 'Landlord insurance. Format unknown — needs a real sample.'
+  notes: "Landlord insurance. Format unknown — needs a real sample."
   input_type: unknown
   access: portal_login
-  parser: null
   status: planned
-
 - key: homeserve_sewer_insurance
   label: HomeServe sewer insurance
   login_url: https://homeserveid.homeserve.com
-  notes: 'Sewer-line insurance. Format unknown — needs a real sample.'
+  notes: "Sewer-line insurance. Format unknown — needs a real sample."
   input_type: unknown
   access: portal_login
-  parser: null
   status: planned
-
 - key: squarespace_domain
   label: Squarespace domain
   login_url: https://account.squarespace.com
-  notes: 'Domain/website billing. Receipts, likely infrequent. Format unknown.'
+  notes: Domain/website billing. Receipts, likely infrequent. Format unknown.
   input_type: unknown
   access: portal_login
-  parser: null
   status: planned
-
 - key: google_workspace
   label: Google Workspace
   login_url: https://admin.google.com
-  notes: 'Business email/software billing. Invoices, likely infrequent. Format unknown.'
+  notes: Business email/software billing. Invoices, likely infrequent. Format unknown.
   input_type: unknown
   access: portal_login
-  parser: null
   status: planned
