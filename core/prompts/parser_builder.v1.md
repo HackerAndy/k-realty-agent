@@ -21,27 +21,36 @@ You have tools: `read_file`, `write_file`, `list_directory`, `run_command`
    def parse(path: Path) -> list[Transaction]: ...
    ```
 
-   - Return one `Transaction` per real transaction. Amount is **positive for
-     money in, negative for money out**.
-   - Set `source_system` to the source key. Fill `property_id`/`unit_id` when
-     the document identifies them (otherwise a sensible default / None).
-   - Skip summary/balance/total/header rows — extract only real transactions.
-   - Raise `ParseError` (import it from `core.parsers.base`) when the layout
-     doesn't match, carrying the extracted text where you have it, so the
-     harness can fall back and a human can inspect.
-   - Never invent or guess values. If a row is unreadable, raise rather than
-     fabricate — this is financial data.
+   The `Transaction` model is **faithful to the source** — read `core/models.py`.
+   It has exactly these fields:
+   - `source_key`: the source key (a string).
+   - `date`, `amount`, `description`: the ONLY normalized fields. Amount is a
+     single signed float — **positive for money in, negative for money out**.
+     Draw all three from the document's own columns; never fabricate them.
+   - `fields`: a `dict[str, str]` that **preserves the source's ACTUAL columns,
+     verbatim** — the exact column names and values as they appear in the
+     document (e.g. a bank's `Account Number / Post Date / Check / Description /
+     Debit / Credit / Status / Balance`). Put every source column here.
+   - `source_uri`: the input path (optional).
+
+   Critical: **invent nothing.** Do NOT add columns the source doesn't have
+   (no "property"/"unit" for a bank). If the source has such columns, they go in
+   `fields` because the source has them — not because the model demands them.
+   Skip summary/balance/total/header rows — extract only real transactions. If a
+   row is unreadable, raise `ParseError` (from `core.parsers.base`, carrying the
+   extracted text) rather than fabricate — this is financial data.
 
 3. **Register it.** Edit `core/parsers/__init__.py` to import your `parse`
    function and add it to `REGISTRY` under the exact source key.
 
 4. **Verify it yourself** with `run_command`:
-   `poetry run python -c "from pathlib import Path; from core.parsers import get_parser; ts = get_parser('<source_key>')(Path('<sample_path>')); print(len(ts)); [print(t.transaction_date, t.amount, t.description) for t in ts]"`
-   - Confirm it returns a non-empty list and the rows look right.
-   - **If the document prints its own totals, reconcile against them** (sum of
-     positive amounts, sum of negatives) — this is the strongest correctness
-     check; the Buildium parser was verified this way to the penny. Iterate
-     until it reconciles.
+   `poetry run python -c "from pathlib import Path; from core.parsers import get_parser; ts = get_parser('<source_key>')(Path('<sample_path>')); print(len(ts)); [print(t.date, t.amount, t.fields) for t in ts[:5]]"`
+   - Confirm it returns a non-empty list, the `fields` match the document's real
+     columns, and the rows look right.
+   - **If the document prints its own totals or a running balance, reconcile
+     against them** — this is the strongest correctness check; the Buildium
+     parser reconciles to statement totals and the DFCU parser walks the running
+     balance chain to the penny. Iterate until it reconciles.
 
 ## Rules
 

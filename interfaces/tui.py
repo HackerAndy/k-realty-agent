@@ -170,42 +170,81 @@ def action_ingest() -> None:
 
 
 def _review_and_activate(source_key: str, source, manifest: ServiceManifest) -> None:
-    """Step-by-step review + approval for a parser built but never activated.
-    Nothing hidden: run it, show exactly what it produces, then a clear yes/no."""
-    from core.parsers import get_parser
-
+    """Entry for a parser built but never activated. Get a document to review
+    against, then hand off to the review loop."""
     print(f"\nReview: {source.label}")
     print(f"A parser was built for this source (core/parsers/{source_key}.py) but is NOT")
     print("active yet, so the harness isn't using it. Review it, then you decide.\n")
-
-    print("Step 1 of 3 — Preview it on a real document (recommended).")
     doc = _ask_document()
-    txns = None
-    if doc is not None:
+    if doc is None:
+        if questionary.confirm(
+            f"No document given. Activate '{source.label}' without previewing?", default=False
+        ).ask():
+            manifest.update(source_key, parser=source_key, status="implemented")
+            print(f"✓ Activated. '{source.label}' now uses this parser automatically.")
+        else:
+            print("Left inactive.")
+        return
+    _review_parser(source_key, source, doc, manifest)
+
+
+def _review_parser(source_key: str, source, doc: Path, manifest: ServiceManifest) -> None:
+    """Preview the parser's output, then loop: Activate / Request changes (the
+    agent revises it) / Leave inactive. This is the debug+approve loop — if the
+    columns are wrong or rows are missing, you say so in plain English and the
+    harness fixes its own parser, re-verifies, and shows you again."""
+    from orchestration.build_parser import revise_parser_for_source, verify_parser
+
+    # Always verify in a fresh subprocess so a just-revised parser is what you see
+    # (not a stale in-process import).
+    verification = verify_parser(source_key, doc)
+    while True:
+        if verification["ok"]:
+            print(f"\n{source.label} — parser output on {doc.name}:")
+            _print_transactions([Transaction.model_validate(t) for t in verification["transactions"]])
+        else:
+            print(f"\nThe parser errored on this document:\n  {verification.get('error', '')}")
+
+        choice = questionary.select(
+            "Review — what would you like to do?",
+            choices=[
+                "Activate this parser (use it from now on)",
+                "Request changes — tell the agent what to fix",
+                "Leave inactive for now",
+            ],
+        ).ask()
+
+        if choice is None or choice.startswith("Leave"):
+            print("Left inactive — it stays flagged ⚠ ACTION NEEDED until you activate it.")
+            return
+        if choice.startswith("Activate"):
+            manifest.update(source_key, parser=source_key, status="implemented")
+            print(f"\n✓ Activated. '{source.label}' now uses this parser automatically.")
+            return
+
+        # Request changes → the harness revises its own parser.
+        feedback = questionary.text(
+            "What's wrong or what should change? Plain English, e.g. 'the columns should "
+            "match the CSV headers exactly', 'it's dropping the fee rows', 'dates are off by "
+            "a day':"
+        ).ask()
+        if not feedback or not feedback.strip():
+            print("No feedback entered — nothing changed.")
+            continue
+        if not ensure_llm_ready():
+            continue
+        print("\nThe agent will revise the parser. Its actions:\n")
         try:
-            txns = get_parser(source_key)(doc)
+            result = revise_parser_for_source(
+                source_key, doc, feedback.strip(), source_label=source.label, on_event=print
+            )
         except Exception as exc:
-            print(f"\n  The parser errored on that document:\n  {exc}")
-            print("  You can still activate it, but a clean preview first is safer.")
-    else:
-        print("  (skipped preview — no document given)")
-
-    print("\nStep 2 of 3 — What it produced:")
-    if txns:
-        _print_transactions(txns)
-        print("  Reconcile these against the document's own totals if it prints any.")
-    else:
-        print("  (nothing to preview)")
-
-    print("\nStep 3 of 3 — Approve.")
-    if questionary.confirm(
-        f"Activate this parser so '{source.label}' ingests use it automatically?",
-        default=False,
-    ).ask():
-        manifest.update(source_key, parser=source_key, status="implemented")
-        print(f"\n✓ Activated. '{source.label}' now has a live parser; future ingests use it.")
-    else:
-        print("\nLeft inactive — it will keep showing as ACTION NEEDED until you activate it.")
+            print(f"\nThe revision run failed: {exc}")
+            continue
+        verification = result["verification"]
+        if result["agent_summary"]:
+            print(f"\nWhat the agent changed:\n{result['agent_summary']}")
+        # loop back: re-preview the revised parser and offer the choice again
 
 
 def _ask_document() -> Path | None:
@@ -296,30 +335,15 @@ def _build_parser_via_agent(source_key: str, source, doc: Path, manifest: Servic
     except Exception as exc:
         print(f"\nThe agent run failed: {exc}")
         return
-
-    verification = result["verification"]
-    print()
-    if not verification["ok"]:
-        print("The agent's parser did not verify:")
-        print(verification.get("error", "(no detail)"))
-        print(f"The code it wrote is at {result['parser_path']} — review it or try again.")
-        return
-
-    txns = [Transaction.model_validate(t) for t in verification["transactions"]]
-    print(f"The agent wrote {result['parser_path']}; it produced {len(txns)} transactions:")
-    _print_transactions(txns)
     if result["agent_summary"]:
         print(f"\nAgent's summary:\n{result['agent_summary']}")
-    if questionary.confirm(
-        f"\nActivate this parser for '{source_key}'? (marks the source implemented so future "
-        "runs use it automatically)",
-        default=False,
-    ).ask():
-        manifest.update(source_key, parser=source_key, status="implemented")
-        print(f"Activated. '{source.label}' now has a parser; future ingests use it.")
-    else:
-        print("Left inactive. The parser code stays in core/parsers/ for review; the source is "
-              "still marked as needing a parser.")
+    if not result["verification"]["ok"]:
+        print("\nThe agent's parser did not verify:")
+        print(result["verification"].get("error", "(no detail)"))
+        print(f"The code it wrote is at {result['parser_path']}.")
+        # Still hand off to the review loop so you can request changes.
+    # Review → activate / request changes / leave (same loop as a pending parser).
+    _review_parser(source_key, source, doc, manifest)
 
 
 def action_view_latest() -> None:

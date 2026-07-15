@@ -43,7 +43,7 @@ def build_parser_for_source(
     )
 
     result = run_agent(task, system, on_event=on_event)
-    verification = _verify(source_key, sample_path)
+    verification = verify_parser(source_key, sample_path)
     return {
         "source_key": source_key,
         "parser_path": f"core/parsers/{source_key}.py",
@@ -53,7 +53,39 @@ def build_parser_for_source(
     }
 
 
-def _verify(source_key: str, sample_path: Path) -> dict:
+def revise_parser_for_source(
+    source_key: str,
+    sample_path: Path,
+    feedback: str,
+    source_label: str = "",
+    on_event: Callable[[str], None] = print,
+) -> dict:
+    """Have the agent REVISE an existing parser per the operator's feedback,
+    then re-verify. This is the debug/maintain half — the operator says what's
+    wrong in plain English, the harness fixes its own code."""
+    system = SYSTEM_PROMPT_PATH.read_text()
+    task = (
+        f"The parser at core/parsers/{source_key}.py already exists, but the operator "
+        f"reviewed its output and wants changes.\n\n"
+        f"OPERATOR FEEDBACK (address this exactly):\n{feedback}\n\n"
+        f"Sample document: {sample_path}\n"
+        f"Read the current parser first, then revise it to address the feedback. Keep it "
+        f"registered under '{source_key}'. Preserve the source's real columns verbatim in "
+        f"Transaction.fields — don't invent columns. Re-verify against the sample before "
+        f"you finish, and say what you changed."
+    )
+    result = run_agent(task, system, on_event=on_event)
+    verification = verify_parser(source_key, sample_path)
+    return {
+        "source_key": source_key,
+        "parser_path": f"core/parsers/{source_key}.py",
+        "agent_summary": result.final_text,
+        "tool_calls": result.tool_calls,
+        "verification": verification,
+    }
+
+
+def verify_parser(source_key: str, sample_path: Path) -> dict:
     """Independently run the newly-written parser in a clean subprocess (fresh
     import, so it also confirms the agent registered it). Returns
     {ok, transactions|error}."""
