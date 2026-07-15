@@ -44,7 +44,7 @@ def _dump_debug_text(source_key: str, extracted_text: str) -> Path:
 
 
 def _persist(source_key: str, transactions: list[Transaction], input_path: Path, method: str, parser: str | None) -> dict:
-    month_key = f"{transactions[0].transaction_date:%Y-%m}" if transactions else "unknown"
+    month_key = f"{transactions[0].date:%Y-%m}" if transactions else "unknown"
     run = {
         "parsed_at": datetime.now(UTC).isoformat(),
         "source_key": source_key,
