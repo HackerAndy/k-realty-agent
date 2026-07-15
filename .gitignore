@@ -12,5 +12,7 @@ venv/
 data/
 *.pdf
 !tests/fixtures/*.pdf
-dfcu_ckecking_20260714csv
-dfcu_savings_20260714csv
+# Financial source documents (bank/statement exports) — never commit real data.
+# The earlier patterns were missing the ".", so they matched nothing.
+*.csv
+!tests/fixtures/*.csv
