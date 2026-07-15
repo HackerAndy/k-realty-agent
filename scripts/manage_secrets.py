@@ -41,6 +41,7 @@ from core.tools.credential_store import (  # noqa: E402
     SECRET_KEY_ENV_VAR,
     CredentialStore,
     CredentialStoreError,
+    ensure_master_key,
     generate_key,
 )
 from core.tools.service_manifest import Service, ServiceManifest, ServiceManifestError  # noqa: E402
@@ -211,19 +212,24 @@ def cmd_setup(_args: argparse.Namespace) -> int:
         print("No services in the manifest. Run 'init --intake <path>' or 'services add' first.")
         return 1
 
+    ensure_master_key()
     store = CredentialStore()
     print(f"About to walk through {len(services)} service(s) from {ServiceManifest().manifest_path}.")
-    print(f"Credentials are encrypted and saved to {store.store_path},")
-    print(f"readable only with the {SECRET_KEY_ENV_VAR} you have set in this shell.")
+    print(f"Credentials are encrypted and saved to {store.store_path}.")
     print("For each service: username/email is shown as you type it (not a")
     print("secret); only the password is hidden.")
 
-    stored = set(store.list_services()) if os.environ.get(SECRET_KEY_ENV_VAR) else set()
+    try:
+        stored = set(store.list_services())
+    except CredentialStoreError:
+        stored = set()
     total = len(services)
     for i, service in enumerate(services, start=1):
         print(f"\n[{i}/{total}] {service.label} ({service.key})")
+        if service.notes:
+            print(f"  {service.notes}")
         if service.login_url:
-            print(f"  {service.login_url}")
+            print(f"  Login: {service.login_url}")
         if service.key in stored:
             action = questionary.select(
                 "Credentials already set for this service.", choices=["Skip", "Update"]
@@ -242,6 +248,17 @@ def cmd_setup(_args: argparse.Namespace) -> int:
 
 
 def cmd_set(args: argparse.Namespace) -> int:
+    ensure_master_key()
+    # Show what this service is, so it's clear which account you're entering.
+    try:
+        service = ServiceManifest().get(args.service_key)
+        print(f"{service.label} ({service.key})")
+        if service.notes:
+            print(f"  {service.notes}")
+        if service.login_url:
+            print(f"  Login: {service.login_url}")
+    except ServiceManifestError:
+        print(f"(note: '{args.service_key}' isn't in the service manifest)")
     credentials = _prompt_credentials(args.service_key)
     if credentials is None:
         print("Cancelled.")
