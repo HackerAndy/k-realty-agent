@@ -93,18 +93,44 @@ def _print_transactions(transactions: list[Transaction]) -> None:
     print(f"{len(transactions)} transactions | money in {money_in:,.2f} | money out {money_out:,.2f}")
 
 
+def _parser_built(source_key: str) -> bool:
+    """True if a parser exists for this source (file written and/or registered)
+    even though the source isn't marked implemented — i.e. built but awaiting
+    the operator's approval."""
+    from core.parsers import REGISTRY
+
+    return (Path("core/parsers") / f"{source_key}.py").exists() or source_key in REGISTRY
+
+
+def pending_approvals(services=None) -> list:
+    """Sources whose parser is built but not yet activated — the harness's
+    outstanding actions that need the operator's explicit yes. Surfaced loudly
+    everywhere so nothing waits in the dark."""
+    services = services if services is not None else ServiceManifest().load()
+    return [s for s in services if s.status != "implemented" and _parser_built(s.key)]
+
+
+def _source_marker(s) -> str:
+    if s.status == "implemented":
+        return "✓ ready"
+    if _parser_built(s.key):
+        return "⚠ ACTION NEEDED — parser built, approve to activate"
+    return "· no parser yet"
+
+
 def _pick_source() -> str | None:
-    """Show every source from the manifest, all selectable. Implemented ones
-    note their format; the rest note their build status so you can see, at
-    the moment of picking, which still need a parser."""
-    services = ServiceManifest().load()
-    choices = []
-    for s in services:
-        if s.status == "implemented":
-            title = f"{s.label}  ({s.input_type}, parser ready)"
-        else:
-            title = f"{s.label}  ({s.status} — no parser yet)"
-        choices.append(questionary.Choice(title=title, value=s.key))
+    """Every source, all selectable, each with an explicit status marker.
+    Approval-needed sources are flagged and sorted to the top — nothing hides."""
+    def rank(s) -> int:
+        if s.status != "implemented" and _parser_built(s.key):
+            return 0  # approval needed → top
+        return 1 if s.status == "implemented" else 2
+
+    services = sorted(ServiceManifest().load(), key=rank)
+    choices = [
+        questionary.Choice(title=f"{s.label:26}  {_source_marker(s)}", value=s.key)
+        for s in services
+    ]
     return questionary.select("Which source do you want to ingest?", choices=choices).ask()
 
 
@@ -114,6 +140,13 @@ def action_ingest() -> None:
         return
     manifest = ServiceManifest()
     source = manifest.get(source_key)
+
+    # Built-but-not-activated → straight to the review/approval flow (no
+    # document ingest yet; the outstanding action is approving the parser).
+    if source.status != "implemented" and _parser_built(source_key):
+        _review_and_activate(source_key, source, manifest)
+        return
+
     doc = _ask_document()
     if doc is None:
         return
@@ -121,6 +154,45 @@ def action_ingest() -> None:
         _ingest_with_parser(source_key, doc)
     else:
         _handle_new_source(source_key, source, doc, manifest)
+
+
+def _review_and_activate(source_key: str, source, manifest: ServiceManifest) -> None:
+    """Step-by-step review + approval for a parser built but never activated.
+    Nothing hidden: run it, show exactly what it produces, then a clear yes/no."""
+    from core.parsers import get_parser
+
+    print(f"\nReview: {source.label}")
+    print(f"A parser was built for this source (core/parsers/{source_key}.py) but is NOT")
+    print("active yet, so the harness isn't using it. Review it, then you decide.\n")
+
+    print("Step 1 of 3 — Preview it on a real document (recommended).")
+    doc = _ask_document()
+    txns = None
+    if doc is not None:
+        try:
+            txns = get_parser(source_key)(doc)
+        except Exception as exc:
+            print(f"\n  The parser errored on that document:\n  {exc}")
+            print("  You can still activate it, but a clean preview first is safer.")
+    else:
+        print("  (skipped preview — no document given)")
+
+    print("\nStep 2 of 3 — What it produced:")
+    if txns:
+        _print_transactions(txns)
+        print("  Reconcile these against the document's own totals if it prints any.")
+    else:
+        print("  (nothing to preview)")
+
+    print("\nStep 3 of 3 — Approve.")
+    if questionary.confirm(
+        f"Activate this parser so '{source.label}' ingests use it automatically?",
+        default=False,
+    ).ask():
+        manifest.update(source_key, parser=source_key, status="implemented")
+        print(f"\n✓ Activated. '{source.label}' now has a live parser; future ingests use it.")
+    else:
+        print("\nLeft inactive — it will keep showing as ACTION NEEDED until you activate it.")
 
 
 def _ask_document() -> Path | None:
@@ -279,11 +351,23 @@ def action_status() -> None:
         print("\nLLM provider: not configured — you'll be prompted on the next agent/AI action")
 
     services = ServiceManifest().load()
+    pending = pending_approvals(services)
+    if pending:
+        print("\n⚠ ACTION NEEDED:")
+        for s in pending:
+            print(f"  • {s.label}: a parser is built but NOT activated — "
+                  f"'Ingest a source' → {s.label} to review + approve it.")
+
     implemented = [s for s in services if s.status == "implemented"]
-    print(f"Sources (core/policies/services.yaml): {len(implemented)} of {len(services)} have a parser.")
+    print(f"\nSources (core/policies/services.yaml): {len(implemented)} of {len(services)} have a parser.")
     for s in services:
-        marker = "✓" if s.status == "implemented" else " "
-        parser = s.parser or "-"
+        if s.status == "implemented":
+            marker = "✓"
+        elif _parser_built(s.key):
+            marker = "⚠"
+        else:
+            marker = " "
+        parser = s.parser or ("(built, awaiting approval)" if _parser_built(s.key) else "-")
         print(f"  [{marker}] {s.key:28} {s.status:13} parser={parser}")
     run = load_latest_parsed()
     print()
@@ -306,17 +390,34 @@ def main() -> int:
     print("and AI extraction send document/code text to the LLM after you consent.\n")
     # First-run setup: make sure the harness has an LLM key (prompt + store if not).
     ensure_llm_ready()
-    actions = {
-        "Ingest a source (document → transactions)": action_ingest,
-        "View latest parsed transactions": action_view_latest,
-        "Manage services & credentials": action_services,
-        "Status": action_status,
-    }
+    base_actions = [
+        ("ingest", action_ingest),
+        ("view", action_view_latest),
+        ("services", action_services),
+        ("status", action_status),
+    ]
     while True:
-        choice = questionary.select("What would you like to do?", choices=[*actions, "Quit"]).ask()
+        # Recompute each loop so indicators clear the instant you act on them.
+        pending = pending_approvals()
+        if pending:
+            names = ", ".join(s.label for s in pending)
+            print(f"⚠ ACTION NEEDED — {len(pending)} parser(s) built and waiting for your "
+                  f"approval: {names}")
+            print("  → choose 'Ingest a source' and pick the flagged source to review + activate.\n")
+        labels = {
+            "ingest": "Ingest a source (document → transactions)"
+                      + (f"   ⚠ {len(pending)} awaiting approval" if pending else ""),
+            "view": "View latest parsed transactions",
+            "services": "Manage services & credentials",
+            "status": "Status",
+        }
+        display_to_func = {labels[key]: func for key, func in base_actions}
+        choice = questionary.select(
+            "What would you like to do?", choices=[*display_to_func, "Quit"]
+        ).ask()
         if choice in (None, "Quit"):
             return 0
-        actions[choice]()
+        display_to_func[choice]()
         print()
 
 
