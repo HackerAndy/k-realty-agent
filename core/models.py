@@ -13,20 +13,26 @@ from pydantic import BaseModel, Field
 
 
 class Transaction(BaseModel):
-    """A single financial transaction extracted from one of K-Realty's
-    financial sources (property manager, bank, loan servicers, insurance,
-    business services). Amount is positive for money in, negative for money
-    out."""
+    """A single financial transaction, kept FAITHFUL to its source.
 
-    entity_id: str
-    source_system: str  # e.g. "epic_property_management", "dfcu_bank"
-    source_uri: str | None = None
-    property_id: str
-    unit_id: str | None = None  # duplex: which of the 2 doors, if applicable
-    transaction_date: datetime
+    `fields` preserves the source's ACTUAL columns, verbatim — a bank export's
+    columns for a bank, a statement's columns for a statement. Nothing is
+    invented: a source that has no "property" or "unit" simply doesn't have
+    those keys.
+
+    The only forced-universal fields are the three that genuinely exist for
+    every financial transaction — `date`, a signed `amount` (positive = money
+    in, negative = money out), and a `description`. These are drawn from the
+    source's own columns for display, sorting, and reconciliation; they are
+    never fabricated. Everything else lives in `fields`.
+    """
+
+    source_key: str            # which source produced this row (e.g. "dfcu_financial_bank")
+    date: datetime
     amount: float
     description: str
-    metadata: dict[str, str] = Field(default_factory=dict)
+    fields: dict[str, str] = Field(default_factory=dict)  # the source's real columns, verbatim
+    source_uri: str | None = None
 
 
 class DecisionStatus(str, Enum):

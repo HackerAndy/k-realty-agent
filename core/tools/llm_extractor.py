@@ -58,10 +58,6 @@ def read_document_text(path: Path) -> str:
     return path.read_text(errors="replace")
 
 
-def _slug(text: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
-
-
 def _parse_date(date_str: str) -> datetime:
     for fmt in ("%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d", "%m-%d-%Y", "%d/%m/%Y"):
         try:
@@ -101,18 +97,20 @@ def extract_transactions(
         )
 
     transactions = []
-    for seq, row in enumerate(rows, start=1):
-        prop = _slug(row.property_name) if row.property_name else source_key
+    for row in rows:
+        # Preserve whatever columns the LLM found; invent nothing.
+        fields = {"Date": row.date, "Description": row.description, "Amount": f"{row.amount:.2f}"}
+        if row.property_name:
+            fields["Property"] = row.property_name
+        if row.unit:
+            fields["Unit"] = row.unit
         transactions.append(
             Transaction(
-                entity_id=f"llm-{source_key}-{seq:03d}",
-                source_system=source_key,
-                property_id=prop,
-                unit_id=row.unit.strip() if row.unit else None,
-                transaction_date=_parse_date(row.date),
+                source_key=source_key,
+                date=_parse_date(row.date),
                 amount=row.amount,
                 description=row.description,
-                metadata={"extraction_method": "llm", "model": MODEL},
+                fields=fields,
             )
         )
     return transactions

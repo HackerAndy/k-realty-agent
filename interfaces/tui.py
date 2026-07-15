@@ -79,18 +79,31 @@ def ensure_llm_ready() -> bool:
 
 
 def _print_transactions(transactions: list[Transaction]) -> None:
-    print(f"\n{'Date':8} {'Property':22} {'Unit':8} {'Amount':>12}  Description")
-    print("-" * 100)
+    """Show the source's OWN columns (from each transaction's `fields`) — never
+    a fixed set. The only normalized number is the money-in/out total, which
+    comes from the universal signed `amount`."""
+    if not transactions:
+        print("(no transactions)")
+        return
+    columns = list(transactions[0].fields.keys()) or ["Date", "Description", "Amount"]
+
+    def cell(t: Transaction, col: str) -> str:
+        return str(t.fields.get(col, ""))
+
+    widths = {
+        col: min(max([len(col)] + [len(cell(t, col)) for t in transactions]), 26)
+        for col in columns
+    }
+    header = "  ".join(f"{col[:widths[col]]:<{widths[col]}}" for col in columns)
+    print("\n" + header)
+    print("-" * len(header))
     for t in transactions:
-        unit = t.unit_id or "-"
-        print(
-            f"{t.transaction_date:%m/%d/%y} {t.property_id:22} {unit:8} "
-            f"{t.amount:>12,.2f}  {t.description[:60]}"
-        )
+        print("  ".join(f"{cell(t, col)[:widths[col]]:<{widths[col]}}" for col in columns))
+    print("-" * len(header))
     money_in = sum(t.amount for t in transactions if t.amount > 0)
     money_out = sum(t.amount for t in transactions if t.amount < 0)
-    print("-" * 100)
     print(f"{len(transactions)} transactions | money in {money_in:,.2f} | money out {money_out:,.2f}")
+    print("(columns above are this source's own, verbatim — only the in/out totals are normalized)")
 
 
 def _parser_built(source_key: str) -> bool:
@@ -314,8 +327,15 @@ def action_view_latest() -> None:
     if run is None:
         print("Nothing parsed yet — parse a statement first.")
         return
-    print(f"Latest parse: {run['month']} (from {run['run_path']})")
-    _print_transactions(transactions_from_run(run))
+    print(f"Latest parse: {run.get('source_key', '?')} {run.get('month', '')} "
+          f"(from {run['run_path']})")
+    try:
+        txns = transactions_from_run(run)
+    except Exception:
+        print("  This saved run is from an older transaction format — re-ingest the source "
+              "to view it in the current column layout.")
+        return
+    _print_transactions(txns)
 
 
 def action_services() -> None:

@@ -23,14 +23,16 @@ def test_parses_columnar_fixture():
     # wrapped cells merge correctly
     assert any("Non-Refundable Pet Deposit" in t.description for t in txns)  # acct over 4 lines
     assert any("Owner Contribution" in t.description for t in txns)  # "Contributio"+"n"
-    oak = [t for t in txns if t.property_id == "456_oak_ave"]  # "456 Oak Av"+"e." and *SPM* stripped
+
+    # FAITHFUL model: the statement's own columns live in fields, verbatim —
+    # nothing invented. This source has Property/Unit because the statement does.
+    rent = next(t for t in txns if "Rent Income" in t.description)
+    assert set(rent.fields) >= {"Date", "Property", "Unit", "Account", "Name", "Memo", "Amount"}
+    assert rent.fields["Unit"] == "1"
+
+    oak = [t for t in txns if t.fields["Property"] == "456 Oak Ave."]  # "456 Oak Av"+"e." and *SPM* stripped
     assert len(oak) == 2
 
-    # units: real units kept, "Property level" -> None
-    rent = next(t for t in txns if "Rent Income" in t.description)
-    assert rent.unit_id == "1"
-    draw = next(t for t in txns if "Owner Draw" in t.description)
-    assert draw.unit_id is None
-
-    # dates parse (single-digit month/day form)
-    assert rent.transaction_date.month == 5 and rent.transaction_date.day == 24
+    # universal normalized fields drawn from the source, not fabricated
+    assert rent.date.month == 5 and rent.date.day == 24
+    assert rent.source_key == "epic_property_management_statement"

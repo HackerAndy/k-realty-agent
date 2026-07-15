@@ -17,10 +17,10 @@ transaction:
   parse() enforces that chain to the penny and raises ParseError on any
   mismatch — a misread/garbled amount cannot slip through silently.
 - Debit is money out, Credit is money in; they are mutually exclusive per row.
-  amount = Credit - Debit (positive for money in, negative for money out).
-- Balance/Status/Check/Account Number are carried into metadata, not invented.
-- A bank statement does not identify a property, so property_id defaults to the
-  source key (matching the LLM-fallback convention); unit_id is None.
+  The normalized `amount` = Credit - Debit (positive in, negative out).
+- All eight source columns are preserved verbatim in Transaction.fields —
+  nothing is invented and nothing bank-specific is dropped. The bank has no
+  concept of "property" or "unit", so those simply aren't present.
 
 On failure (unexpected header, unparseable date, both/neither Debit & Credit
 set, or a broken balance chain) parse() raises ParseError carrying the raw
@@ -120,10 +120,9 @@ def parse(path: Path) -> list[Transaction]:
         amount_c = credit_c - debit_c  # + money in, - money out
         parsed.append(
             {
-                "account": account,
-                "check": check,
+                # the source's actual columns, verbatim (nothing invented)
+                "raw": dict(zip(EXPECTED_HEADER, (account, post_date, check, description, debit, credit, status, balance))),
                 "description": re.sub(r"\s+", " ", description).strip(),
-                "status": status,
                 "balance_c": _cents(balance),
                 "amount_c": amount_c,
                 "date": txn_date,
@@ -155,26 +154,15 @@ def parse(path: Path) -> list[Transaction]:
             )
 
     transactions: list[Transaction] = []
-    account_suffix = re.sub(r"[^0-9A-Za-z]", "", parsed[0]["account"]) or "acct"
-    for seq, r in enumerate(parsed, start=1):
-        metadata = {
-            "account_number": r["account"],
-            "status": r["status"],
-            "balance": f"{r['balance_c'] / 100:.2f}",
-        }
-        if r["check"]:
-            metadata["check_number"] = r["check"]
+    for r in parsed:
         transactions.append(
             Transaction(
-                entity_id=f"dfcu-{account_suffix}-{seq:04d}",
-                source_system=SOURCE_SYSTEM,
+                source_key=SOURCE_SYSTEM,
                 source_uri=str(path),
-                property_id=SOURCE_SYSTEM,
-                unit_id=None,
-                transaction_date=r["date"],
-                amount=r["amount_c"] / 100,
+                date=r["date"],
+                amount=r["amount_c"] / 100,  # + money in, - money out
                 description=r["description"],
-                metadata=metadata,
+                fields=r["raw"],  # the bank's actual columns, exactly as exported
             )
         )
 

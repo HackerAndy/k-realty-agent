@@ -55,10 +55,6 @@ SKIP_PREFIXES = (
 X_TOLERANCE = 3.0  # right-aligned amounts can start slightly left of their header
 
 
-def _slug(text: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
-
-
 def extract_text(pdf_path: Path) -> str:
     """Full text with doubled-glyph (fake-bold) deduplication — used for
     debug dumps and as input to the LLM fallback."""
@@ -126,24 +122,32 @@ def parse_statement(pdf_path: Path) -> list[Transaction]:
     seq = 0
 
     def finalize(row: dict) -> None:
-        nonlocal seq
         property_name = _clean_property(row["cells"][1])
         unit = re.sub(r"\s+", " ", row["cells"][2]).strip()
         account = re.sub(r"\s+", " ", row["cells"][3]).strip()
         name = re.sub(r"\s+", " ", row["cells"][4]).strip()
         memo = re.sub(r"\s+", " ", row["cells"][5]).strip()
         description = " | ".join(part for part in (account, name, memo) if part)
-        seq += 1
+        # The statement's actual detail-table columns, preserved verbatim. This
+        # source DOES have Property/Unit, so they belong here — for a source that
+        # didn't, they simply wouldn't appear.
+        fields = {
+            "Date": f"{row['date']:%m/%d/%Y}",
+            "Property": property_name,
+            "Unit": unit,
+            "Account": account,
+            "Name": name,
+            "Memo": memo,
+            "Amount": f"{row['amount']:.2f}",
+        }
         transactions.append(
             Transaction(
-                entity_id=f"stmt-{_slug(property_name)}-{seq:03d}",
-                source_system=SOURCE_SYSTEM,
+                source_key=SOURCE_SYSTEM,
                 source_uri=str(pdf_path),
-                property_id=_slug(property_name),
-                unit_id=None if unit.replace(" ", "").lower() in ("", "propertylevel") else unit,
-                transaction_date=row["date"],
+                date=row["date"],
                 amount=row["amount"],
                 description=description,
+                fields=fields,
             )
         )
 
