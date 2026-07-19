@@ -29,6 +29,7 @@ calling the orchestration API instead — the menu shouldn't need to change.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -43,13 +44,24 @@ from core.ingest import (
     load_latest_parsed,
     transactions_from_run,
 )
+from core.fetch_ingest import fetch_and_ingest
 from core.models import Transaction
+from core.observability import get_logger
 from core.parsers import ParseError
-from core.tools import llm_provider
+from core.tools import email_oauth, llm_provider, portal_scrapers
 from core.tools.credential_store import ensure_master_key
-from core.tools.service_manifest import ServiceManifest
+from core.tools.service_manifest import FetchConfig, ServiceManifest
 
 MANAGE_SECRETS = Path(__file__).resolve().parent.parent / "scripts" / "manage_secrets.py"
+
+log = get_logger("interfaces.tui")
+
+
+def _report(operation: str, code: str, message: str, remediation: str, exc: Exception) -> None:
+    """Log a TUI-boundary failure via the project standard and show the operator
+    the actionable message. Used for the catch-all handlers that wrap agent,
+    browser, and network operations."""
+    print(f"\n{log.failure(operation=operation, code=code, message=message, remediation=remediation, exc=exc)}")
 
 
 def ensure_llm_ready() -> bool:
@@ -120,10 +132,24 @@ def pending_approvals(services=None) -> list:
     outstanding actions that need the operator's explicit yes. Surfaced loudly
     everywhere so nothing waits in the dark."""
     services = services if services is not None else ServiceManifest().load()
-    return [s for s in services if s.status != "implemented" and _parser_built(s.key)]
+    return [
+        s for s in services
+        if not _is_trigger(s) and s.status != "implemented" and _parser_built(s.key)
+    ]
+
+
+def _is_trigger(s) -> bool:
+    """A trigger source (e.g. an inbox) signals that a document has arrived —
+    it's a delivery channel, not itself a document you parse into transactions.
+    It never has a parser; ingesting it means ingesting what it delivers."""
+    return s.input_type == "email_trigger"
 
 
 def _source_marker(s) -> str:
+    if _is_trigger(s):
+        if s.fetch and email_oauth.is_configured(s.key):
+            return f"✓ auto-fetches inbox → {s.fetch.delivers_to}"
+        return "↳ inbox — set up auto-fetch (pulls its document for you)"
     if s.status == "implemented":
         return "✓ ready"
     if _parser_built(s.key):
@@ -153,6 +179,36 @@ def action_ingest() -> None:
         return
     manifest = ServiceManifest()
     source = manifest.get(source_key)
+
+    # A fetched source (an inbox) pulls its own document — set it up if needed,
+    # then fetch + route to the delivered source's parser. No file prompt.
+    if _is_trigger(source):
+        _fetch_source(source_key, source, manifest)
+        return
+
+    # A source with a login-portal scraper has a second way in. The actual daily
+    # scrape (retrieve()) isn't built yet — for now the portal option is recon
+    # (explore): log in, watch, and see the live page structure.
+    scraper = portal_scrapers.get_scraper(source_key)
+    if scraper is not None:
+        method = questionary.select(
+            f"How do you want to get {source.label}'s data?",
+            choices=[
+                questionary.Choice("Scrape the portal now — pull live transactions (preview before saving)", "scrape"),
+                questionary.Choice("Explore the portal — log in, watch, and see the live pages (recon)", "explore"),
+                questionary.Choice("Provide a document file I already have (PDF/CSV)", "file"),
+                questionary.Choice("Cancel", "cancel"),
+            ],
+        ).ask()
+        if method in (None, "cancel"):
+            return
+        if method == "explore":
+            _explore_portal(source, scraper)
+            return
+        if method == "scrape":
+            _scrape_portal(source, scraper)
+            return
+        # "file" → fall through to the normal document flow below.
 
     # Built-but-not-activated → straight to the review/approval flow (no
     # document ingest yet; the outstanding action is approving the parser).
@@ -239,12 +295,214 @@ def _review_parser(source_key: str, source, doc: Path, manifest: ServiceManifest
                 source_key, doc, feedback.strip(), source_label=source.label, on_event=print
             )
         except Exception as exc:
-            print(f"\nThe revision run failed: {exc}")
+            _report("revise_parser", "TUI_REVISE_FAILED",
+                    "The parser revision run failed.",
+                    "See data/logs/agent.jsonl for detail; try again or adjust your feedback.", exc)
             continue
         verification = result["verification"]
         if result["agent_summary"]:
             print(f"\nWhat the agent changed:\n{result['agent_summary']}")
         # loop back: re-preview the revised parser and offer the choice again
+
+
+def _fetch_source(source_key: str, source, manifest: ServiceManifest) -> None:
+    """A fetched source (inbox): set it up if it isn't yet, then fetch + route.
+    Everything happens here in the TUI — the harness asks, stores, and fetches."""
+    if source.fetch is None or not email_oauth.is_configured(source_key):
+        if not _setup_email_fetch(source_key, source, manifest):
+            return
+        source = manifest.get(source_key)  # reload with the fetch config just saved
+        if not questionary.confirm(f"Fetch from {source.label} now?", default=True).ask():
+            return
+    else:
+        acct = email_oauth.account_email(source_key) or "the connected inbox"
+        choice = questionary.select(
+            f"'{source.label}' is set up — fetches {acct} → {source.fetch.delivers_to}.",
+            choices=["Fetch now", "Reconfigure", "Cancel"],
+        ).ask()
+        if choice in (None, "Cancel"):
+            return
+        if choice == "Reconfigure":
+            if not _setup_email_fetch(source_key, source, manifest):
+                return
+            source = manifest.get(source_key)
+    _run_fetch(source_key, source, manifest)
+
+
+def _setup_email_fetch(source_key: str, source, manifest: ServiceManifest) -> bool:
+    """Walk the operator through connecting an inbox and configuring what to fetch.
+    Returns True if setup completed. The harness is self-documenting here — it
+    tells you exactly what to create in Google Cloud, then does the rest."""
+    print(f"\nSet up automatic fetch for '{source.label}'")
+    print("Instead of handing the harness a file each month, it pulls the document")
+    print("straight from your inbox.\n")
+    print("Google Workspace/Gmail requires OAuth (app passwords were disabled in 2025).")
+    print("One-time Google Cloud setup, if you haven't done it:")
+    print("  1. console.cloud.google.com → create a project (e.g. 'k-realty-agent')")
+    print("  2. APIs & Services → Library → enable 'Gmail API'")
+    print("  3. OAuth consent screen → User type: Internal → add scope gmail.readonly")
+    print("  4. Credentials → Create credentials → OAuth client ID → Desktop app")
+    print("  5. Download the client JSON")
+    print("\nWhat gets stored: the access token goes ENCRYPTED into .secrets/; the search")
+    print("settings go in core/policies/services.yaml (plain text, yours to edit). The")
+    print("scope is read-only — the harness can read/download mail, never send or delete.\n")
+
+    if not questionary.confirm(
+        "Ready to connect now? (A browser opens; you click 'Allow' once.)", default=True
+    ).ask():
+        print("No problem — pick this source again under 'Ingest a source' when ready.")
+        return False
+
+    json_path = questionary.path("Path to the downloaded OAuth client JSON:").ask()
+    if not json_path:
+        return False
+    client_json = Path(json_path).expanduser()
+    if not client_json.exists():
+        print(f"No file at {client_json}")
+        return False
+
+    print("\nOpening a browser for Google consent — approve read-only access...")
+    try:
+        email = email_oauth.run_consent(source_key, client_json)
+    except Exception as exc:
+        _report("email_consent", "TUI_CONSENT_FAILED", "Google consent failed.",
+                "Confirm the client JSON is a Desktop OAuth client and try again.", exc)
+        return False
+    print(f"✓ Connected to {email}. Token stored encrypted in .secrets/.\n")
+
+    # Where does the fetched document go? Only sources with an active parser.
+    doc_sources = [
+        s for s in manifest.load()
+        if not _is_trigger(s) and s.status == "implemented" and s.parser
+    ]
+    if not doc_sources:
+        print("There's no source with an active parser to deliver to yet. Build/activate a")
+        print("parser for the document's source first (e.g. the Epic statement), then set")
+        print("up fetch. Your inbox connection is saved, so you won't repeat that step.")
+        return False
+    delivers_to = questionary.select(
+        "Which source's parser should handle the fetched document?",
+        choices=[questionary.Choice(title=f"{s.label}  ({s.key})", value=s.key) for s in doc_sources],
+    ).ask()
+    if not delivers_to:
+        return False
+
+    print("\nNow narrow the search to the one message that carries the document.")
+    from_address = questionary.text("Sender to match (e.g. donotreply@example.com), or blank:").ask()
+    subject = questionary.text("Subject contains (optional):").ask()
+    suffix = questionary.text("Attachment file type:", default=".pdf").ask()
+    newer = questionary.text("Only search the last N days (optional, e.g. 45):").ask()
+
+    cfg = FetchConfig(
+        provider="gmail",
+        delivers_to=delivers_to,
+        from_address=(from_address.strip() or None) if from_address else None,
+        subject_contains=(subject.strip() or None) if subject else None,
+        attachment_suffix=(suffix.strip() or None) if suffix else None,
+        newer_than_days=(int(newer) if newer and newer.strip().isdigit() else None),
+    )
+    manifest.set_fetch(source_key, cfg)
+    print(f"\n✓ Saved. '{source.label}' now fetches from {email} and routes the attachment")
+    print(f"  to {delivers_to}'s parser. Search settings are in services.yaml under 'fetch:'.")
+    return True
+
+
+def _run_fetch(source_key: str, source, manifest: ServiceManifest) -> None:
+    print(f"\nFetching {source.label} → {source.fetch.delivers_to}...")
+    try:
+        runs = fetch_and_ingest(source_key, manifest=manifest, on_event=print)
+    except Exception as exc:
+        _report("fetch_source", "TUI_FETCH_FAILED", f"Fetch failed for {source.label}.",
+                "See data/logs/agent.jsonl; if it hit the login/OAuth, re-run email setup.", exc)
+        return
+    if not runs:
+        return
+    for run in runs:
+        _print_transactions(transactions_from_run(run))
+        print(f"Ingested via {run['parser']} — saved to {run['run_path']} (stays on this machine).")
+
+
+def _explore_portal(source, scraper) -> None:
+    """Watch-it-happen recon: open the real portal in a visible browser, you log
+    in and navigate to the page you want scraped, then the harness reads that
+    exact screen back to you. Read-only — it looks, it never clicks or changes
+    anything. This is how we see the live pages before building the scraper."""
+    print(f"\nExplore {source.label}'s portal — {scraper.PORTAL_URL}")
+    print("A real browser window will open so you can watch. You log in yourself")
+    print("(handles any 2FA), navigate to the financial page you'd want scraped daily,")
+    print("then press Enter and the harness reads that page's structure — the tables and")
+    print("their columns, any download links. It CLICKS NOTHING and changes nothing; it")
+    print("only looks, so we can build the scraper against the real page, not a guess.\n")
+    if not questionary.confirm("Open the portal in a browser now?", default=True).ask():
+        return
+    try:
+        path = scraper.explore_interactive()
+    except Exception as exc:
+        _report("portal_explore", "TUI_EXPLORE_FAILED", "Portal recon couldn't complete.",
+                "If a browser didn't open, install Chromium: 'poetry run playwright install chromium'.", exc)
+        return
+    _show_portal_structure(path)
+
+
+def _scrape_portal(source, scraper) -> None:
+    """Scrape the live portal into transactions, PREVIEW them, and only save on
+    your approval. The first run is the verification — if signs/rows/columns are
+    off, you say so and I fix the scraper (same spirit as the parser review loop).
+
+    Interactive (headed) for now: you log in and open the report so it's rendered
+    and authenticated, then it scrapes that page. Unattended/headless scraping is
+    a separate, later step — Buildium bounces headless sessions to login."""
+    target = scraper.read_captured_url() or scraper.PORTAL_URL
+    print(f"\nScrape {source.label}'s portal — {target}")
+    print("A browser window opens so you can watch. Log in if needed and open the")
+    print("owner-statement report so its table is visible, then press Enter and it scrapes")
+    print("that page and shows you the result BEFORE saving anything.\n")
+    if not questionary.confirm("Open the portal and scrape?", default=True).ask():
+        return
+    try:
+        transactions = scraper.retrieve_interactive()
+    except Exception as exc:
+        _report("portal_scrape", "TUI_SCRAPE_FAILED", "Portal scrape couldn't complete.",
+                "See the message above and data/logs/agent.jsonl for what the page was.", exc)
+        return
+
+    print(f"\n{source.label} — scraped from the portal:")
+    _print_transactions(transactions)
+    if not questionary.confirm("Do these look right — save them?", default=False).ask():
+        print("Not saved. Tell me what's off (signs, missing/extra rows, wrong columns) "
+              "and I'll fix the scraper.")
+        return
+    from core.fetch_ingest import persist_scraped
+
+    run = persist_scraped(transactions, target)
+    print(f"Saved {run['transaction_count']} transactions to {run['run_path']} (stays on this machine).")
+
+
+def _show_portal_structure(path) -> None:
+    """Print what recon found on the captured page — immediate visibility, then
+    the full structure is on disk for the build step."""
+    try:
+        data = json.loads(Path(path).read_text())
+    except Exception as exc:
+        print(f"Captured, but couldn't read {path}: {exc}")
+        return
+    print(f"\nCaptured page: {data.get('title', '(no title)')}")
+    print(f"URL: {data.get('captured_url', data.get('url', ''))}")
+
+    tables = data.get("tables", [])
+    print(f"\nTables on the page: {len(tables)}")
+    for i, t in enumerate(tables, 1):
+        headers = ", ".join(t.get("headers", [])) or "(no <th> header cells)"
+        print(f"  [{i}] {t.get('row_count', '?')} rows — columns: {headers}")
+
+    downloads = data.get("download_candidates", [])
+    print(f"\nDownload / report links: {len(downloads)}")
+    for d in downloads[:15]:
+        print(f"  • {(d.get('text') or '')[:48]:48}  {d.get('href', '')}")
+
+    print(f"\nFull structure saved to {path}")
+    print("That's the recon. Share that file (it's page structure only — no dollar")
+    print("amounts) and we'll design the scraper against exactly what's there.")
 
 
 def _ask_document() -> Path | None:
@@ -276,7 +534,8 @@ def _ingest_with_parser(source_key: str, doc: Path) -> None:
         try:
             run = ingest_source(source_key, doc, allow_llm_fallback=True)
         except Exception as exc2:
-            print(f"AI fallback failed: {exc2}")
+            _report("ingest_ai_fallback", "TUI_AI_FALLBACK_FAILED", "AI extraction fallback failed.",
+                    "Check ANTHROPIC_API_KEY/network; the extracted text is under data/debug/.", exc2)
             return
     labels = {"llm_fallback": "AI fallback", "deterministic_parser": "built-in parser"}
     _print_transactions(transactions_from_run(run))
@@ -319,7 +578,8 @@ def _extract_now(source_key: str, doc: Path) -> None:
     try:
         run = ingest_via_llm(source_key, doc)
     except Exception as exc:
-        print(f"LLM extraction failed: {exc}")
+        _report("extract_now", "TUI_EXTRACT_FAILED", "LLM extraction failed.",
+                "Check ANTHROPIC_API_KEY/network, or build a deterministic parser instead.", exc)
         return
     _print_transactions(transactions_from_run(run))
     print(f"\nExtracted via LLM — treat as lower-confidence than a verified parser. "
@@ -333,7 +593,8 @@ def _build_parser_via_agent(source_key: str, source, doc: Path, manifest: Servic
     try:
         result = build_parser_for_source(source_key, doc, source_label=source.label, on_event=print)
     except Exception as exc:
-        print(f"\nThe agent run failed: {exc}")
+        _report("build_parser", "TUI_BUILD_PARSER_FAILED", "The parser-building agent run failed.",
+                "See data/logs/agent.jsonl for detail; retry or adjust the sample document.", exc)
         return
     if result["agent_summary"]:
         print(f"\nAgent's summary:\n{result['agent_summary']}")

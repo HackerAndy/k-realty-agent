@@ -23,11 +23,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from core.models import Transaction
+from core.observability import get_logger
 from core.parsers import ParseError, get_parser
 from core.tools.service_manifest import ServiceManifest, ServiceManifestError
 
 DATA_DIR = Path("data/parsed")
 DEBUG_DIR = Path("data/debug")
+
+log = get_logger("core.ingest")
 
 
 class IngestError(RuntimeError):
@@ -67,7 +70,14 @@ def _source(source_key: str, manifest: ServiceManifest | None):
     try:
         return manifest.get(source_key)
     except ServiceManifestError as exc:
-        raise IngestError(f"Unknown source '{source_key}'.") from exc
+        raise IngestError(log.failure(
+            operation="resolve_source",
+            code="UNKNOWN_SOURCE",
+            message=f"Unknown source '{source_key}'.",
+            remediation="Check the key against core/policies/services.yaml.",
+            context={"source_key": source_key},
+            exc=exc,
+        )) from exc
 
 
 def ingest_source(
@@ -83,21 +93,33 @@ def ingest_source(
     """
     source = _source(source_key, manifest)
     if not source.parser or source.status != "implemented":
-        raise IngestError(
-            f"No parser built for '{source_key}' yet (status: {source.status})."
-        )
+        raise IngestError(log.failure(
+            operation="ingest_source",
+            code="NO_PARSER",
+            message=f"No parser built for '{source_key}' yet (status: {source.status}).",
+            remediation="Build/activate a parser for this source in the TUI first.",
+            context={"source_key": source_key, "status": source.status, "parser": source.parser},
+        ))
 
     parser = get_parser(source.parser)
     try:
         transactions = parser(input_path)
     except ParseError as exc:
         dump_path = _dump_debug_text(source_key, exc.extracted_text) if exc.extracted_text else None
+        human = log.failure(
+            operation="ingest_source",
+            code="PARSER_FAILED",
+            message=f"Parser '{source.parser}' could not read {input_path.name}.",
+            remediation=(f"Inspect the extracted text at {dump_path}." if dump_path
+                         else "Review the document layout against the parser.")
+                        + " Or retry with the AI extraction fallback.",
+            context={"source_key": source_key, "parser": source.parser,
+                     "input": str(input_path), "debug_dump": str(dump_path) if dump_path else None},
+            exc=exc,
+        )
         if not allow_llm_fallback:
             if dump_path:
-                raise ParseError(
-                    f"{exc} \nFull extracted text saved to {dump_path} for inspection.",
-                    extracted_text=exc.extracted_text,
-                ) from exc
+                raise ParseError(human, extracted_text=exc.extracted_text) from exc
             raise
         from core.tools.llm_extractor import extract_transactions
 

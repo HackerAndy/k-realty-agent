@@ -17,10 +17,17 @@
 services:
 - key: email
   label: Email
-  notes: "Account: andy.kaminski@krealtyllc.org. Monthly kickoff signal — the Epic Owner Statement PDF arrives here from donotreply@managebuilding.com. Not itself a transaction source; it triggers the epic_property_management ingest."
+  notes: "Account: andy.kaminski@krealtyllc.org. Monthly kickoff signal — the Epic Owner Statement PDF arrives here from donotreply@managebuilding.com. Not a transaction source itself; it FETCHES that PDF and routes it to epic_property_management's parser. Set up the fetch (Gmail OAuth, read-only) via the TUI: Ingest a source → Email."
   input_type: email_trigger
-  access: portal_login
+  access: api
   status: planned
+  fetch:
+    provider: gmail
+    delivers_to: epic_property_management
+    from_address: mail@managebuilding.com
+    subject_contains: Owner's Statement
+    attachment_suffix: .pdf
+    newer_than_days: 45
 - key: epic_property_management
   label: Epic Property Management
   login_url: https://epicpropertymanagement.managebuilding.com

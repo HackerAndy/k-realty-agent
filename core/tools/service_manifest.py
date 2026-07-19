@@ -20,7 +20,11 @@ from pydantic import BaseModel
 from ruamel.yaml import YAML
 from ruamel.yaml.comments import CommentedMap
 
+from core.observability import get_logger
+
 DEFAULT_MANIFEST_PATH = Path("core/policies/services.yaml")
+
+log = get_logger("core.tools.service_manifest")
 
 # Round-trip YAML preserves comments (the header roadmap, any inline notes) and
 # formatting across edits — activating a parser no longer wipes the docs.
@@ -28,7 +32,27 @@ _yaml = YAML()
 _yaml.preserve_quotes = True
 _yaml.width = 4096  # don't hard-wrap long note lines
 
-_FIELD_ORDER = ["key", "label", "login_url", "notes", "input_type", "access", "parser", "status"]
+_FIELD_ORDER = ["key", "label", "login_url", "notes", "input_type", "access", "parser", "status", "fetch"]
+
+
+class FetchConfig(BaseModel):
+    """How a *fetched* source (e.g. an inbox) pulls its document and where that
+    document goes. Non-secret — lives visibly in services.yaml. The secret half
+    (OAuth token) is stored encrypted separately (core/tools/email_oauth.py).
+
+    A fetched source doesn't parse anything itself: it retrieves a document and
+    routes it to `delivers_to`, whose committed parser does the parsing. So the
+    email inbox that carries the Epic PDF has delivers_to=epic_property_management
+    and reuses that source's already-built parser.
+    """
+
+    provider: str = "gmail"  # gmail (OAuth) today; imap (app password) for other providers later
+    delivers_to: str  # source_key whose parser handles the fetched document
+    # Search criteria — narrow to the one message that carries the document:
+    from_address: str | None = None
+    subject_contains: str | None = None
+    attachment_suffix: str | None = None  # e.g. ".pdf" — only pull matching attachments
+    newer_than_days: int | None = None  # bound the search window (Gmail newer_than:)
 
 
 class Service(BaseModel):
@@ -47,6 +71,9 @@ class Service(BaseModel):
     parser: str | None = None
     status: str = "planned"
 
+    # Present only on fetched sources (inboxes, etc.) — see FetchConfig.
+    fetch: FetchConfig | None = None
+
 
 class ServiceManifestError(RuntimeError):
     pass
@@ -55,6 +82,15 @@ class ServiceManifestError(RuntimeError):
 class ServiceManifest:
     def __init__(self, manifest_path: Path = DEFAULT_MANIFEST_PATH):
         self.manifest_path = manifest_path
+
+    def _not_found(self, key: str) -> ServiceManifestError:
+        return ServiceManifestError(log.failure(
+            operation="service_lookup",
+            code="SERVICE_NOT_FOUND",
+            message=f"Service '{key}' not found.",
+            remediation="Check the key against core/policies/services.yaml.",
+            context={"service_key": key, "manifest": str(self.manifest_path)},
+        ))
 
     def _load_doc(self) -> CommentedMap:
         """Load the raw round-trip document (comments intact)."""
@@ -77,7 +113,14 @@ class ServiceManifest:
         entry = CommentedMap()
         for field in _FIELD_ORDER:
             value = getattr(service, field)
-            if value is not None:
+            if value is None:
+                continue
+            if field == "fetch":  # nested model → nested map
+                fetch_map = CommentedMap()
+                for k, v in value.model_dump(exclude_none=True).items():
+                    fetch_map[k] = v
+                entry[field] = fetch_map
+            else:
                 entry[field] = value
         return entry
 
@@ -87,7 +130,13 @@ class ServiceManifest:
     def add(self, service: Service) -> None:
         doc = self._load_doc()
         if any(e.get("key") == service.key for e in doc["services"]):
-            raise ServiceManifestError(f"Service '{service.key}' already exists.")
+            raise ServiceManifestError(log.failure(
+                operation="add_service",
+                code="SERVICE_EXISTS",
+                message=f"Service '{service.key}' already exists.",
+                remediation="Use a different key, or edit/remove the existing service.",
+                context={"service_key": service.key},
+            ))
         doc["services"].append(self._entry(service))
         self._dump_doc(doc)
 
@@ -104,7 +153,22 @@ class ServiceManifest:
                         entry[field] = value
                 self._dump_doc(doc)
                 return
-        raise ServiceManifestError(f"Service '{key}' not found.")
+        raise self._not_found(key)
+
+    def set_fetch(self, key: str, config: FetchConfig) -> None:
+        """Attach/replace a source's fetch config IN PLACE (comments preserved).
+        The routing + search criteria live here visibly; the OAuth token is a
+        separate encrypted secret (core/tools/email_oauth.py)."""
+        doc = self._load_doc()
+        for entry in doc["services"]:
+            if entry.get("key") == key:
+                fetch_map = CommentedMap()
+                for k, v in config.model_dump(exclude_none=True).items():
+                    fetch_map[k] = v
+                entry["fetch"] = fetch_map
+                self._dump_doc(doc)
+                return
+        raise self._not_found(key)
 
     def remove(self, key: str) -> None:
         doc = self._load_doc()
@@ -113,10 +177,10 @@ class ServiceManifest:
                 del doc["services"][i]
                 self._dump_doc(doc)
                 return
-        raise ServiceManifestError(f"Service '{key}' not found.")
+        raise self._not_found(key)
 
     def get(self, key: str) -> Service:
         for service in self.load():
             if service.key == key:
                 return service
-        raise ServiceManifestError(f"Service '{key}' not found.")
+        raise self._not_found(key)

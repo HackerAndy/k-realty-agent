@@ -26,9 +26,13 @@ from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
 
+from core.observability import get_logger
+
 DEFAULT_STORE_PATH = Path(".secrets/credentials.enc")
 MASTER_KEY_PATH = DEFAULT_STORE_PATH.parent / "master.key"
 SECRET_KEY_ENV_VAR = "AGENT_SECRET_KEY"
+
+log = get_logger("core.tools.credential_store")
 
 
 class CredentialStoreError(RuntimeError):
@@ -86,11 +90,16 @@ class CredentialStore:
         try:
             decrypted = fernet.decrypt(encrypted)
         except InvalidToken as exc:
-            raise CredentialStoreError(
-                f"Could not decrypt {self.store_path} — the master key "
-                f"({SECRET_KEY_ENV_VAR} or {MASTER_KEY_PATH}) doesn't match, or the "
-                "file is corrupted."
-            ) from exc
+            raise CredentialStoreError(log.failure(
+                operation="load_store",
+                code="DECRYPT_FAILED",
+                message=f"Could not decrypt {self.store_path} — the master key doesn't match, "
+                        "or the file is corrupted.",
+                remediation=f"Confirm {SECRET_KEY_ENV_VAR} or {MASTER_KEY_PATH} is the key that "
+                            "encrypted this store; restore it or re-enter credentials.",
+                context={"store_path": str(self.store_path), "master_key_path": str(MASTER_KEY_PATH)},
+                exc=exc,
+            )) from exc
         return json.loads(decrypted.decode("utf-8"))
 
     def _save(self, data: dict[str, dict[str, str]]) -> None:

@@ -28,9 +28,12 @@ import yaml
 from pydantic import BaseModel, Field
 
 from core.models import Transaction
+from core.observability import get_logger
 
 PROMPT_PATH = Path("core/prompts/transaction_extraction.v1.yaml")
 MODEL = "claude-opus-4-8"
+
+log = get_logger("core.tools.llm_extractor")
 
 
 class ExtractionError(RuntimeError):
@@ -64,7 +67,14 @@ def _parse_date(date_str: str) -> datetime:
             return datetime.strptime(date_str.strip(), fmt)
         except ValueError:
             continue
-    raise ExtractionError(f"Could not parse extracted date {date_str!r}")
+    raise ExtractionError(log.failure(
+        operation="parse_extracted_date",
+        code="UNPARSEABLE_DATE",
+        message=f"Could not parse extracted date {date_str!r}.",
+        remediation="The LLM returned a date in an unrecognized format; add its format to "
+                    "_parse_date, or fix the row manually.",
+        context={"date_str": date_str},
+    ))
 
 
 def extract_transactions(
@@ -75,26 +85,41 @@ def extract_transactions(
     prompt = yaml.safe_load(PROMPT_PATH.read_text())
     client = anthropic.Anthropic()
 
-    response = client.messages.parse(
-        model=MODEL,
-        max_tokens=16000,
-        system=prompt["system"].format(source_label=source_label, source_key=source_key),
-        messages=[
-            {
-                "role": "user",
-                "content": prompt["user_template"].format(
-                    source_label=source_label, document_text=document_text
-                ),
-            }
-        ],
-        output_format=_Extracted,
-    )
+    try:
+        response = client.messages.parse(
+            model=MODEL,
+            max_tokens=16000,
+            system=prompt["system"].format(source_label=source_label, source_key=source_key),
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt["user_template"].format(
+                        source_label=source_label, document_text=document_text
+                    ),
+                }
+            ],
+            output_format=_Extracted,
+        )
+    except Exception as exc:
+        raise ExtractionError(log.failure(
+            operation="llm_extract",
+            code="LLM_API_ERROR",
+            message=f"The LLM extraction call failed for '{source_key}'.",
+            remediation="Check ANTHROPIC_API_KEY and network; retry, or build a deterministic parser.",
+            context={"source_key": source_key, "model": MODEL, "text_chars": len(document_text)},
+            exc=exc,
+        )) from exc
+
     rows = response.parsed_output.transactions
     if not rows:
-        raise ExtractionError(
-            "LLM extraction returned zero transactions — the document may not contain "
-            "a transaction table, or the text is unusable."
-        )
+        raise ExtractionError(log.failure(
+            operation="llm_extract",
+            code="LLM_ZERO_ROWS",
+            message="LLM extraction returned zero transactions.",
+            remediation="The document may not contain a transaction table, or the text is unusable "
+                        "— inspect the source document.",
+            context={"source_key": source_key, "text_chars": len(document_text)},
+        ))
 
     transactions = []
     for row in rows:

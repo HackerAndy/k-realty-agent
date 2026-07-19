@@ -11,6 +11,7 @@ venv/
 .browser_profiles/
 data/
 *.pdf
+_googleEmail/
 !tests/fixtures/*.pdf
 # Financial source documents (bank/statement exports) — never commit real data.
 # The earlier patterns were missing the ".", so they matched nothing.
