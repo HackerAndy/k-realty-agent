@@ -24,11 +24,12 @@ from core.tools.credential_store import CredentialStore, CredentialStoreError
 LLM_CREDENTIAL_KEY = "llm_provider"
 
 DEFAULT_PROVIDER = "anthropic"
-# provider -> the env var that provider's SDK reads for its API key.
-PROVIDER_ENV = {
-    "anthropic": "ANTHROPIC_API_KEY",
-    # future: "openai": "OPENAI_API_KEY", "google": "GOOGLE_API_KEY", ...
-}
+
+# The providers the harness (orchestration/agent.py) can drive:
+#   anthropic          — the Claude API (needs an api_key)
+#   openai_compatible  — any local/hosted OpenAI-compatible server (OMLX, Ollama,
+#                        LM Studio, vLLM …); needs base_url + model, key optional.
+PROVIDERS = ("anthropic", "openai_compatible")
 
 
 def is_configured() -> bool:
@@ -40,8 +41,22 @@ def is_configured() -> bool:
         return False
 
 
-def store_llm_credential(api_key: str, provider: str = DEFAULT_PROVIDER) -> None:
-    CredentialStore().set(LLM_CREDENTIAL_KEY, provider=provider, api_key=api_key)
+def store_llm_credential(
+    provider: str = DEFAULT_PROVIDER,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    model: str | None = None,
+) -> None:
+    """Store the harness's LLM choice as a secret. `api_key` for anthropic;
+    `base_url`+`model` (key optional) for an openai_compatible server."""
+    fields: dict[str, str] = {"provider": provider}
+    if api_key:
+        fields["api_key"] = api_key
+    if base_url:
+        fields["base_url"] = base_url
+    if model:
+        fields["model"] = model
+    CredentialStore().set(LLM_CREDENTIAL_KEY, **fields)
 
 
 def configured_provider() -> str | None:
@@ -51,17 +66,41 @@ def configured_provider() -> str | None:
         return None
 
 
+def current_config() -> dict | None:
+    """The stored provider config with the api_key masked — for display."""
+    try:
+        cred = dict(CredentialStore().get(LLM_CREDENTIAL_KEY))
+    except CredentialStoreError:
+        return None
+    if cred.get("api_key"):
+        cred["api_key"] = "<stored>"
+    return cred
+
+
 def load_into_env() -> bool:
-    """Load the stored LLM key into the env var its SDK expects. Returns True if
-    a credential was loaded. No-op-safe if nothing is stored."""
+    """Load the stored provider config into the env vars orchestration/agent.py
+    reads (LLM_PROVIDER, plus ANTHROPIC_API_KEY/AGENT_MODEL or OMLX_*). Returns
+    True if a usable provider was loaded. No-op-safe if nothing is stored."""
     try:
         cred = CredentialStore().get(LLM_CREDENTIAL_KEY)
     except CredentialStoreError:
         return False
     provider = cred.get("provider", DEFAULT_PROVIDER)
-    env_var = PROVIDER_ENV.get(provider)
-    api_key = cred.get("api_key")
-    if env_var and api_key:
-        os.environ[env_var] = api_key
+    os.environ["LLM_PROVIDER"] = provider
+
+    if provider in ("anthropic", "claude"):
+        api_key = cred.get("api_key")
+        if not api_key:
+            return False
+        os.environ["ANTHROPIC_API_KEY"] = api_key
+        if cred.get("model"):
+            os.environ["AGENT_MODEL"] = cred["model"]
         return True
-    return False
+
+    # openai_compatible / local — a key isn't always required
+    if cred.get("base_url"):
+        os.environ["OMLX_BASE_URL"] = cred["base_url"]
+    if cred.get("model"):
+        os.environ["OMLX_MODEL"] = cred["model"]
+    os.environ["OMLX_API_KEY"] = cred.get("api_key") or "local"
+    return bool(cred.get("base_url"))

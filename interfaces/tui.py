@@ -65,29 +65,73 @@ def _report(operation: str, code: str, message: str, remediation: str, exc: Exce
 
 
 def ensure_llm_ready() -> bool:
-    """Make sure the harness has an LLM key to work with — loaded from the
-    encrypted store, or prompted for and stored on first run. The LLM key is
-    just another secret; the harness sets itself up so this is the only place
-    the operator ever needs to go. Returns True if an LLM is ready."""
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        return True  # provided via environment (advanced / CI path)
+    """Make sure an LLM provider is set up — loaded from the encrypted store, or
+    configured on first use. The provider choice is just another secret; this is
+    the only place the operator goes. Returns True if an LLM is ready."""
     ensure_master_key()
     if llm_provider.load_into_env():
         return True
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        os.environ.setdefault("LLM_PROVIDER", "anthropic")
+        return True  # provided via environment (advanced / CI path)
 
-    # First run (or key never stored): prompt and store it.
-    print("This harness runs on the Claude API, which isn't set up yet.")
-    print("Paste your Anthropic API key to enable the agent and AI extraction.")
-    print("It's stored encrypted in .secrets/ alongside your other secrets and")
-    print("loaded automatically on future runs — you'll only be asked once.")
-    key = questionary.password("Anthropic API key:").ask()
-    if not key or not key.strip():
-        print("No key entered — agent/AI features stay unavailable this session.\n")
+    print("No LLM provider is set up yet — let's pick one.")
+    return _configure_llm_provider()
+
+
+def _configure_llm_provider() -> bool:
+    """Choose + store the LLM provider (Claude API or a local/OpenAI-compatible
+    server). Stored encrypted in .secrets/ and loaded automatically next run."""
+    choice = questionary.select(
+        "Which LLM should the harness use?",
+        choices=[
+            questionary.Choice("Claude API (Anthropic)", "anthropic"),
+            questionary.Choice("Local / OpenAI-compatible server (OMLX, Ollama, LM Studio, vLLM)", "openai_compatible"),
+            questionary.Choice("Cancel", "cancel"),
+        ],
+    ).ask()
+    if choice in (None, "cancel"):
         return False
-    llm_provider.store_llm_credential(key.strip())
+
+    if choice == "anthropic":
+        print("The key is stored encrypted in .secrets/ alongside your other secrets.")
+        key = questionary.password("Anthropic API key:").ask()
+        if not key or not key.strip():
+            print("No key entered — nothing changed.")
+            return False
+        model = questionary.text("Model:", default="claude-opus-4-8").ask()
+        llm_provider.store_llm_credential("anthropic", api_key=key.strip(), model=(model or "").strip() or None)
+    else:
+        print("Point the harness at any OpenAI-compatible server. A key is optional for local ones.")
+        base_url = questionary.text("Base URL:", default="http://klabss-MacBook-Pro.local:9090/v1").ask()
+        if not base_url or not base_url.strip():
+            print("No base URL entered — nothing changed.")
+            return False
+        model = questionary.text("Model:", default="qwen2.5-coder:7b").ask()
+        key = questionary.password("API key (leave blank if the server needs none):").ask()
+        llm_provider.store_llm_credential(
+            "openai_compatible",
+            api_key=(key or "").strip() or None,
+            base_url=base_url.strip(),
+            model=(model or "").strip() or None,
+        )
+
     llm_provider.load_into_env()
-    print("Saved. You won't be asked again.\n")
+    print("Saved. The harness will use this LLM now (and on future runs).\n")
     return True
+
+
+def action_llm_provider() -> None:
+    """Menu entry: view + change which LLM the harness uses."""
+    config = llm_provider.current_config()
+    if config:
+        print(f"\nCurrent LLM provider: {config.get('provider', '?')}")
+        for k in ("model", "base_url", "api_key"):
+            if config.get(k):
+                print(f"  {k}: {config[k]}")
+    else:
+        print("\nNo LLM provider configured yet.")
+    _configure_llm_provider()
 
 
 def _print_transactions(transactions: list[Transaction]) -> None:
@@ -809,6 +853,7 @@ def main() -> int:
         ("ingest", action_ingest),
         ("view", action_view_latest),
         ("services", action_services),
+        ("llm", action_llm_provider),
         ("status", action_status),
     ]
     while True:
@@ -824,6 +869,7 @@ def main() -> int:
                       + (f"   ⚠ {len(pending)} awaiting approval" if pending else ""),
             "view": "View latest parsed transactions",
             "services": "Manage services & credentials",
+            "llm": "LLM provider (choose Claude API or a local server)",
             "status": "Status",
         }
         display_to_func = {labels[key]: func for key, func in base_actions}
