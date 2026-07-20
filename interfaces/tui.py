@@ -194,7 +194,8 @@ def action_ingest() -> None:
         method = questionary.select(
             f"How do you want to get {source.label}'s data?",
             choices=[
-                questionary.Choice("Scrape the portal now — pull live transactions (preview before saving)", "scrape"),
+                questionary.Choice("Scrape now, I'll log in — interactive (preview before saving)", "scrape"),
+                questionary.Choice("Auto-login and scrape — the harness signs in with stored credentials", "scrape_auto"),
                 questionary.Choice("Explore the portal — log in, watch, and see the live pages (recon)", "explore"),
                 questionary.Choice("Provide a document file I already have (PDF/CSV)", "file"),
                 questionary.Choice("Cancel", "cancel"),
@@ -207,6 +208,9 @@ def action_ingest() -> None:
             return
         if method == "scrape":
             _scrape_portal(source, scraper)
+            return
+        if method == "scrape_auto":
+            _scrape_portal_auto(source, scraper)
             return
         # "file" → fall through to the normal document flow below.
 
@@ -476,6 +480,41 @@ def _scrape_portal(source, scraper) -> None:
 
     run = persist_scraped(transactions, target)
     print(f"Saved {run['transaction_count']} transactions to {run['run_path']} (stays on this machine).")
+
+
+def _scrape_portal_auto(source, scraper) -> None:
+    """Test the unattended path: the harness signs in with your STORED credentials
+    (no manual login) and scrapes. This first run is headed so you can WATCH what
+    Buildium does after the password — log straight in, ask for email verification,
+    or throw a CAPTCHA. That's the fact that decides whether daily-unattended is
+    possible."""
+    print(f"\nAuto-login scrape for {source.label} — {scraper.read_captured_url() or scraper.PORTAL_URL}")
+    print("The harness signs in itself using your stored Epic credentials (you don't type")
+    print("anything). This run opens a VISIBLE window so you can see exactly what happens")
+    print("after the password — a clean login, a 'check your email' step, or a CAPTCHA.")
+    print("Requires your Epic username/password stored (Manage services & credentials).\n")
+    if not questionary.confirm("Run the auto-login scrape now?", default=True).ask():
+        return
+    try:
+        transactions = scraper.retrieve(headless=False)  # headed so you can watch this test
+    except Exception as exc:
+        _report("portal_scrape_auto", "TUI_SCRAPE_AUTO_FAILED",
+                "Auto-login scrape didn't complete.",
+                "Read the message above — it says where the login landed (verification/CAPTCHA/"
+                "bad-credentials). Full detail in data/logs/agent.jsonl.", exc)
+        return
+
+    print(f"\n{source.label} — scraped after automated login:")
+    _print_transactions(transactions)
+    if not questionary.confirm("Do these look right — save them?", default=False).ask():
+        print("Not saved.")
+        return
+    from core.fetch_ingest import persist_scraped
+
+    run = persist_scraped(transactions, scraper.read_captured_url() or scraper.PORTAL_URL)
+    print(f"Saved {run['transaction_count']} transactions to {run['run_path']}.")
+    print("\nThat worked headed. Next step toward truly hands-off: try it headless "
+          "(retrieve(headless=True)) — if that also works, it can run scheduled/unattended.")
 
 
 def _show_portal_structure(path) -> None:

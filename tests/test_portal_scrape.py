@@ -1,9 +1,11 @@
-"""Deterministic parts of the Epic portal scrape.
+"""Deterministic parts of the Epic General Ledger scrape.
 
 The live browser/session parts need a real login and can only be exercised by
-the operator (via the TUI preview). These cover the pure cell→Transaction
-mapping — the risky bit — plus amount/cleanup helpers, using cells shaped like
-what recon found (headers Date/Property/Unit/Account/Name/Memo/Amount/Balance).
+the operator (via the TUI). These cover the pure row->Transaction mapping — the
+risky bit — using rows shaped exactly like the real recon capture
+(data/debug/epic_portal_structure.json, 2026-07-19): account-grouped, with
+section headers, PRIOR BALANCE / Total rows, an unlabeled receipt column, and
+parenthesized negatives.
 """
 
 import pytest
@@ -11,52 +13,56 @@ import pytest
 from core.tools.epic_property_management import (
     PORTAL_SOURCE_KEY,
     _clean,
+    _gl_rows_to_transactions,
     _parse_amount,
-    _rows_to_transactions,
 )
 
-COLS = ["Date", "Property", "Unit", "Account", "Name", "Memo", "Amount", "Balance"]
-
-
-def _row(date, prop, unit, account, name, memo, amount, balance):
-    return [date, prop, unit, account, name, memo, amount, balance]
+# Real-shaped GL rows in DOM order: an account section, prior/total, and txns.
+GL_ROWS = [
+    ["Capital One"],  # account section header
+    ["PRIOR BALANCE", "($5,081.19)"],
+    ["6/24/2026", "1029 E. Granet Ave. *EPM*", "Property level", "Lowes", "Odor Eliminator", "1", "($11.62)", "($5,092.81)"],
+    ["Total Capital One", "($11.62)", "($5,092.81)"],
+    ["Rent Income"],  # next account section header
+    ["6/26/2026", "8095 Prospect Ave. *EPM*", "1", "Unit 1 - Kenneth Davis", "by Kenneth Davis", "", "$1,421.00", "$7,420.21"],
+    ["7/8/2026", "1029 E. Granet Ave. *EPM*", "Lower", "", "Rent Deposit", "", "$2,000.00", "$9,374.46"],
+    ["Total Rent Income", "$3,421.00", "$9,374.46"],
+]
 
 
 def test_parse_amount_signs():
-    assert _parse_amount("$1,234.56") == 1234.56
-    assert _parse_amount("(1,234.56)") == -1234.56
-    assert _parse_amount("-45.00") == -45.0
-    assert _parse_amount("  $0.00 ") == 0.0
+    assert _parse_amount("($11.62)") == -11.62   # parentheses = negative
+    assert _parse_amount("$1,421.00") == 1421.00
+    assert _parse_amount("$2,000.00") == 2000.00
 
 
 def test_clean_drops_epm_markers():
-    assert _clean("8095 Prospect Ave.  *EPM*") == "8095 Prospect Ave."
-    assert _clean("Management  Fees") == "Management Fees"
+    assert _clean("1029 E. Granet Ave. *EPM*") == "1029 E. Granet Ave."
 
 
-def test_rows_to_transactions_faithful_and_filters_nondata_rows():
-    rows = [
-        # a section/header-ish row with no date → skipped
-        ["Additions to cash", "", "", "", "", "", "", ""],
-        _row("05/01/2026", "1029 E. Granet Ave. *EPM*", "1", "Rent Income", "Jane Tenant", "May rent", "$1,500.00", "$1,500.00"),
-        _row("05/03/2026", "8095 Prospect Ave. *EPM*", "2", "Management Fees", "Epic PM", "mgmt", "(150.00)", "$1,350.00"),
-        # subtotal row with no valid date → skipped
-        ["Total from Additions", "", "", "", "", "", "$1,350.00", ""],
-    ]
-    txns = _rows_to_transactions(COLS, rows, "https://portal/report")
+def test_gl_mapping_tags_account_and_filters_nondata_rows():
+    txns = _gl_rows_to_transactions(GL_ROWS, "https://portal/generalLedger")
 
-    assert len(txns) == 2
-    rent, fee = txns
-    assert rent.amount == 1500.00
-    assert fee.amount == -150.00  # parentheses → negative
-    assert rent.source_key == PORTAL_SOURCE_KEY
-    assert rent.fields["Property"] == "1029 E. Granet Ave."  # *EPM* stripped
-    assert rent.description == "Rent Income | Jane Tenant | May rent"
-    assert rent.fields["Amount"] == "1500.00"
-    # Balance is shown by the portal but not kept as a field (matches PDF parser)
-    assert "Balance" not in rent.fields
+    # 3 transactions; section headers, PRIOR BALANCE and Total rows all skipped
+    assert len(txns) == 3
+    lowes, rent1, rent2 = txns
+
+    # account comes from the section header above each transaction
+    assert lowes.fields["Account"] == "Capital One"
+    assert rent1.fields["Account"] == "Rent Income"
+    assert rent2.fields["Account"] == "Rent Income"
+
+    # signs, cleanup, and faithful columns
+    assert lowes.amount == -11.62
+    assert rent1.amount == 1421.00
+    assert lowes.fields["Property"] == "1029 E. Granet Ave."  # *EPM* stripped
+    assert lowes.fields["Name"] == "Lowes"
+    assert lowes.fields["Description"] == "Odor Eliminator"
+    assert lowes.source_key == PORTAL_SOURCE_KEY
+    assert rent2.fields["Name"] == ""  # empty Name preserved, not shifted
+    assert rent2.fields["Description"] == "Rent Deposit"
 
 
-def test_rows_to_transactions_raises_on_missing_columns():
-    with pytest.raises(RuntimeError, match="missing expected columns"):
-        _rows_to_transactions(["Date", "Amount"], [], "uri")
+def test_gl_mapping_returns_empty_when_no_transactions():
+    rows = [["Advertising"], ["PRIOR BALANCE", "$481.24"], ["Total Advertising", "$0.00", "$481.24"]]
+    assert _gl_rows_to_transactions(rows, "uri") == []

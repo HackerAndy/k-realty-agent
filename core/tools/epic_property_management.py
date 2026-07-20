@@ -30,6 +30,7 @@ from core.models import Transaction
 from core.observability import get_logger
 from core.tools import buildium_owner_portal
 from core.tools.browser_session import bootstrap_login, launch
+from core.tools.credential_store import CredentialStoreError
 
 log = get_logger("core.tools.epic_property_management")
 
@@ -38,13 +39,20 @@ SERVICE_KEY = "epic_property_management"
 # emailed-PDF data (same columns, different retrieval method).
 PORTAL_SOURCE_KEY = "epic_property_management_portal"
 PORTAL_URL = "https://epicpropertymanagement.managebuilding.com/Manager"
+# The scrape target: the General Ledger — directly URL-navigable (unlike the
+# owner-statement report, which redirects when opened cold), more current than
+# the monthly statement, and it carries per-row receipt links.
+GENERAL_LEDGER_URL = "https://epicpropertymanagement.managebuilding.com/manager/app/accounting/generalLedger"
 RECON_PATH = Path("data/debug/epic_portal_structure.json")
 SCRAPE_DEBUG_PATH = Path("data/debug/epic_scrape_debug.json")
 
-# The detail-transactions table's columns (confirmed by recon 2026-07-16). Same
-# as the PDF statement's detail table; Balance is a running total we don't keep
-# as a field (it's derivable), matching the PDF parser's faithful field set.
-DETAIL_HEADERS = ["Date", "Property", "Unit", "Account", "Name", "Memo", "Amount"]
+# The General Ledger table (confirmed by recon 2026-07-19). It has a header row
+# of 7 <th> but data rows of 8 cells — an UNLABELED receipt column sits at index
+# 5 (shows an attachment count / link, empty when none). Fixed positions:
+GL_TH_MARKERS = ("DATE (CASH BASIS)", "BALANCE")  # identify the GL table by these headers
+GL_IDX = {"Date": 0, "Property": 1, "Unit": 2, "Name": 3, "Description": 4,
+          "Receipt": 5, "Amount": 6, "Balance": 7}
+GL_MIN_CELLS = 8
 _DATE_RE = re.compile(r"^\d{1,2}/\d{1,2}/\d{4}$")
 _AMOUNT_RE = re.compile(r"^\(?-?\$?[\d,]+\.\d{2}\)?$")
 
@@ -62,7 +70,7 @@ def bootstrap() -> None:
     bootstrap_login(SERVICE_KEY, PORTAL_URL)
 
 
-def explore(url: str = PORTAL_URL, out_path: Path = RECON_PATH) -> Path:
+def explore(url: str = GENERAL_LEDGER_URL, out_path: Path = RECON_PATH) -> Path:
     """Reconnaissance, NOT extraction — the "go look before writing selectors" step.
 
     After bootstrap() has established a session, navigate to `url` and dump the
@@ -76,19 +84,25 @@ def explore(url: str = PORTAL_URL, out_path: Path = RECON_PATH) -> Path:
     """
     with launch(SERVICE_KEY, headless=True) as page:
         page.goto(url, wait_until="domcontentloaded")
+        # Let the Angular SPA settle: either the login form or the data table.
+        try:
+            page.wait_for_selector("input[type='password'], table tr", timeout=25000)
+        except Exception:
+            pass
         # Bounced back to the login form → the persisted session isn't valid.
         if page.get_by_label("Email address").count():
             raise RuntimeError(
                 "Not logged in (hit the login form). Run bootstrap() first to "
                 "establish a session, then explore() again."
             )
+        page.wait_for_timeout(2500)  # async rows load after the table shell
         structure = _dump_structure(page)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(structure, indent=2))
     return out_path
 
 
-def explore_interactive(url: str = PORTAL_URL, out_path: Path = RECON_PATH) -> Path:
+def explore_interactive(url: str = GENERAL_LEDGER_URL, out_path: Path = RECON_PATH) -> Path:
     """Headed recon you can WATCH — the "step me through the screens" flow.
 
     Opens a visible browser, you log in (handles 2FA) and navigate to the page
@@ -119,9 +133,19 @@ def _dump_structure(page) -> dict:
     )
     tables = page.eval_on_selector_all(
         "table",
-        "els => els.map(t => ({"
-        "headers: Array.from(t.querySelectorAll('th')).map(h => (h.innerText||'').trim()).filter(Boolean),"
-        "row_count: t.querySelectorAll('tr').length}))",
+        """els => els.map(t => {
+            const rows = Array.from(t.querySelectorAll('tr'));
+            const cells = tr => Array.from(tr.querySelectorAll('th,td'))
+                .map(c => (c.innerText||'').replace(/\\s+/g,' ').trim());
+            return {
+                th_headers: Array.from(t.querySelectorAll('th')).map(h => (h.innerText||'').trim()).filter(Boolean),
+                header_row: rows.length ? cells(rows[0]) : [],
+                sample_rows: rows.slice(1, 40).map(cells),
+                row_count: rows.length,
+                row_links: Array.from(t.querySelectorAll('a[href]'))
+                    .map(a => ({text:(a.innerText||'').trim().slice(0,40), href:a.href})).slice(0, 8),
+            };
+        })""",
     )
     download_hint = ("download", "statement", "export", "report", "ledger", "financ")
     downloads = [
@@ -164,25 +188,26 @@ def _clean(raw: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"\*[^*]*\*", "", raw or "")).strip()
 
 
-def _detail_table(page) -> dict | None:
-    """Find the detail-transactions table by its header cells and return
-    {cols, rows} — cols in DOM order, rows as lists of cell text. Read-only."""
+def _gl_table(page) -> list[list[str]] | None:
+    """Find the General Ledger table by its header cells and return ALL rows in
+    DOM order (each a list of cell text). Order matters — the account each
+    transaction belongs to comes from the section-header row above it. Read-only."""
     return page.evaluate(
-        """(expected) => {
+        """(markers) => {
             const norm = s => (s || '').replace(/\\s+/g, ' ').trim();
             for (const t of document.querySelectorAll('table')) {
                 const ths = Array.from(t.querySelectorAll('th')).map(h => norm(h.innerText));
-                if (!expected.every(e => ths.includes(e))) continue;
+                if (!markers.every(m => ths.includes(m))) continue;
                 const rows = [];
                 for (const tr of t.querySelectorAll('tr')) {
-                    const tds = Array.from(tr.querySelectorAll('td')).map(d => norm(d.innerText));
-                    if (tds.length) rows.push(tds);
+                    const cells = Array.from(tr.querySelectorAll('th,td')).map(c => norm(c.innerText));
+                    if (cells.length) rows.push(cells);
                 }
-                return {cols: ths, rows};
+                return rows;
             }
             return null;
         }""",
-        DETAIL_HEADERS,
+        list(GL_TH_MARKERS),
     )
 
 
@@ -211,8 +236,8 @@ def _scrape_page(page, target: str) -> list[Transaction]:
     """Extract transactions from a live, rendered page. Shared by the interactive
     and headless entry points. On failure, dumps diagnostics so we can see what
     the page actually was."""
-    table = _detail_table(page)
-    if table is None:
+    rows = _gl_table(page)
+    if not rows:
         diagnostics = _diagnostics(page, target)
         SCRAPE_DEBUG_PATH.parent.mkdir(parents=True, exist_ok=True)
         SCRAPE_DEBUG_PATH.write_text(json.dumps(diagnostics, indent=2))
@@ -220,24 +245,26 @@ def _scrape_page(page, target: str) -> list[Transaction]:
             operation="portal_scrape",
             code="SCRAPE_TABLE_NOT_FOUND",
             message=(
-                "Couldn't find the detail table on this page. What the page actually was: "
+                "Couldn't find the General Ledger table on this page. What the page actually was: "
                 f"title={diagnostics['title']!r}, final_url={diagnostics['final_url']}, "
                 f"login_form={diagnostics['login_form']}, tables={diagnostics['table_summary']}."
             ),
-            remediation=f"See the full dump at {SCRAPE_DEBUG_PATH}. If login_form is true the "
-                        "session wasn't authenticated; if tables is empty the report hadn't rendered.",
+            remediation=f"See the full dump at {SCRAPE_DEBUG_PATH}. If login_form is true the session "
+                        "wasn't authenticated; if tables is empty the ledger hadn't rendered (set the "
+                        "filters and Search first).",
             context={"source_key": SERVICE_KEY, "requested_url": target,
                      "final_url": diagnostics["final_url"], "login_form": diagnostics["login_form"],
                      "table_count": diagnostics["table_count"], "debug_dump": str(SCRAPE_DEBUG_PATH)},
         ))
-    transactions = _rows_to_transactions(table["cols"], table["rows"], target)
+    transactions = _gl_rows_to_transactions(rows, target)
     if not transactions:
         raise RuntimeError(log.failure(
             operation="portal_scrape",
             code="SCRAPE_ZERO_ROWS",
-            message="Found the detail table but extracted zero transaction rows.",
-            remediation="Re-capture with 'Explore the portal' so we can adjust the row mapping.",
-            context={"source_key": SERVICE_KEY, "requested_url": target, "columns": table["cols"]},
+            message="Found the General Ledger table but extracted zero transaction rows.",
+            remediation="The ledger may be showing a period with no activity — set the date range and "
+                        "Search, then scrape. Or re-capture with 'Explore the portal' so we can adjust.",
+            context={"source_key": SERVICE_KEY, "requested_url": target, "table_rows": len(rows)},
         ))
     return transactions
 
@@ -249,74 +276,129 @@ def retrieve_interactive(url: str | None = None) -> list[Transaction]:
     session/headless problems — the page is authenticated and fully rendered
     because you just loaded it. This is the path that proves the extraction is
     right before we tackle unattended automation."""
-    target = url or read_captured_url() or PORTAL_URL
+    target = url or GENERAL_LEDGER_URL
     with launch(SERVICE_KEY, headless=False) as page:
         page.goto(target, wait_until="domcontentloaded")
         input(
-            "\nA browser window is open. Log in if needed, open the owner-statement report "
-            "so its transactions table is visible, then press Enter here to scrape it... "
+            "\nA browser window is open on the General Ledger. Log in if needed, set the date "
+            "range/filters and click Search so the ledger is populated, then press Enter here "
+            "to scrape it... "
         )
         return _scrape_page(page, target)
 
 
-def retrieve(url: str | None = None) -> list[Transaction]:
-    """Unattended (headless) scrape — the daily-automation target. Currently
-    blocked: Buildium bounces the headless session to the login page (the headed
-    login doesn't carry over, and/or headless is refused). Kept as the goal;
-    use retrieve_interactive() until the session problem is solved."""
-    target = url or read_captured_url() or PORTAL_URL
-    with launch(SERVICE_KEY, headless=True) as page:
+def _login(page) -> None:
+    """Sign in with STORED Epic credentials, then record where the login landed —
+    so an email-verification or challenge screen is visible in the log."""
+    try:
+        buildium_owner_portal.login(page, PORTAL_URL, SERVICE_KEY)
+    except CredentialStoreError as exc:
+        raise RuntimeError(log.failure(
+            operation="portal_login",
+            code="SCRAPE_NO_CREDENTIALS",
+            message="No Epic credentials stored to log in with.",
+            remediation="Store your Epic username/password first: Manage services & credentials "
+                        "→ epic_property_management.",
+            context={"source_key": SERVICE_KEY},
+            exc=exc,
+        )) from exc
+    except buildium_owner_portal.BuildiumLoginError as exc:
+        raise RuntimeError(log.failure(
+            operation="portal_login",
+            code="SCRAPE_LOGIN_INCOMPLETE",
+            message=f"Automated login didn't complete — landed on {page.title()!r}. Likely an "
+                    "email-verification step, a CAPTCHA, or a bot-check after the password.",
+            remediation="If it's the 'check your email' step, we can automate that next (Gmail "
+                        "reading already works). If it's a CAPTCHA/bot-block, headless login is out.",
+            context={"source_key": SERVICE_KEY, "final_url": page.url, "title": page.title()},
+            exc=exc,
+        )) from exc
+    # Record the post-login landing — reveals a verification/challenge page if one appeared.
+    log.event(
+        operation="portal_login",
+        code="POST_LOGIN_STATE",
+        message=f"After automated login, page is {page.title()!r}.",
+        context={"source_key": SERVICE_KEY, "url": page.url,
+                 "still_on_login": bool(page.get_by_label("Email address").count())},
+    )
+
+
+def retrieve(url: str | None = None, headless: bool = True) -> list[Transaction]:
+    """Log in with stored credentials, then scrape the report — the unattended
+    (no-human) path. Works headless (the daily-automation target) or headed
+    (watch it happen / dodge headless bot-detection, e.g. via xvfb on a Pi).
+
+    If a session already persists, the login step is skipped. If Buildium answers
+    the password with email verification or a CAPTCHA, that surfaces in the log
+    (SCRAPE_LOGIN_INCOMPLETE, or a post-login page still showing the login form)
+    so we learn whether the automatable email step is what's in the way."""
+    target = url or GENERAL_LEDGER_URL
+    with launch(SERVICE_KEY, headless=headless) as page:
         page.goto(target, wait_until="domcontentloaded")
-        if page.get_by_label("Email address").count():
-            raise RuntimeError(log.failure(
-                operation="portal_scrape_headless",
-                code="SCRAPE_NOT_AUTHENTICATED",
-                message="Headless scrape bounced to Buildium's login page — not authenticated.",
-                remediation="Unattended scraping isn't wired up yet; use the interactive scrape.",
-                context={"source_key": SERVICE_KEY, "requested_url": target, "final_url": page.url},
-            ))
-        try:  # the report renders its table client-side — wait for it
-            page.wait_for_selector("table th", timeout=20000)
+        # The Angular SPA may still be redirecting to login OR rendering content —
+        # wait until one actually appears before deciding whether to log in. (The
+        # old code checked too early, saw neither, and skipped login entirely.)
+        try:
+            page.wait_for_selector("input[type='password'], table th", timeout=20000)
         except Exception:
             pass
+        if page.get_by_label("Email address").count():  # genuinely not logged in → sign in
+            _login(page)
+            page.goto(target, wait_until="domcontentloaded")
+            try:
+                page.wait_for_selector("table th", timeout=20000)
+            except Exception:
+                pass
         return _scrape_page(page, target)
 
 
-def _rows_to_transactions(cols: list[str], rows: list[list[str]], source_uri: str) -> list[Transaction]:
-    """Pure mapping: table cells → faithful Transactions. Rows without a date in
-    the Date column (section headers, subtotals, blanks) are skipped. Kept
-    separate from the browser so it's unit-testable against real captured cells."""
-    idx = {c: cols.index(c) for c in DETAIL_HEADERS if c in cols}
-    if not all(c in idx for c in DETAIL_HEADERS):
-        missing = [c for c in DETAIL_HEADERS if c not in idx]
-        raise RuntimeError(f"Detail table is missing expected columns: {missing}. Found: {cols}")
+def _gl_rows_to_transactions(rows: list[list[str]], source_uri: str) -> list[Transaction]:
+    """Pure mapping: General Ledger rows → faithful Transactions. The GL is grouped
+    by account, so we walk rows IN ORDER and track the current account (from its
+    section-header row) to stamp each transaction with the GL account it posts to.
 
+    Row kinds:
+      • transaction  → a date in cell 0 (8 cells: Date/Property/Unit/Name/Description/
+                       Receipt/Amount/Balance). Emitted, tagged with current account.
+      • section head → a single non-empty cell that's an account name. Sets the account.
+      • PRIOR BALANCE / Total <account> / blank → skipped (don't change the account).
+
+    Kept browser-free so it's unit-testable against real captured rows."""
     transactions: list[Transaction] = []
+    current_account = ""
     for cells in rows:
-        if len(cells) <= max(idx.values()):
-            continue
-        date_cell = cells[idx["Date"]].strip()
-        amount_cell = cells[idx["Amount"]].strip()
-        if not _DATE_RE.match(date_cell) or not _AMOUNT_RE.match(amount_cell):
-            continue  # section header / subtotal / blank row — not a transaction
-        account, name, memo = _clean(cells[idx["Account"]]), _clean(cells[idx["Name"]]), _clean(cells[idx["Memo"]])
-        description = " | ".join(part for part in (account, name, memo) if part)
-        transactions.append(
-            Transaction(
-                source_key=PORTAL_SOURCE_KEY,
-                source_uri=source_uri,
-                date=datetime.strptime(date_cell, "%m/%d/%Y"),
-                amount=_parse_amount(amount_cell),
-                description=description,
-                fields={
-                    "Date": date_cell,
-                    "Property": _clean(cells[idx["Property"]]),
-                    "Unit": _clean(cells[idx["Unit"]]),
-                    "Account": account,
-                    "Name": name,
-                    "Memo": memo,
-                    "Amount": f"{_parse_amount(amount_cell):.2f}",
-                },
+        first = cells[0].strip() if cells else ""
+        nonempty = [c for c in cells if c.strip()]
+
+        if _DATE_RE.match(first):  # transaction row
+            if len(cells) < GL_MIN_CELLS:
+                continue
+            amount_cell = cells[GL_IDX["Amount"]].strip()
+            if not _AMOUNT_RE.match(amount_cell):
+                continue
+            name = _clean(cells[GL_IDX["Name"]])
+            desc = _clean(cells[GL_IDX["Description"]])
+            description = " | ".join(part for part in (current_account, name, desc) if part)
+            transactions.append(
+                Transaction(
+                    source_key=PORTAL_SOURCE_KEY,
+                    source_uri=source_uri,
+                    date=datetime.strptime(first, "%m/%d/%Y"),
+                    amount=_parse_amount(amount_cell),
+                    description=description,
+                    fields={
+                        "Date": first,
+                        "Account": current_account,  # the GL account (from the section header)
+                        "Property": _clean(cells[GL_IDX["Property"]]),
+                        "Unit": _clean(cells[GL_IDX["Unit"]]),
+                        "Name": name,
+                        "Description": desc,
+                        "Amount": f"{_parse_amount(amount_cell):.2f}",
+                    },
+                )
             )
-        )
+        elif first.upper().startswith("PRIOR BALANCE") or first.startswith("Total "):
+            continue  # subtotal / carried balance — not a transaction, keep the account
+        elif len(nonempty) == 1:
+            current_account = first  # account section header
     return transactions
