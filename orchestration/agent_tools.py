@@ -66,6 +66,27 @@ def list_directory(path: str = ".") -> str:
     return "\n".join(entries) or "(empty)"
 
 
+def read_logs(level: str = "error", limit: int = 15) -> str:
+    """Read the harness's own recent structured failure records (from
+    core/observability.py) — so the agent can diagnose what went wrong and fix
+    it, instead of running blind. Each record carries the component/operation, a
+    stable code, the context, the underlying cause, and a remediation hint."""
+    from core.observability import format_record, read_recent
+
+    records = read_recent(limit=limit, level=(None if level == "all" else level))
+    if not records:
+        return "No log records found."
+    lines = []
+    for r in records:
+        lines.append(format_record(r))
+        if r.get("remediation"):
+            lines.append(f"    remediation: {r['remediation']}")
+        ctx = r.get("context")
+        if ctx:
+            lines.append(f"    context: {ctx}")
+    return "\n".join(lines)
+
+
 def run_command(command: str) -> str:
     """Run a shell command from the repo root. Timeboxed; stdout+stderr are
     captured and truncated. This is how the agent tests the code it writes."""
@@ -128,6 +149,20 @@ TOOL_SCHEMAS = [
             "required": ["command"],
         },
     },
+    {
+        "name": "read_logs",
+        "description": "Read the harness's OWN recent structured failure records (component, "
+        "operation, code, context, cause, remediation). Use this to diagnose why something failed "
+        "and decide how to fix it — the harness logs every deterministic failure here.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "level": {"type": "string", "description": "'error' (default), 'warning', or 'all'."},
+                "limit": {"type": "integer", "description": "How many recent records (default 15)."},
+            },
+            "required": [],
+        },
+    },
 ]
 
 _DISPATCH = {
@@ -135,6 +170,7 @@ _DISPATCH = {
     "write_file": write_file,
     "list_directory": list_directory,
     "run_command": run_command,
+    "read_logs": read_logs,
 }
 
 

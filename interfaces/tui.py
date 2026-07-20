@@ -191,17 +191,28 @@ def action_ingest() -> None:
     # (explore): log in, watch, and see the live page structure.
     scraper = portal_scrapers.get_scraper(source_key)
     if scraper is not None:
-        method = questionary.select(
-            f"How do you want to get {source.label}'s data?",
-            choices=[
-                questionary.Choice("Scrape now, I'll log in — interactive (preview before saving)", "scrape"),
-                questionary.Choice("Auto-login and scrape — the harness signs in with stored credentials", "scrape_auto"),
-                questionary.Choice("Explore the portal — log in, watch, and see the live pages (recon)", "explore"),
-                questionary.Choice("Provide a document file I already have (PDF/CSV)", "file"),
-                questionary.Choice("Cancel", "cancel"),
-            ],
-        ).ask()
+        import core.scrapers as scrapers
+
+        choices = [
+            questionary.Choice("Build/rebuild the scraper — demonstrate once, the harness writes it", "build"),
+        ]
+        if scrapers.has_scraper(source_key):
+            choices.append(questionary.Choice("Run the harness-built scraper", "run_built"))
+        choices += [
+            questionary.Choice("Scrape now, I'll log in — interactive (preview before saving)", "scrape"),
+            questionary.Choice("Auto-login and scrape — the harness signs in with stored credentials", "scrape_auto"),
+            questionary.Choice("Explore the portal — log in, watch, and see the live pages (recon)", "explore"),
+            questionary.Choice("Provide a document file I already have (PDF/CSV)", "file"),
+            questionary.Choice("Cancel", "cancel"),
+        ]
+        method = questionary.select(f"How do you want to get {source.label}'s data?", choices=choices).ask()
         if method in (None, "cancel"):
+            return
+        if method == "build":
+            _build_scraper(source, scraper)
+            return
+        if method == "run_built":
+            _run_built_scraper(source)
             return
         if method == "explore":
             _explore_portal(source, scraper)
@@ -480,6 +491,66 @@ def _scrape_portal(source, scraper) -> None:
 
     run = persist_scraped(transactions, target)
     print(f"Saved {run['transaction_count']} transactions to {run['run_path']} (stays on this machine).")
+
+
+def _build_scraper(source, scraper) -> None:
+    """The directive path: the harness's OWN agent writes the scraper from your
+    demonstration. A browser opens, you show it how to reach your data once, and
+    the embedded agent authors + self-verifies core/scrapers/<key>.py."""
+    if not ensure_llm_ready():
+        return
+    portal_url = (source.login_url or getattr(scraper, "GENERAL_LEDGER_URL", None)
+                  or getattr(scraper, "PORTAL_URL", ""))
+    if not portal_url:
+        print("No portal URL known for this source (set login_url in services.yaml).")
+        return
+    print(f"\nThe harness will build a scraper for {source.label} from your demonstration.")
+    print("A browser opens: log in, set your filters/dropdowns, and click Generate/Search so")
+    print("YOUR data is on screen, then press Enter. The agent captures what happened (the")
+    print("data request it fired + your clicks) and writes the scraper itself.\n")
+    print("This sends the captured page/request text to the LLM (the agent). Proceed?")
+    if not questionary.confirm("Start the demonstration + build?", default=True).ask():
+        return
+    from orchestration.build_scraper import build_scraper_for_source
+
+    print("\nThe agent's actions:\n")
+    try:
+        result = build_scraper_for_source(source.key, portal_url, source_label=source.label, on_event=print)
+    except Exception as exc:
+        _report("build_scraper", "TUI_BUILD_SCRAPER_FAILED", "The scraper-building run failed.",
+                "See data/logs/agent.jsonl; you can retry the demonstration.", exc)
+        return
+    if result["agent_summary"]:
+        print(f"\nAgent's summary:\n{result['agent_summary']}")
+    if result["verification"]["ok"]:
+        print(f"\n✓ Scraper written + registered: {result['scraper_path']}")
+        print("Review it, then choose 'Run the harness-built scraper' to try it. Activating it as "
+              "this source's method stays your call.")
+    else:
+        print(f"\nThe scraper didn't verify: {result['verification'].get('error', '(no detail)')}")
+        print(f"The code it wrote is at {result['scraper_path']} — you can ask it to revise.")
+
+
+def _run_built_scraper(source) -> None:
+    """Run the agent-authored scraper (core/scrapers/<key>.py) and preview before saving."""
+    import core.scrapers as scrapers
+
+    print(f"\nRunning the harness-built scraper for {source.label}...")
+    try:
+        transactions = scrapers.get_scraper(source.key)()
+    except Exception as exc:
+        _report("run_built_scraper", "TUI_RUN_BUILT_SCRAPER_FAILED", "The built scraper failed.",
+                "See data/logs/agent.jsonl; you can rebuild it from a fresh demonstration.", exc)
+        return
+    print(f"\n{source.label} — from the harness-built scraper:")
+    _print_transactions(transactions)
+    if not questionary.confirm("Do these look right — save them?", default=False).ask():
+        print("Not saved. Rebuild the scraper if the extraction is off.")
+        return
+    from core.fetch_ingest import persist_scraped
+
+    run = persist_scraped(transactions, source.login_url or source.key)
+    print(f"Saved {run['transaction_count']} transactions to {run['run_path']}.")
 
 
 def _scrape_portal_auto(source, scraper) -> None:
