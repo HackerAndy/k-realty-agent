@@ -58,10 +58,12 @@ log = get_logger("interfaces.tui")
 
 
 def _report(operation: str, code: str, message: str, remediation: str, exc: Exception) -> None:
-    """Log a TUI-boundary failure via the project standard and show the operator
-    the actionable message. Used for the catch-all handlers that wrap agent,
-    browser, and network operations."""
-    print(f"\n{log.failure(operation=operation, code=code, message=message, remediation=remediation, exc=exc)}")
+    """Log a TUI-boundary failure via the project standard AND show the operator
+    the actionable message plus the ACTUAL underlying cause — nothing hidden in a
+    log file. Used for the catch-all handlers wrapping agent/browser/network ops."""
+    human = log.failure(operation=operation, code=code, message=message, remediation=remediation, exc=exc)
+    print(f"\n{human}")
+    print(f"  ↳ what actually failed — {type(exc).__name__}: {exc}")
 
 
 def ensure_llm_ready() -> bool:
@@ -107,13 +109,32 @@ def _configure_llm_provider() -> bool:
         if not base_url or not base_url.strip():
             print("No base URL entered — nothing changed.")
             return False
-        model = questionary.text("Model:", default="qwen2.5-coder:7b").ask()
+        base_url = base_url.strip()
         key = questionary.password("API key (leave blank if the server needs none):").ask()
+        key = (key or "").strip() or None
+
+        # Ask the server which models it actually has, so you pick a real one.
+        model = None
+        try:
+            models = llm_provider.list_models(base_url, key)
+        except Exception as exc:
+            print(f"  (couldn't list models from the server: {exc})")
+            models = []
+        if models:
+            print(f"  Models available on that server: {', '.join(models)}")
+            model = questionary.select(
+                "Model:", choices=[*models, questionary.Choice("Other (type it)", "__other__")]
+            ).ask()
+            if model == "__other__":
+                model = questionary.text("Model:").ask()
+        else:
+            model = questionary.text("Model (couldn't auto-list — type it exactly):").ask()
+        if not model or not model.strip():
+            print("No model chosen — nothing changed.")
+            return False
+
         llm_provider.store_llm_credential(
-            "openai_compatible",
-            api_key=(key or "").strip() or None,
-            base_url=base_url.strip(),
-            model=(model or "").strip() or None,
+            "openai_compatible", api_key=key, base_url=base_url, model=model.strip()
         )
 
     llm_provider.load_into_env()
@@ -540,7 +561,8 @@ def _scrape_portal(source, scraper) -> None:
 def _build_scraper(source, scraper) -> None:
     """The directive path: the harness's OWN agent writes the scraper from your
     demonstration. A browser opens, you show it how to reach your data once, and
-    the embedded agent authors + self-verifies core/scrapers/<key>.py."""
+    the embedded agent authors + self-verifies core/scrapers/<key>.py. Failures
+    are shown in full, with retry / change-LLM / have-the-agent-revise options."""
     if not ensure_llm_ready():
         return
     portal_url = (source.login_url or getattr(scraper, "GENERAL_LEDGER_URL", None)
@@ -548,31 +570,94 @@ def _build_scraper(source, scraper) -> None:
     if not portal_url:
         print("No portal URL known for this source (set login_url in services.yaml).")
         return
-    print(f"\nThe harness will build a scraper for {source.label} from your demonstration.")
-    print("A browser opens: log in, set your filters/dropdowns, and click Generate/Search so")
-    print("YOUR data is on screen, then press Enter. The agent captures what happened (the")
-    print("data request it fired + your clicks) and writes the scraper itself.\n")
-    print("This sends the captured page/request text to the LLM (the agent). Proceed?")
-    if not questionary.confirm("Start the demonstration + build?", default=True).ask():
-        return
-    from orchestration.build_scraper import build_scraper_for_source
+    from core.tools.demo_recorder import DEMO_DIR
+    from orchestration.build_scraper import build_scraper_for_source, revise_scraper_for_source
 
+    demo_file = DEMO_DIR / f"{source.key}-demonstration.json"
+    print(f"\nThe harness will build a scraper for {source.label} from your demonstration.")
+
+    # Reuse a prior demonstration if one exists (so a retry needn't re-record).
+    demo_path = None
+    if demo_file.exists() and questionary.confirm(
+        f"Reuse your last demonstration ({demo_file.name})? (No = record a new one)", default=True
+    ).ask():
+        demo_path = demo_file
+    if demo_path is None:
+        print("A browser opens: log in, set your filters, click Generate so YOUR data shows, then")
+        print("press Enter. The agent captures what happened and writes the scraper itself.")
+    if not questionary.confirm("This sends the captured page/request text to the LLM. Proceed?", default=True).ask():
+        return
+
+    def build_step():
+        dp = demo_file if demo_file.exists() else None
+        return build_scraper_for_source(
+            source.key, portal_url, source_label=source.label, on_event=print, demo_path=dp
+        )
+
+    result = _run_scraper_step(
+        lambda: build_scraper_for_source(
+            source.key, portal_url, source_label=source.label, on_event=print, demo_path=demo_path
+        )
+    )
+    while True:
+        if result is None:  # the step raised — cause already shown; offer recovery
+            choice = questionary.select(
+                "What now?",
+                choices=[
+                    questionary.Choice("Retry" + (" (reuse the demonstration)" if demo_file.exists() else ""), "retry"),
+                    questionary.Choice("Change LLM provider (e.g. pick a model your server has)", "llm"),
+                    questionary.Choice("Stop", "stop"),
+                ],
+            ).ask()
+            if choice in (None, "stop"):
+                return
+            if choice == "llm":
+                _configure_llm_provider()
+            result = _run_scraper_step(build_step)
+            continue
+
+        if result["agent_summary"]:
+            print(f"\nAgent's summary:\n{result['agent_summary']}")
+        if result["verification"]["ok"]:
+            print(f"\n✓ Scraper written + registered: {result['scraper_path']}")
+            print("Review it, then choose 'Run the harness-built scraper' to try it. Activating it "
+                  "as this source's method stays your call.")
+            return
+
+        print(f"\nThe scraper didn't verify:\n  {result['verification'].get('error', '(no detail)')}")
+        print(f"The code it wrote is at {result['scraper_path']}.")
+        choice = questionary.select(
+            "What now?",
+            choices=[
+                questionary.Choice("Have the agent revise it (it reads its own logs)", "revise"),
+                questionary.Choice("Retry the build from the demonstration", "retry"),
+                questionary.Choice("Change LLM provider", "llm"),
+                questionary.Choice("Leave it and stop", "stop"),
+            ],
+        ).ask()
+        if choice in (None, "stop"):
+            return
+        if choice == "revise":
+            feedback = questionary.text("Anything specific to tell it? (optional):").ask() or ""
+            result = _run_scraper_step(
+                lambda: revise_scraper_for_source(source.key, feedback=feedback.strip(), on_event=print)
+            )
+        else:
+            if choice == "llm":
+                _configure_llm_provider()
+            result = _run_scraper_step(build_step)
+
+
+def _run_scraper_step(step) -> dict | None:
+    """Run one build/revise step, streaming the agent's actions. On failure, show
+    the ACTUAL cause on screen (not just in the log) and return None."""
     print("\nThe agent's actions:\n")
     try:
-        result = build_scraper_for_source(source.key, portal_url, source_label=source.label, on_event=print)
+        return step()
     except Exception as exc:
-        _report("build_scraper", "TUI_BUILD_SCRAPER_FAILED", "The scraper-building run failed.",
-                "See data/logs/agent.jsonl; you can retry the demonstration.", exc)
-        return
-    if result["agent_summary"]:
-        print(f"\nAgent's summary:\n{result['agent_summary']}")
-    if result["verification"]["ok"]:
-        print(f"\n✓ Scraper written + registered: {result['scraper_path']}")
-        print("Review it, then choose 'Run the harness-built scraper' to try it. Activating it as "
-              "this source's method stays your call.")
-    else:
-        print(f"\nThe scraper didn't verify: {result['verification'].get('error', '(no detail)')}")
-        print(f"The code it wrote is at {result['scraper_path']} — you can ask it to revise.")
+        _report("build_scraper", "TUI_BUILD_SCRAPER_FAILED", "The agent run failed.",
+                "The actual cause is shown below.", exc)
+        return None
 
 
 def _run_built_scraper(source) -> None:

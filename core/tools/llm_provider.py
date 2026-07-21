@@ -15,7 +15,9 @@ This module must stay framework-free (no langgraph/langchain imports).
 
 from __future__ import annotations
 
+import json
 import os
+from urllib import error, request
 
 from core.tools.credential_store import CredentialStore, CredentialStoreError
 
@@ -75,6 +77,22 @@ def current_config() -> dict | None:
     if cred.get("api_key"):
         cred["api_key"] = "<stored>"
     return cred
+
+
+def list_models(base_url: str, api_key: str | None = None) -> list[str]:
+    """Ask an OpenAI-compatible server which models it actually has (GET /models),
+    so the operator picks a real one instead of guessing. Raises on failure so the
+    caller can show why."""
+    url = base_url.rstrip("/") + "/models"
+    req = request.Request(url, headers={"Authorization": f"Bearer {api_key or 'local'}"})
+    try:
+        with request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except error.HTTPError as exc:
+        raise RuntimeError(f"server returned {exc.code} for {url}") from exc
+    except error.URLError as exc:
+        raise RuntimeError(f"could not reach {url}: {exc.reason}") from exc
+    return [m.get("id") for m in data.get("data", []) if m.get("id")]
 
 
 def load_into_env() -> bool:

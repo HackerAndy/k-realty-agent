@@ -32,12 +32,18 @@ def build_scraper_for_source(
     portal_url: str,
     source_label: str = "",
     on_event: Callable[[str], None] = print,
+    demo_path: Path | str | None = None,
 ) -> dict:
-    """Record a demonstration, then run the agent to author a scraper for it."""
-    on_event(f"Recording your demonstration for {source_label or source_key} — a browser "
-             "will open; log in, set filters, click Generate, then press Enter.")
-    demo_path = demo_recorder.record(source_key, portal_url)
-    on_event(f"Demonstration captured → {demo_path}. The agent will now write the scraper.\n")
+    """Record a demonstration (or reuse one), then run the agent to author a
+    scraper. Pass `demo_path` to reuse a prior capture — so a retry after an LLM
+    fix doesn't force you to demonstrate again."""
+    if demo_path is None:
+        on_event(f"Recording your demonstration for {source_label or source_key} — a browser "
+                 "will open; log in, set filters, click Generate, then press Enter.")
+        demo_path = demo_recorder.record(source_key, portal_url)
+        on_event(f"Demonstration captured → {demo_path}. The agent will now write the scraper.\n")
+    else:
+        on_event(f"Reusing your captured demonstration → {demo_path}. The agent will now write the scraper.\n")
 
     system = SYSTEM_PROMPT_PATH.read_text()
     task = (
