@@ -234,6 +234,7 @@ def _pick_source() -> str | None:
         questionary.Choice(title=f"{s.label:26}  {_source_marker(s)}", value=s.key)
         for s in services
     ]
+    choices.append(questionary.Choice(title="← Back", value=None))
     return questionary.select("Which source do you want to ingest?", choices=choices).ask()
 
 
@@ -444,7 +445,7 @@ def _setup_email_fetch(source_key: str, source, manifest: ServiceManifest) -> bo
     if not questionary.confirm(
         "Ready to connect now? (A browser opens; you click 'Allow' once.)", default=True
     ).ask():
-        print("No problem — pick this source again under 'Ingest a source' when ready.")
+        print("No problem — pick this source again under Data ingestion when ready.")
         return False
 
     json_path = questionary.path("Path to the downloaded OAuth client JSON:").ask()
@@ -800,7 +801,7 @@ def action_status() -> None:
         print("\n⚠ ACTION NEEDED:")
         for s in pending:
             print(f"  • {s.label}: a parser is built but NOT activated — "
-                  f"'Ingest a source' → {s.label} to review + approve it.")
+                  f"Data ingestion → {s.label} to review + approve it.")
 
     implemented = [s for s in services if s.status == "implemented"]
     print(f"\nSources (core/policies/services.yaml): {len(implemented)} of {len(services)} have a parser.")
@@ -821,49 +822,78 @@ def action_status() -> None:
         print(f"Latest ingest: {run['source_key']} {run['month']} — "
               f"{run['transaction_count']} transaction(s).")
     print(f"Parsed data lives in {DATA_DIR}/ (gitignored, local only).")
-    print("Sources without a parser: pick one under 'Ingest a source' and the harness "
+    print("Sources without a parser: pick one under Data ingestion and the harness "
           "will extract it now and/or write a parser for it (with your approval).")
-    print("Deliberately not built yet: categorization, P&L, automated fetching of the "
-          "source documents, orchestration graph.")
+    print("Not built yet (Data processing): categorization, reconciliation, P&L.")
+
+
+def _submenu(title: str, items: list[tuple[str, object]]) -> None:
+    """A back-navigating submenu: loops through `items` (label → callable) until
+    the operator chooses '← Back' (or Esc). Every menu in the TUI uses this so
+    there's always a way back to the previous menu."""
+    lookup = dict(items)
+    while True:
+        choice = questionary.select(title, choices=[*[label for label, _ in items], "← Back"]).ask()
+        if choice in (None, "← Back"):
+            return
+        lookup[choice]()
+        print()
+
+
+def menu_data_ingestion() -> None:
+    """Get data IN: pull a source (document / portal / inbox) into transactions."""
+    _submenu("Data ingestion", [("Ingest a source (document / portal / inbox → transactions)", action_ingest)])
+
+
+def menu_data_processing() -> None:
+    """Transform ingested transactions. Deliberately deferred so far — stated
+    plainly rather than hidden."""
+    print("\nData processing — categorization, reconciliation, and P&L — isn't built yet.")
+    print("It's deliberately deferred: ingested transactions are stored faithfully first.")
+    print("When added, categorizing/normalizing steps will live here.")
+
+
+def menu_reporting() -> None:
+    """Get data OUT: view what's been ingested."""
+    _submenu("Reporting", [
+        ("View latest parsed transactions", action_view_latest),
+        ("Status (sources, LLM, latest ingest)", action_status),
+    ])
+
+
+def menu_settings() -> None:
+    """LLM provider + the credentials/services the harness uses."""
+    _submenu("Settings", [
+        ("LLM provider (Claude API or a local server)", action_llm_provider),
+        ("Credentials & services (logins, API keys)", action_services),
+    ])
 
 
 def main() -> int:
     print("K-Realty Property Finance Tracker")
-    print("Ingests a source document into transactions. Data stays on this machine")
-    print("(parsed output in data/, credentials encrypted in .secrets/); the agent")
-    print("and AI extraction send document/code text to the LLM after you consent.\n")
-    # First-run setup: make sure the harness has an LLM key (prompt + store if not).
+    print("Everything runs locally: parsed data in data/, credentials encrypted in")
+    print(".secrets/. The agent and AI extraction send text to the LLM only after you consent.\n")
+    # First-run setup: make sure an LLM provider is set up (prompt + store if not).
     ensure_llm_ready()
-    base_actions = [
-        ("ingest", action_ingest),
-        ("view", action_view_latest),
-        ("services", action_services),
-        ("llm", action_llm_provider),
-        ("status", action_status),
-    ]
     while True:
-        # Recompute each loop so indicators clear the instant you act on them.
+        # Surface outstanding approvals loudly on the top menu — nothing waits in the dark.
         pending = pending_approvals()
         if pending:
             names = ", ".join(s.label for s in pending)
-            print(f"⚠ ACTION NEEDED — {len(pending)} parser(s) built and waiting for your "
-                  f"approval: {names}")
-            print("  → choose 'Ingest a source' and pick the flagged source to review + activate.\n")
-        labels = {
-            "ingest": "Ingest a source (document → transactions)"
-                      + (f"   ⚠ {len(pending)} awaiting approval" if pending else ""),
-            "view": "View latest parsed transactions",
-            "services": "Manage services & credentials",
-            "llm": "LLM provider (choose Claude API or a local server)",
-            "status": "Status",
-        }
-        display_to_func = {labels[key]: func for key, func in base_actions}
+            print(f"⚠ ACTION NEEDED — {len(pending)} parser(s) built and waiting for approval: {names}")
+            print("  → Data ingestion → pick the flagged source to review + activate.\n")
         choice = questionary.select(
-            "What would you like to do?", choices=[*display_to_func, "Quit"]
+            "Main menu — what would you like to do?",
+            choices=["Data ingestion", "Data processing", "Reporting", "Settings", "Quit"],
         ).ask()
         if choice in (None, "Quit"):
             return 0
-        display_to_func[choice]()
+        {
+            "Data ingestion": menu_data_ingestion,
+            "Data processing": menu_data_processing,
+            "Reporting": menu_reporting,
+            "Settings": menu_settings,
+        }[choice]()
         print()
 
 
