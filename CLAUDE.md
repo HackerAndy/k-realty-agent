@@ -13,10 +13,16 @@ embedded agent (`orchestration/agent.py`), working *with* the operator.
   by a developer into this repo. A human authoring domain selectors/columns here is
   the anti-pattern.
 - Pattern to follow, for every source: **human demonstrates/provides a sample →
-  embedded agent writes + self-verifies the code → human approves in the TUI.**
+  embedded agent writes + TESTS the code → human approves in the TUI.**
   - Documents: `build_parser` (sample document → parser).
   - Portals: `build_scraper` (demonstrated navigation → scraper; capture the data
     request to prefer a direct API call, fall back to replaying recorded clicks).
+- **The harness tests the code it writes, and won't ship untested code.** Every
+  build makes the agent write a self-contained test (`tests/test_parser_<key>.py`
+  / `tests/test_scraper_<key>.py`, inline sample — never a gitignored `data/`
+  file). The workflow (`orchestration/verify.py`) re-runs that test independently;
+  a missing or failing test is NOT `ok`, and the TUI shows the pass/fail and gates
+  approval on it. See `parser_builder.v1.md` / `scraper_builder.v1.md`.
 
 After onboarding, the operator works with the harness (its TUI), not a code editor.
 

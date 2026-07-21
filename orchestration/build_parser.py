@@ -16,7 +16,8 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
-from orchestration.agent import run_agent
+from orchestration.codegen import fold_untested, run_codegen
+from orchestration.verify import run_test_file, test_path_for
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SYSTEM_PROMPT_PATH = REPO_ROOT / "core" / "prompts" / "parser_builder.v1.md"
@@ -38,12 +39,14 @@ def build_parser_for_source(
         + f".\n\nA real sample document is at: {sample_path}\n"
         f"Write the parser to: core/parsers/{source_key}.py\n"
         f"Register it in core/parsers/__init__.py under the key '{source_key}'.\n"
-        "Verify it against the sample (reconcile to the document's own totals if it "
-        "has any) before you finish."
+        f"Write a SELF-CONTAINED test (inline sample, not a data/ file) to "
+        f"{test_path_for('parser', source_key)} and run it — it MUST pass. The harness "
+        "re-runs it independently and will not approve an untested or failing parser.\n"
+        "Also sanity-run the parser against the real sample before you finish."
     )
 
-    result = run_agent(task, system, on_event=on_event)
-    verification = verify_parser(source_key, sample_path)
+    result = run_codegen(task, system, on_event=on_event)
+    verification = fold_untested(verify_parser(source_key, sample_path), result.tool_calls)
     return {
         "source_key": source_key,
         "parser_path": f"core/parsers/{source_key}.py",
@@ -71,11 +74,12 @@ def revise_parser_for_source(
         f"Sample document: {sample_path}\n"
         f"Read the current parser first, then revise it to address the feedback. Keep it "
         f"registered under '{source_key}'. Preserve the source's real columns verbatim in "
-        f"Transaction.fields — don't invent columns. Re-verify against the sample before "
-        f"you finish, and say what you changed."
+        f"Transaction.fields — don't invent columns. UPDATE the test at "
+        f"{test_path_for('parser', source_key)} to cover the change and run it — it MUST pass "
+        "(the harness re-runs it). Say what you changed."
     )
-    result = run_agent(task, system, on_event=on_event)
-    verification = verify_parser(source_key, sample_path)
+    result = run_codegen(task, system, on_event=on_event)
+    verification = fold_untested(verify_parser(source_key, sample_path), result.tool_calls)
     return {
         "source_key": source_key,
         "parser_path": f"core/parsers/{source_key}.py",
@@ -86,9 +90,14 @@ def revise_parser_for_source(
 
 
 def verify_parser(source_key: str, sample_path: Path) -> dict:
-    """Independently run the newly-written parser in a clean subprocess (fresh
-    import, so it also confirms the agent registered it). Returns
-    {ok, transactions|error}."""
+    """Independently verify the agent's parser. The GATE is the agent's own test
+    (run in a fresh subprocess) — untested or failing code is not `ok`. Also runs
+    the parser on the real sample so the human can preview its output.
+
+    Returns {ok, test, transactions|error}. `ok` requires the test to pass AND the
+    sample to parse."""
+    test = run_test_file(test_path_for("parser", source_key))
+
     code = (
         "import json; from pathlib import Path; from core.parsers import get_parser; "
         f"ts = get_parser({source_key!r})(Path({str(sample_path)!r})); "
@@ -102,9 +111,9 @@ def verify_parser(source_key: str, sample_path: Path) -> dict:
         timeout=180,
     )
     if proc.returncode != 0:
-        return {"ok": False, "error": (proc.stderr or proc.stdout).strip()[-4000:]}
+        return {"ok": False, "test": test, "error": (proc.stderr or proc.stdout).strip()[-4000:]}
     try:
         transactions = json.loads(proc.stdout.strip().splitlines()[-1])
     except (json.JSONDecodeError, IndexError) as exc:
-        return {"ok": False, "error": f"Could not read parser output: {exc}\n{proc.stdout[-2000:]}"}
-    return {"ok": True, "transactions": transactions}
+        return {"ok": False, "test": test, "error": f"Could not read parser output: {exc}\n{proc.stdout[-2000:]}"}
+    return {"ok": test["ok"], "test": test, "transactions": transactions}

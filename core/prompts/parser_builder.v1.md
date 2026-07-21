@@ -43,14 +43,21 @@ You have tools: `read_file`, `write_file`, `list_directory`, `run_command`
 3. **Register it.** Edit `core/parsers/__init__.py` to import your `parse`
    function and add it to `REGISTRY` under the exact source key.
 
-4. **Verify it yourself** with `run_command`:
-   `poetry run python -c "from pathlib import Path; from core.parsers import get_parser; ts = get_parser('<source_key>')(Path('<sample_path>')); print(len(ts)); [print(t.date, t.amount, t.fields) for t in ts[:5]]"`
-   - Confirm it returns a non-empty list, the `fields` match the document's real
-     columns, and the rows look right.
-   - **If the document prints its own totals or a running balance, reconcile
-     against them** — this is the strongest correctness check; the Buildium
-     parser reconciles to statement totals and the DFCU parser walks the running
-     balance chain to the penny. Iterate until it reconciles.
+4. **Write a self-contained test — this is REQUIRED, not optional.** Create the
+   test file named in your task (`tests/test_parser_<source_key>.py`) with pytest
+   tests of the parser (or a pure extraction helper you factor out). Use a SMALL,
+   REPRESENTATIVE sample **embedded inline in the test** — NOT a file under
+   `data/` (that's gitignored and won't exist when the test runs later). Assert:
+   - the transaction count,
+   - the signs (money in +, money out −),
+   - that `fields` carry the document's real columns verbatim,
+   - and, if the document shows totals or a running balance, a reconciliation.
+
+   Then RUN it and it MUST pass:
+   `poetry run pytest tests/test_parser_<source_key>.py -q`.
+   Also do a quick sanity run of the parser against the real sample document with
+   `run_command`. **The harness re-runs your test independently — if the test is
+   missing or fails, the parser is NOT approved.** Iterate until it passes.
 
 ## Rules
 
@@ -63,6 +70,6 @@ You have tools: `read_file`, `write_file`, `list_directory`, `run_command`
 
 ## When done
 
-Report concisely: the parser file you wrote, how you verified it (with the
-reconciliation numbers if the document had totals), and anything the human
-reviewer should double-check.
+Report concisely: the parser file you wrote, the test file you wrote and that it
+passes (with reconciliation numbers if the document had totals), and anything the
+human reviewer should double-check.

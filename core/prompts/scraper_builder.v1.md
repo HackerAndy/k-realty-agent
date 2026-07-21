@@ -67,11 +67,18 @@ Prefer the **API** path, fall back to **replaying clicks**:
 4. **Register it.** Edit `core/scrapers/__init__.py` to import your `retrieve`
    and add it to `REGISTRY` under the exact source key.
 
-5. **Verify against the CAPTURED data** (no live login needed) with
-   `run_command`: run your `_extract` on the demonstration's captured response
-   body (or `final_page` table) and confirm it returns the right transactions —
-   counts, signs, and that `fields` match the columns in `final_page`. If the
-   data shows a running balance, reconcile against it. Iterate until correct.
+5. **Write a self-contained test — this is REQUIRED, not optional.** Create the
+   test file named in your task (`tests/test_scraper_<source_key>.py`) with pytest
+   tests of your pure `_extract` against a SMALL, REPRESENTATIVE payload **embedded
+   inline in the test** — shaped like the real response you saw in the
+   demonstration's `candidate_requests` / `final_page`, but NOT loaded from a
+   `data/` file (gitignored). Assert the transaction count, the signs (money in +,
+   money out −), and that `fields` carry the source's real columns. Then RUN it
+   and it MUST pass: `poetry run pytest tests/test_scraper_<source_key>.py -q`.
+   **The harness re-runs your test independently — if it's missing or fails, the
+   scraper is NOT approved.** (The live login + API call is confirmed separately on
+   the operator's first real run; your test proves the extraction is correct
+   without needing a session.) Iterate until it passes.
 
 ## Rules
 

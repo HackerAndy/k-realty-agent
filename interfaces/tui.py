@@ -307,6 +307,32 @@ def _review_and_activate(source_key: str, source, manifest: ServiceManifest) -> 
     _review_parser(source_key, source, doc, manifest)
 
 
+def _show_test_result(verification: dict | None) -> bool:
+    """Show the harness's own test result (and any untested-code flag) for
+    agent-generated code. Returns True only if it's approvable — the test passed
+    and no code was written without one. Nothing hidden: pass/fail and output are
+    on screen, and this is the gate for approval."""
+    if not verification:
+        print("\n⚠ No verification available for this code.")
+        return False
+    test = verification.get("test")
+    if not test:
+        print("\n⚠ No test was run for this code.")
+    elif test.get("ok"):
+        print(f"\n✓ Tests PASS — {test.get('test_path', '')}")
+    elif test.get("missing"):
+        print(f"\n⚠ NO TEST was written ({test.get('test_path', '')}). The harness requires a "
+              "test for code it generates — this should be revised, not approved.")
+    else:
+        print(f"\n✗ Tests FAIL — {test.get('test_path', '')}:")
+        for line in (test.get("output", "") or "").splitlines()[-14:]:
+            print(f"    {line}")
+    if verification.get("untested_code"):
+        print(f"\n⚠ Code written WITHOUT a test: {', '.join(verification['untested_code'])} "
+              "— not approvable until it's tested.")
+    return bool(verification.get("ok"))
+
+
 def _review_parser(source_key: str, source, doc: Path, manifest: ServiceManifest) -> None:
     """Preview the parser's output, then loop: Activate / Request changes (the
     agent revises it) / Leave inactive. This is the debug+approve loop — if the
@@ -318,10 +344,11 @@ def _review_parser(source_key: str, source, doc: Path, manifest: ServiceManifest
     # (not a stale in-process import).
     verification = verify_parser(source_key, doc)
     while True:
-        if verification["ok"]:
+        tests_ok = _show_test_result(verification)
+        if "transactions" in verification:
             print(f"\n{source.label} — parser output on {doc.name}:")
             _print_transactions([Transaction.model_validate(t) for t in verification["transactions"]])
-        else:
+        elif verification.get("error"):
             print(f"\nThe parser errored on this document:\n  {verification.get('error', '')}")
 
         choice = questionary.select(
@@ -337,6 +364,10 @@ def _review_parser(source_key: str, source, doc: Path, manifest: ServiceManifest
             print("Left inactive — it stays flagged ⚠ ACTION NEEDED until you activate it.")
             return
         if choice.startswith("Activate"):
+            if not tests_ok and not questionary.confirm(
+                "Tests did NOT pass. Activate anyway? (not recommended)", default=False
+            ).ask():
+                continue
             manifest.update(source_key, parser=source_key, status="implemented")
             print(f"\n✓ Activated. '{source.label}' now uses this parser automatically.")
             return
@@ -544,14 +575,19 @@ def _build_scraper(source) -> None:
 
         if result["agent_summary"]:
             print(f"\nAgent's summary:\n{result['agent_summary']}")
-        if result["verification"]["ok"]:
-            print(f"\n✓ Scraper written + registered: {result['scraper_path']}")
-            print("Review it, then choose 'Run the harness-built scraper' to try it. Activating it "
-                  "as this source's method stays your call.")
+        verification = result["verification"]
+        _show_test_result(verification)
+        if not verification.get("registered", True):
+            print(f"\n⚠ Scraper isn't registered in core/scrapers/REGISTRY: "
+                  f"{verification.get('registration_detail', '')}")
+        if verification["ok"]:
+            print(f"\n✓ Scraper written, tested, and registered: {result['scraper_path']}")
+            print("Choose 'Run the harness-built scraper' to try it live. Activating it as this "
+                  "source's method stays your call.")
             return
 
-        print(f"\nThe scraper didn't verify:\n  {result['verification'].get('error', '(no detail)')}")
-        print(f"The code it wrote is at {result['scraper_path']}.")
+        print(f"\nThe scraper isn't approved yet (see the test result above). "
+              f"The code it wrote is at {result['scraper_path']}.")
         choice = questionary.select(
             "What now?",
             choices=[

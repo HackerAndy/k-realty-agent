@@ -21,7 +21,8 @@ from collections.abc import Callable
 from pathlib import Path
 
 from core.tools import demo_recorder
-from orchestration.agent import run_agent
+from orchestration.codegen import fold_untested, run_codegen
+from orchestration.verify import run_test_file, test_path_for
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SYSTEM_PROMPT_PATH = REPO_ROOT / "core" / "prompts" / "scraper_builder.v1.md"
@@ -53,12 +54,14 @@ def build_scraper_for_source(
         f"rendered page) is at: {demo_path}\n"
         f"Read it first. Write the scraper to: core/scrapers/{source_key}.py\n"
         f"Register it in core/scrapers/__init__.py under the key '{source_key}'.\n"
-        "Prefer calling the data endpoint directly; fall back to replaying the clicks. "
-        "Verify your extraction against the captured data before you finish."
+        "Prefer calling the data endpoint directly; fall back to replaying the clicks.\n"
+        f"Write a SELF-CONTAINED test (inline payload, not a data/ file) of your _extract to "
+        f"{test_path_for('scraper', source_key)} and run it — it MUST pass. The harness re-runs "
+        "it independently and will not approve an untested or failing scraper."
     )
 
-    result = run_agent(task, system, on_event=on_event)
-    verification = verify_scraper(source_key)
+    result = run_codegen(task, system, on_event=on_event)
+    verification = fold_untested(verify_scraper(source_key), result.tool_calls)
     return {
         "source_key": source_key,
         "scraper_path": f"core/scrapers/{source_key}.py",
@@ -86,11 +89,12 @@ def revise_scraper_for_source(
         "missing credential, or a CAPTCHA, say so and stop; otherwise fix the code.\n"
         + (f"\nOPERATOR FEEDBACK (address this too):\n{feedback}\n" if feedback else "")
         + f"\nRead the current scraper first, keep it registered under '{source_key}', preserve "
-        "the source's real columns in Transaction.fields, re-verify against the captured "
-        "demonstration data, and say what you changed."
+        f"the source's real columns in Transaction.fields, UPDATE the test at "
+        f"{test_path_for('scraper', source_key)} to cover the fix and run it — it MUST pass "
+        "(the harness re-runs it). Say what you changed."
     )
-    result = run_agent(task, system, on_event=on_event)
-    verification = verify_scraper(source_key)
+    result = run_codegen(task, system, on_event=on_event)
+    verification = fold_untested(verify_scraper(source_key), result.tool_calls)
     return {
         "source_key": source_key,
         "scraper_path": f"core/scrapers/{source_key}.py",
@@ -101,9 +105,14 @@ def revise_scraper_for_source(
 
 
 def verify_scraper(source_key: str) -> dict:
-    """Independently confirm the agent's scraper imports and is registered (fresh
-    subprocess, so it also proves the registration took). Full data verification
-    is the agent's job (against captured data) + the human's first live run."""
+    """Independently verify the agent's scraper. The GATE is the agent's own test
+    (run in a fresh subprocess) — untested or failing code is not `ok`. Also
+    confirms the scraper imports + registered. Full live verification (login +
+    API) is the operator's first real run.
+
+    Returns {ok, test, registered, registration_detail}."""
+    test = run_test_file(test_path_for("scraper", source_key))
+
     code = (
         "from core.scrapers import REGISTRY; "
         f"assert {source_key!r} in REGISTRY, 'not registered'; "
@@ -116,6 +125,10 @@ def verify_scraper(source_key: str) -> dict:
         text=True,
         timeout=60,
     )
-    if proc.returncode != 0:
-        return {"ok": False, "error": (proc.stderr or proc.stdout).strip()[-3000:]}
-    return {"ok": True, "detail": proc.stdout.strip()}
+    registered = proc.returncode == 0
+    return {
+        "ok": test["ok"] and registered,
+        "test": test,
+        "registered": registered,
+        "registration_detail": (proc.stdout or proc.stderr).strip()[-2000:],
+    }
