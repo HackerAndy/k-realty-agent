@@ -7,8 +7,8 @@ Buildium (managebuilding.com) is a widely used property-management SaaS;
 many property management companies white-label a Buildium instance for
 their owners/residents. This module handles the login flow only — anything
 past login (navigation, data extraction) is specific to each property
-manager's actual portal content and belongs in a client-specific module
-(see core/tools/epic_property_management.py for K-Realty's).
+manager's actual portal content and belongs in an agent-authored scraper
+(see core/scrapers/epic_property_management.py for K-Realty's).
 
 This module must stay framework-free (no langgraph/langchain imports).
 """

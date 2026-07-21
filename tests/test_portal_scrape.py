@@ -1,68 +1,56 @@
-"""Deterministic parts of the Epic General Ledger scrape.
+"""Deterministic core of the agent-authored Epic GL scraper.
 
-The live browser/session parts need a real login and can only be exercised by
-the operator (via the TUI). These cover the pure row->Transaction mapping — the
-risky bit — using rows shaped exactly like the real recon capture
-(data/debug/epic_portal_structure.json, 2026-07-19): account-grouped, with
-section headers, PRIOR BALANCE / Total rows, an unlabeled receipt column, and
-parenthesized negatives.
+The live parts (login + Buildium API calls) need a real session and are the
+operator's job to run. This guards the pure `_extract()` — the risky bit — against
+a response shaped like Buildium's /manager/api/generalLedger/transactions payload
+(a list of account wrappers, each with a Transactions array). Kept here so the
+agent-built scraper is covered like the hand-written parsers are.
 """
 
-import pytest
+from core.scrapers.epic_property_management import SERVICE_KEY, _extract
 
-from core.tools.epic_property_management import (
-    PORTAL_SOURCE_KEY,
-    _clean,
-    _gl_rows_to_transactions,
-    _parse_amount,
-)
-
-# Real-shaped GL rows in DOM order: an account section, prior/total, and txns.
-GL_ROWS = [
-    ["Capital One"],  # account section header
-    ["PRIOR BALANCE", "($5,081.19)"],
-    ["6/24/2026", "1029 E. Granet Ave. *EPM*", "Property level", "Lowes", "Odor Eliminator", "1", "($11.62)", "($5,092.81)"],
-    ["Total Capital One", "($11.62)", "($5,092.81)"],
-    ["Rent Income"],  # next account section header
-    ["6/26/2026", "8095 Prospect Ave. *EPM*", "1", "Unit 1 - Kenneth Davis", "by Kenneth Davis", "", "$1,421.00", "$7,420.21"],
-    ["7/8/2026", "1029 E. Granet Ave. *EPM*", "Lower", "", "Rent Deposit", "", "$2,000.00", "$9,374.46"],
-    ["Total Rent Income", "$3,421.00", "$9,374.46"],
+# Shaped like the real API: account wrappers, some with no activity.
+RAW = [
+    {
+        "Id": 1, "Name": "Capital One", "BeginningBalance": -5081.19, "Total": -11.62,
+        "Transactions": [
+            {"Id": 101, "Date": "2026-06-24", "PropertyOrCompany": "1029 E. Granet Ave.",
+             "Name": "Lowes", "Description": "Odor Eliminator", "Amount": -11.62,
+             "Balance": -5092.81, "UnitNumber": "Property level"},
+        ],
+    },
+    {
+        "Id": 2, "Name": "Rent Income", "BeginningBalance": 0, "Total": 1421.00,
+        "Transactions": [
+            {"Id": 102, "Date": "2026-06-26", "PropertyOrCompany": "8095 Prospect Ave.",
+             "Name": "Unit 1 - Kenneth Davis", "Description": "by Kenneth Davis",
+             "Amount": 1421.00, "Balance": 7420.21, "UnitNumber": "1"},
+        ],
+    },
+    {"Id": 3, "Name": "Advertising", "BeginningBalance": 481.24, "Total": 0, "Transactions": []},
 ]
 
 
-def test_parse_amount_signs():
-    assert _parse_amount("($11.62)") == -11.62   # parentheses = negative
-    assert _parse_amount("$1,421.00") == 1421.00
-    assert _parse_amount("$2,000.00") == 2000.00
+def test_extract_flattens_accounts_and_tags_account_name():
+    txns = _extract(RAW)
+
+    assert len(txns) == 2  # the empty Advertising account contributes nothing
+    lowes, rent = txns
+
+    assert lowes.amount == -11.62  # API amounts are already signed
+    assert rent.amount == 1421.00
+    assert lowes.fields["AccountName"] == "Capital One"
+    assert rent.fields["AccountName"] == "Rent Income"
+    assert lowes.fields["PropertyOrCompany"] == "1029 E. Granet Ave."
+    assert lowes.description == "Odor Eliminator"
+    assert lowes.source_key == SERVICE_KEY
+    assert str(lowes.date.date()) == "2026-06-24"
 
 
-def test_clean_drops_epm_markers():
-    assert _clean("1029 E. Granet Ave. *EPM*") == "1029 E. Granet Ave."
-
-
-def test_gl_mapping_tags_account_and_filters_nondata_rows():
-    txns = _gl_rows_to_transactions(GL_ROWS, "https://portal/generalLedger")
-
-    # 3 transactions; section headers, PRIOR BALANCE and Total rows all skipped
-    assert len(txns) == 3
-    lowes, rent1, rent2 = txns
-
-    # account comes from the section header above each transaction
-    assert lowes.fields["Account"] == "Capital One"
-    assert rent1.fields["Account"] == "Rent Income"
-    assert rent2.fields["Account"] == "Rent Income"
-
-    # signs, cleanup, and faithful columns
-    assert lowes.amount == -11.62
-    assert rent1.amount == 1421.00
-    assert lowes.fields["Property"] == "1029 E. Granet Ave."  # *EPM* stripped
-    assert lowes.fields["Name"] == "Lowes"
-    assert lowes.fields["Description"] == "Odor Eliminator"
-    assert lowes.source_key == PORTAL_SOURCE_KEY
-    assert rent2.fields["Name"] == ""  # empty Name preserved, not shifted
-    assert rent2.fields["Description"] == "Rent Deposit"
-
-
-def test_gl_mapping_returns_empty_when_no_transactions():
-    rows = [["Advertising"], ["PRIOR BALANCE", "$481.24"], ["Total Advertising", "$0.00", "$481.24"]]
-    assert _gl_rows_to_transactions(rows, "uri") == []
+def test_extract_skips_rows_with_unparseable_date():
+    raw = [{"Name": "X", "Transactions": [
+        {"Id": 1, "Date": "not-a-date", "Amount": 5.0, "Description": "bad"},
+        {"Id": 2, "Date": "2026-07-01", "Amount": 5.0, "Description": "good"},
+    ]}]
+    txns = _extract(raw)
+    assert len(txns) == 1 and txns[0].description == "good"

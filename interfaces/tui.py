@@ -29,7 +29,6 @@ calling the orchestration API instead — the menu shouldn't need to change.
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys
@@ -48,7 +47,7 @@ from core.fetch_ingest import fetch_and_ingest
 from core.models import Transaction
 from core.observability import get_logger
 from core.parsers import ParseError
-from core.tools import email_oauth, llm_provider, portal_scrapers
+from core.tools import email_oauth, llm_provider
 from core.tools.credential_store import ensure_master_key
 from core.tools.service_manifest import FetchConfig, ServiceManifest
 
@@ -251,42 +250,26 @@ def action_ingest() -> None:
         _fetch_source(source_key, source, manifest)
         return
 
-    # A source with a login-portal scraper has a second way in. The actual daily
-    # scrape (retrieve()) isn't built yet — for now the portal option is recon
-    # (explore): log in, watch, and see the live page structure.
-    scraper = portal_scrapers.get_scraper(source_key)
-    if scraper is not None:
-        import core.scrapers as scrapers
+    # A login-portal source can have the harness build (and run) its own scraper.
+    import core.scrapers as scrapers
 
-        choices = [
-            questionary.Choice("Build/rebuild the scraper — demonstrate once, the harness writes it", "build"),
-        ]
+    if source.login_url or scrapers.has_scraper(source_key):
+        choices = []
         if scrapers.has_scraper(source_key):
             choices.append(questionary.Choice("Run the harness-built scraper", "run_built"))
         choices += [
-            questionary.Choice("Scrape now, I'll log in — interactive (preview before saving)", "scrape"),
-            questionary.Choice("Auto-login and scrape — the harness signs in with stored credentials", "scrape_auto"),
-            questionary.Choice("Explore the portal — log in, watch, and see the live pages (recon)", "explore"),
+            questionary.Choice("Build/rebuild the scraper — demonstrate once, the harness writes it", "build"),
             questionary.Choice("Provide a document file I already have (PDF/CSV)", "file"),
             questionary.Choice("Cancel", "cancel"),
         ]
         method = questionary.select(f"How do you want to get {source.label}'s data?", choices=choices).ask()
         if method in (None, "cancel"):
             return
-        if method == "build":
-            _build_scraper(source, scraper)
-            return
         if method == "run_built":
             _run_built_scraper(source)
             return
-        if method == "explore":
-            _explore_portal(source, scraper)
-            return
-        if method == "scrape":
-            _scrape_portal(source, scraper)
-            return
-        if method == "scrape_auto":
-            _scrape_portal_auto(source, scraper)
+        if method == "build":
+            _build_scraper(source)
             return
         # "file" → fall through to the normal document flow below.
 
@@ -502,71 +485,14 @@ def _run_fetch(source_key: str, source, manifest: ServiceManifest) -> None:
         print(f"Ingested via {run['parser']} — saved to {run['run_path']} (stays on this machine).")
 
 
-def _explore_portal(source, scraper) -> None:
-    """Watch-it-happen recon: open the real portal in a visible browser, you log
-    in and navigate to the page you want scraped, then the harness reads that
-    exact screen back to you. Read-only — it looks, it never clicks or changes
-    anything. This is how we see the live pages before building the scraper."""
-    print(f"\nExplore {source.label}'s portal — {scraper.PORTAL_URL}")
-    print("A real browser window will open so you can watch. You log in yourself")
-    print("(handles any 2FA), navigate to the financial page you'd want scraped daily,")
-    print("then press Enter and the harness reads that page's structure — the tables and")
-    print("their columns, any download links. It CLICKS NOTHING and changes nothing; it")
-    print("only looks, so we can build the scraper against the real page, not a guess.\n")
-    if not questionary.confirm("Open the portal in a browser now?", default=True).ask():
-        return
-    try:
-        path = scraper.explore_interactive()
-    except Exception as exc:
-        _report("portal_explore", "TUI_EXPLORE_FAILED", "Portal recon couldn't complete.",
-                "If a browser didn't open, install Chromium: 'poetry run playwright install chromium'.", exc)
-        return
-    _show_portal_structure(path)
-
-
-def _scrape_portal(source, scraper) -> None:
-    """Scrape the live portal into transactions, PREVIEW them, and only save on
-    your approval. The first run is the verification — if signs/rows/columns are
-    off, you say so and I fix the scraper (same spirit as the parser review loop).
-
-    Interactive (headed) for now: you log in and open the report so it's rendered
-    and authenticated, then it scrapes that page. Unattended/headless scraping is
-    a separate, later step — Buildium bounces headless sessions to login."""
-    target = scraper.read_captured_url() or scraper.PORTAL_URL
-    print(f"\nScrape {source.label}'s portal — {target}")
-    print("A browser window opens so you can watch. Log in if needed and open the")
-    print("owner-statement report so its table is visible, then press Enter and it scrapes")
-    print("that page and shows you the result BEFORE saving anything.\n")
-    if not questionary.confirm("Open the portal and scrape?", default=True).ask():
-        return
-    try:
-        transactions = scraper.retrieve_interactive()
-    except Exception as exc:
-        _report("portal_scrape", "TUI_SCRAPE_FAILED", "Portal scrape couldn't complete.",
-                "See the message above and data/logs/agent.jsonl for what the page was.", exc)
-        return
-
-    print(f"\n{source.label} — scraped from the portal:")
-    _print_transactions(transactions)
-    if not questionary.confirm("Do these look right — save them?", default=False).ask():
-        print("Not saved. Tell me what's off (signs, missing/extra rows, wrong columns) "
-              "and I'll fix the scraper.")
-        return
-    from core.fetch_ingest import persist_scraped
-
-    run = persist_scraped(transactions, target)
-    print(f"Saved {run['transaction_count']} transactions to {run['run_path']} (stays on this machine).")
-
-
-def _build_scraper(source, scraper) -> None:
+def _build_scraper(source) -> None:
     """The directive path: the harness's OWN agent writes the scraper from your
     demonstration. A browser opens, you show it how to reach your data once, and
     the embedded agent authors + self-verifies core/scrapers/<key>.py. Failures
     are shown in full, with retry / change-LLM / have-the-agent-revise options."""
     if not ensure_llm_ready():
         return
-    portal_url = (source.login_url or getattr(scraper, "GENERAL_LEDGER_URL", None)
-                  or getattr(scraper, "PORTAL_URL", ""))
+    portal_url = source.login_url
     if not portal_url:
         print("No portal URL known for this source (set login_url in services.yaml).")
         return
@@ -680,68 +606,6 @@ def _run_built_scraper(source) -> None:
 
     run = persist_scraped(transactions, source.login_url or source.key)
     print(f"Saved {run['transaction_count']} transactions to {run['run_path']}.")
-
-
-def _scrape_portal_auto(source, scraper) -> None:
-    """Test the unattended path: the harness signs in with your STORED credentials
-    (no manual login) and scrapes. This first run is headed so you can WATCH what
-    Buildium does after the password — log straight in, ask for email verification,
-    or throw a CAPTCHA. That's the fact that decides whether daily-unattended is
-    possible."""
-    print(f"\nAuto-login scrape for {source.label} — {scraper.read_captured_url() or scraper.PORTAL_URL}")
-    print("The harness signs in itself using your stored Epic credentials (you don't type")
-    print("anything). This run opens a VISIBLE window so you can see exactly what happens")
-    print("after the password — a clean login, a 'check your email' step, or a CAPTCHA.")
-    print("Requires your Epic username/password stored (Manage services & credentials).\n")
-    if not questionary.confirm("Run the auto-login scrape now?", default=True).ask():
-        return
-    try:
-        transactions = scraper.retrieve(headless=False)  # headed so you can watch this test
-    except Exception as exc:
-        _report("portal_scrape_auto", "TUI_SCRAPE_AUTO_FAILED",
-                "Auto-login scrape didn't complete.",
-                "Read the message above — it says where the login landed (verification/CAPTCHA/"
-                "bad-credentials). Full detail in data/logs/agent.jsonl.", exc)
-        return
-
-    print(f"\n{source.label} — scraped after automated login:")
-    _print_transactions(transactions)
-    if not questionary.confirm("Do these look right — save them?", default=False).ask():
-        print("Not saved.")
-        return
-    from core.fetch_ingest import persist_scraped
-
-    run = persist_scraped(transactions, scraper.read_captured_url() or scraper.PORTAL_URL)
-    print(f"Saved {run['transaction_count']} transactions to {run['run_path']}.")
-    print("\nThat worked headed. Next step toward truly hands-off: try it headless "
-          "(retrieve(headless=True)) — if that also works, it can run scheduled/unattended.")
-
-
-def _show_portal_structure(path) -> None:
-    """Print what recon found on the captured page — immediate visibility, then
-    the full structure is on disk for the build step."""
-    try:
-        data = json.loads(Path(path).read_text())
-    except Exception as exc:
-        print(f"Captured, but couldn't read {path}: {exc}")
-        return
-    print(f"\nCaptured page: {data.get('title', '(no title)')}")
-    print(f"URL: {data.get('captured_url', data.get('url', ''))}")
-
-    tables = data.get("tables", [])
-    print(f"\nTables on the page: {len(tables)}")
-    for i, t in enumerate(tables, 1):
-        headers = ", ".join(t.get("headers", [])) or "(no <th> header cells)"
-        print(f"  [{i}] {t.get('row_count', '?')} rows — columns: {headers}")
-
-    downloads = data.get("download_candidates", [])
-    print(f"\nDownload / report links: {len(downloads)}")
-    for d in downloads[:15]:
-        print(f"  • {(d.get('text') or '')[:48]:48}  {d.get('href', '')}")
-
-    print(f"\nFull structure saved to {path}")
-    print("That's the recon. Share that file (it's page structure only — no dollar")
-    print("amounts) and we'll design the scraper against exactly what's there.")
 
 
 def _ask_document() -> Path | None:
