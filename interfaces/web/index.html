@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>K-Realty · property finance</title>
+<style>
+  :root {
+    --bg: #faf9f5; --card: #ffffff; --border: #e7e5df; --text: #1c1b19;
+    --muted: #6b6a64; --accent: #3b6d3b; --danger: #a3312d; --success: #2c6a3a;
+    --radius: 10px;
+  }
+  :root[data-theme="dark"] {
+    --bg: #161818; --card: #202325; --border: #34393d; --text: #e8ecef;
+    --muted: #a2abb2; --accent: #88c888; --danger: #f08a84; --success: #94d89f;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    line-height: 1.5; }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 24px 20px 60px; }
+  header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 20px; flex-wrap: wrap; }
+  h1 { font-size: 19px; font-weight: 600; margin: 0; }
+  .sub { font-size: 13px; color: var(--muted); margin-top: 2px; }
+  .chips { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .chip { font-size: 12px; padding: 4px 10px; border-radius: var(--radius); border: 1px solid var(--border); background: var(--card); color: var(--muted); display: inline-flex; align-items: center; gap: 5px; }
+  .chip.warn { background: #fbf1e0; border-color: #e6d9b8; color: #855009; }
+  :root[data-theme="dark"] .chip.warn { background: #3f3525; border-color: #6c5a3e; color: #f3c98f; }
+  button { font: inherit; cursor: pointer; }
+  .btn { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 7px 12px; color: var(--text); font-size: 13px; }
+  .btn:hover { background: #f2f1ec; }
+  :root[data-theme="dark"] .btn:hover { background: #292d30; }
+  .btn:disabled { opacity: .55; cursor: default; }
+  .icon-btn {
+    border: none;
+    background: transparent;
+    color: var(--muted);
+    border-radius: 999px;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    line-height: 1;
+  }
+  .icon-btn:hover { background: #f2f1ec; color: var(--text); }
+  :root[data-theme="dark"] .icon-btn:hover { background: #292d30; }
+  .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
+  .kpi { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; }
+  .kpi .lbl { font-size: 12px; color: var(--muted); }
+  .kpi .val { font-size: 22px; font-weight: 600; margin-top: 4px; }
+  .kpi-graph { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; margin-bottom: 20px; }
+  .kpi-graph .lbl { font-size: 12px; color: var(--muted); margin-bottom: 10px; }
+  .pie-wrap { display: flex; align-items: center; justify-content: center; gap: 28px; flex-wrap: wrap; }
+  .pie-wrap svg { width: 180px; height: 180px; display: block; }
+  .pie-legend { display: flex; flex-direction: column; gap: 8px; min-width: 170px; }
+  .pie-item { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 13px; }
+  .dot { width: 10px; height: 10px; border-radius: 999px; display: inline-block; margin-right: 7px; }
+  .dot.in { background: var(--success); }
+  .dot.out { background: var(--danger); }
+  .pie-item .name { color: var(--muted); white-space: nowrap; }
+  .pie-empty { color: var(--muted); font-size: 13px; }
+  .view {
+    opacity: 1;
+    transform: translateY(0);
+    transition: opacity .18s ease, transform .18s ease;
+  }
+  .view.is-hidden {
+    display: none;
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  nav {
+    display: flex;
+    gap: 12px;
+    margin-top: 18px;
+    width: min(900px, 100%);
+    margin-left: auto;
+    margin-right: auto;
+    justify-content: center;
+  }
+  nav button {
+    border: 1px solid var(--border);
+    background: var(--card);
+    border-radius: var(--radius);
+    padding: 12px 16px;
+    font-size: 14px;
+    color: var(--muted);
+    flex: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    font-weight: 500;
+  }
+  nav button:hover { background: #f2f1ec; color: var(--text); }
+  :root[data-theme="dark"] nav button:hover { background: #292d30; }
+  nav button.active {
+    color: var(--text);
+    border-color: color-mix(in oklab, var(--accent) 45%, var(--border));
+    box-shadow: 0 0 0 1px color-mix(in oklab, var(--accent) 35%, transparent) inset;
+    font-weight: 600;
+  }
+  .nav-ico {
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .nav-ico svg { display: block; }
+  .nav-ico.ingest svg { width: 24px; height: 24px; }
+  .nav-ico.process svg { width: 24px; height: 24px; }
+  .nav-ico.reporting svg { width: 20px; height: 20px; }
+  .nav-ico.ingest { color: var(--text); }
+  .nav-ico.process { color: #3d5263; }
+  :root[data-theme="dark"] .nav-ico.process { color: #9ab3c6; }
+  .nav-ico.reporting { color: var(--text); }
+  .panel { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 4px 0; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 9px 14px; border-top: 1px solid var(--border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px; }
+  thead th { border-top: none; color: var(--muted); font-weight: 500; }
+  td.amt, th.amt { text-align: right; }
+  .neg { color: var(--danger); }
+  .pos { color: var(--success); }
+  .src { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 14px; border-top: 1px solid var(--border); font-size: 13px; }
+  .src:first-child { border-top: none; }
+  .src .meta { color: var(--muted); font-size: 12px; }
+  .tag { font-size: 11px; padding: 2px 7px; border-radius: 6px; background: #eceae3; color: var(--muted); margin-left: 6px; }
+  .empty { padding: 22px 14px; color: var(--muted); font-size: 13px; }
+  #toast { position: sticky; bottom: 0; margin-top: 16px; font-size: 13px; padding: 10px 14px; border-radius: var(--radius); display: none; }
+  #toast.ok { background: #e8f1e8; color: var(--success); display: block; }
+  #toast.err { background: #f7e6e5; color: var(--danger); display: block; }
+  :root[data-theme="dark"] #toast.ok { background: #223229; }
+  :root[data-theme="dark"] #toast.err { background: #3d2828; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>K-Realty · property finance</h1>
+      <div class="sub">Local dashboard </div>
+    </div>
+    <div class="chips">
+      <span class="chip" id="llm">LLM …</span>
+      <span class="chip" id="pending" style="display:none"></span>
+      <button class="btn" onclick="refresh()">Refresh</button>
+      <button class="icon-btn" id="theme-toggle" onclick="toggleTheme()" aria-label="Enable dark mode" title="Enable dark mode"><span id="theme-icon" aria-hidden="true">&#9790;</span></button>
+    </div>
+  </header>
+
+  <div id="reporting-content" class="view">
+    <div class="kpis">
+      <div class="kpi"><div class="lbl">Money in</div><div class="val pos" id="k-in">—</div></div>
+      <div class="kpi"><div class="lbl">Money out</div><div class="val neg" id="k-out">—</div></div>
+      <div class="kpi"><div class="lbl">Net</div><div class="val" id="k-net">—</div></div>
+      <div class="kpi"><div class="lbl">Transactions</div><div class="val" id="k-count">—</div></div>
+    </div>
+
+    <div class="kpi-graph">
+      <div class="lbl">Cash flow mix</div>
+      <div id="kpi-pie" class="pie-wrap"><div class="pie-empty">No transaction totals yet.</div></div>
+    </div>
+  </div>
+
+  <div class="panel view is-hidden" id="panel"></div>
+
+  <nav>
+    <button id="nav-ingest" onclick="show('ingest')"><span class="nav-ico ingest" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none"><path d="M4.2 3.8 8.8 8.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M6.2 8.4h2.6V5.8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><path d="M6 15V11" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M10 15V8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M14 15v-3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></span>Ingest data</button>
+    <button id="nav-process" onclick="show('process')"><span class="nav-ico process" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M14.3 2.7h-4.6l-.4 2.1a7.8 7.8 0 0 0-1.8.8L5.6 4.3 2.3 7.6l1.3 1.9c-.3.6-.6 1.2-.8 1.8l-2.1.4v4.6l2.1.4c.2.6.5 1.3.8 1.8l-1.3 1.9 3.3 3.3 1.9-1.3c.6.3 1.2.6 1.8.8l.4 2.1h4.6l.4-2.1c.6-.2 1.2-.5 1.8-.8l1.9 1.3 3.3-3.3-1.3-1.9c.3-.6.6-1.2.8-1.8l2.1-.4v-4.6l-2.1-.4a7.2 7.2 0 0 0-.8-1.8l1.3-1.9-3.3-3.3-1.9 1.3c-.6-.3-1.2-.6-1.8-.8z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><circle cx="12" cy="12" r="3.2" stroke="currentColor" stroke-width="1.5"/></svg></span>Process data</button>
+    <button id="nav-reporting" class="active" onclick="show('reporting')"><span class="nav-ico reporting" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none"><rect x="2.5" y="2.5" width="15" height="15" rx="2" stroke="currentColor" stroke-width="1.5"/><path d="M6 13V9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M10 13V6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M14 13v-3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></span>Reporting</button>
+  </nav>
+  <div id="toast"></div>
+</div>
+
+<script>
+  // ── the ONLY transport-specific code. Standalone: POST to the REST server.
+  // In a Claude Live Artifact this one function becomes window.claude.callMcpTool.
+  async function callTool(name, args = {}) {
+    const res = await fetch('/api/tool/' + name, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(args)
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || (name + ' failed'));
+    return data;
+  }
+
+  const money = n => (n < 0 ? '-' : '') + '$' + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const el = id => document.getElementById(id);
+  let current = 'reporting';
+  const THEME_KEY = 'krealty-theme';
+
+  function llmHost(baseUrl) {
+    if (!baseUrl) return 'not set';
+    try {
+      const normalized = baseUrl.includes('://') ? baseUrl : ('http://' + baseUrl);
+      let host = new URL(normalized).hostname || '';
+      if (host.endsWith('.local')) host = host.slice(0, -6);
+      return host || 'not set';
+    } catch {
+      // Best-effort parsing for non-URL strings.
+      let host = String(baseUrl).replace(/^https?:\/\//i, '').split('/')[0].split('?')[0].split('#')[0];
+      if (host.startsWith('[') && host.includes(']')) host = host.slice(1, host.indexOf(']'));
+      else host = host.split(':')[0];
+      if (host.endsWith('.local')) host = host.slice(0, -6);
+      return host || 'not set';
+    }
+  }
+
+  function toast(msg, ok) { const t = el('toast'); t.textContent = msg; t.className = ok ? 'ok' : 'err'; }
+  function clearToast() { el('toast').className = ''; el('toast').style.display = 'none'; }
+
+  function setTheme(theme) {
+    const root = document.documentElement;
+    root.setAttribute('data-theme', theme);
+    localStorage.setItem(THEME_KEY, theme);
+    const next = theme === 'dark' ? 'light' : 'dark';
+    el('theme-icon').innerHTML = theme === 'dark' ? '&#9728;' : '&#9790;';
+    el('theme-toggle').setAttribute('aria-label', 'Enable ' + next + ' mode');
+    el('theme-toggle').setAttribute('title', 'Enable ' + next + ' mode');
+  }
+
+  function initialTheme() {
+    const saved = localStorage.getItem(THEME_KEY);
+    if (saved === 'dark' || saved === 'light') return saved;
+    return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  }
+
+  function toggleTheme() {
+    const currentTheme = document.documentElement.getAttribute('data-theme') || 'light';
+    setTheme(currentTheme === 'dark' ? 'light' : 'dark');
+  }
+
+  function pieSlicePath(cx, cy, r, startAngle, endAngle) {
+    const x1 = cx + r * Math.cos(startAngle);
+    const y1 = cy + r * Math.sin(startAngle);
+    const x2 = cx + r * Math.cos(endAngle);
+    const y2 = cy + r * Math.sin(endAngle);
+    const largeArc = endAngle - startAngle > Math.PI ? 1 : 0;
+    return 'M ' + cx + ' ' + cy + ' L ' + x1 + ' ' + y1 + ' A ' + r + ' ' + r + ' 0 ' + largeArc + ' 1 ' + x2 + ' ' + y2 + ' Z';
+  }
+
+  function renderKpiPie(moneyIn, moneyOut) {
+    const income = Math.max(0, Number(moneyIn) || 0);
+    const outgoing = Math.abs(Number(moneyOut) || 0);
+    const total = income + outgoing;
+    const host = el('kpi-pie');
+
+    if (!total) {
+      host.innerHTML = '<div class="pie-empty">No transaction totals yet.</div>';
+      return;
+    }
+
+    const start = -Math.PI / 2;
+    const split = start + (income / total) * Math.PI * 2;
+    const incomePath = pieSlicePath(100, 100, 78, start, split);
+    const outPath = pieSlicePath(100, 100, 78, split, start + Math.PI * 2);
+
+    host.innerHTML = '<svg viewBox="0 0 200 200" aria-label="Money in versus money out pie chart" role="img">' +
+      '<circle cx="100" cy="100" r="78" fill="none" stroke="var(--border)" stroke-width="1"></circle>' +
+      '<path d="' + incomePath + '" fill="var(--success)"></path>' +
+      '<path d="' + outPath + '" fill="var(--danger)"></path>' +
+      '</svg>' +
+      '<div class="pie-legend">' +
+      '<div class="pie-item"><span class="name"><span class="dot in"></span>Money in</span><b>' + money(income) + '</b></div>' +
+      '<div class="pie-item"><span class="name"><span class="dot out"></span>Money out</span><b>' + money(outgoing) + '</b></div>' +
+      '</div>';
+  }
+
+  async function loadStatus() {
+    try {
+      const s = await callTool('status');
+      el('llm').textContent = 'LLM: ' + llmHost(s.llm.base_url) + (s.llm.model ? ' · ' + s.llm.model : '');
+      const p = s.pending_approvals || [];
+      const pe = el('pending');
+      if (p.length) { pe.style.display = ''; pe.className = 'chip warn'; pe.textContent = p.length + ' approval' + (p.length > 1 ? 's' : '') + ' needed'; }
+      else { pe.style.display = 'none'; }
+    } catch (e) { el('llm').textContent = 'LLM: unavailable'; }
+  }
+
+  async function loadKpis() {
+    const d = await callTool('latest_transactions', { limit: 200 });
+    el('k-in').textContent = money(d.money_in || 0);
+    el('k-out').textContent = money(d.money_out || 0);
+    const net = (d.money_in || 0) + (d.money_out || 0);
+    el('k-net').textContent = money(net);
+    el('k-net').className = 'val ' + (net < 0 ? 'neg' : 'pos');
+    el('k-count').textContent = d.count || 0;
+    renderKpiPie(d.money_in || 0, d.money_out || 0);
+    return d;
+  }
+
+  async function renderReporting() {
+    await loadKpis();
+    el('panel').innerHTML = '';
+  }
+
+  async function renderIngest() {
+    el('panel').innerHTML = '<div class="empty">Loading sources…</div>';
+    const [sources, pending] = await Promise.all([callTool('list_sources'), callTool('pending_approvals')]);
+    let html = '';
+    for (const p of pending) {
+      html += '<div class="src"><div><b>' + p.label + '</b><span class="tag">parser built</span><div class="meta">awaiting approval</div></div>' +
+        '<button class="btn" onclick="act(\'activate_parser\',{source_key:\'' + p.key + '\'})">Activate</button></div>';
+    }
+    for (const s of sources) {
+      let action = '';
+      if (s.has_scraper) action = '<button class="btn" onclick="act(\'run_scraper\',{source_key:\'' + s.key + '\'})">Run scraper</button>';
+      else if (s.is_trigger) action = '<button class="btn" onclick="act(\'fetch_source\',{source_key:\'' + s.key + '\'})">Fetch</button>';
+      html += '<div class="src"><div><b>' + s.label + '</b>' +
+        (s.has_scraper ? '<span class="tag">scraper</span>' : '') + (s.parser_built ? '<span class="tag">parser</span>' : '') +
+        '<div class="meta">' + s.status + ' · ' + (s.input_type || '') + '</div></div>' + action + '</div>';
+    }
+    el('panel').innerHTML = html || '<div class="empty">No sources.</div>';
+  }
+
+  function renderProcess() {
+    el('panel').innerHTML = '<div class="empty">Data processing — categorization, reconciliation, and P&amp;L — isn’t built yet. ' +
+      'It’s deliberately deferred: ingested transactions are stored faithfully first.</div>';
+  }
+
+  async function act(tool, args) {
+    clearToast();
+    const btns = document.querySelectorAll('.src button'); btns.forEach(b => b.disabled = true);
+    toast('Running ' + tool + '…', true);
+    try {
+      const r = await callTool(tool, args);
+      toast(tool + ' done' + (r.count != null ? ' — ' + r.count + ' transactions' : '') + '.', true);
+      await loadStatus(); await loadKpis();
+      if (current === 'ingest') await renderIngest();
+    } catch (e) {
+      toast(tool + ' failed: ' + e.message, false);
+      document.querySelectorAll('.src button').forEach(b => b.disabled = false);
+    }
+  }
+
+  function show(section) {
+    current = section;
+    for (const s of ['reporting', 'ingest', 'process']) el('nav-' + s).className = s === section ? 'active' : '';
+    el('reporting-content').className = 'view' + (section === 'reporting' ? '' : ' is-hidden');
+    el('panel').className = 'panel view' + (section === 'reporting' ? ' is-hidden' : '');
+    clearToast();
+    ({ reporting: renderReporting, ingest: renderIngest, process: renderProcess })[section]();
+  }
+
+  async function refresh() { clearToast(); await loadStatus(); show(current); }
+
+  setTheme(initialTheme());
+  loadStatus();
+  show('reporting');
+</script>
+</body>
+</html>

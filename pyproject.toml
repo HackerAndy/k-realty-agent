@@ -13,6 +13,8 @@ packages = [
 
 [tool.poetry.scripts]
 agent = "interfaces.tui:main"
+agent-mcp = "interfaces.mcp_server:main"
+agent-web = "interfaces.rest_server:main"
 
 [tool.poetry.dependencies]
 python = "^3.11"
@@ -28,6 +30,8 @@ ruamel-yaml = "^0.19.1"
 google-api-python-client = "^2.198.0"
 google-auth = "^2.56.0"
 google-auth-oauthlib = "^1.4.0"
+mcp = "^1.28.1"
+fastapi = "^0.139.2"
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.0"

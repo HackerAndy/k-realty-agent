@@ -47,6 +47,9 @@ from core.fetch_ingest import fetch_and_ingest
 from core.models import Transaction
 from core.observability import get_logger
 from core.parsers import ParseError
+from core.source_status import is_trigger as _is_trigger
+from core.source_status import parser_built as _parser_built
+from core.source_status import pending_approvals
 from core.tools import email_oauth, llm_provider
 from core.tools.credential_store import ensure_master_key
 from core.tools.service_manifest import FetchConfig, ServiceManifest
@@ -180,33 +183,6 @@ def _print_transactions(transactions: list[Transaction]) -> None:
     money_out = sum(t.amount for t in transactions if t.amount < 0)
     print(f"{len(transactions)} transactions | money in {money_in:,.2f} | money out {money_out:,.2f}")
     print("(columns above are this source's own, verbatim — only the in/out totals are normalized)")
-
-
-def _parser_built(source_key: str) -> bool:
-    """True if a parser exists for this source (file written and/or registered)
-    even though the source isn't marked implemented — i.e. built but awaiting
-    the operator's approval."""
-    from core.parsers import REGISTRY
-
-    return (Path("core/parsers") / f"{source_key}.py").exists() or source_key in REGISTRY
-
-
-def pending_approvals(services=None) -> list:
-    """Sources whose parser is built but not yet activated — the harness's
-    outstanding actions that need the operator's explicit yes. Surfaced loudly
-    everywhere so nothing waits in the dark."""
-    services = services if services is not None else ServiceManifest().load()
-    return [
-        s for s in services
-        if not _is_trigger(s) and s.status != "implemented" and _parser_built(s.key)
-    ]
-
-
-def _is_trigger(s) -> bool:
-    """A trigger source (e.g. an inbox) signals that a document has arrived —
-    it's a delivery channel, not itself a document you parse into transactions.
-    It never has a parser; ingesting it means ingesting what it delivers."""
-    return s.input_type == "email_trigger"
 
 
 def _source_marker(s) -> str:
