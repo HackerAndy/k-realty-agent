@@ -18,7 +18,12 @@ from datetime import datetime, timezone
 
 from core import source_status
 from core.fetch_ingest import fetch_and_ingest, persist_scraped
-from core.ingest import ingest_source, load_latest_parsed, transactions_from_run
+from core.ingest import (
+    ingest_source,
+    load_latest_parsed,
+    load_latest_parsed_for,
+    transactions_from_run,
+)
 from core.models import Transaction
 from core.scrapers import get_scraper, has_scraper
 from core.tools import llm_provider
@@ -99,6 +104,19 @@ def latest_transactions(limit: int = 200) -> dict:
         return {"source_key": None, "count": 0, "money_in": 0, "money_out": 0, "transactions": []}
     txns = transactions_from_run(run)
     return {"source_key": run.get("source_key"), "month": run.get("month"),
+            **_summary(txns), "transactions": _rows(txns, limit)}
+
+
+def source_transactions(source_key: str, limit: int = 500) -> dict:
+    """The most recent ingested transactions for ONE source, with money-in/out
+    totals. Powers the per-source input-validation view. Empty (not an error) when
+    the source has no persisted run yet."""
+    run = load_latest_parsed_for(source_key)
+    if run is None:
+        return {"source_key": source_key, "count": 0, "money_in": 0, "money_out": 0, "transactions": []}
+    txns = transactions_from_run(run)
+    return {"source_key": run.get("source_key"), "month": run.get("month"),
+            "parsed_at": run.get("parsed_at"), "run_path": run.get("run_path"),
             **_summary(txns), "transactions": _rows(txns, limit)}
 
 
@@ -357,7 +375,7 @@ def activate_parser(source_key: str) -> dict:
 
 
 # The tools the MCP server registers, in one place.
-READ_TOOLS = [list_sources, latest_transactions, pending_approvals, llm_status, status]
+READ_TOOLS = [list_sources, latest_transactions, source_transactions, pending_approvals, llm_status, status]
 ACTION_TOOLS = [
     ingest_document,
     run_scraper,

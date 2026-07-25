@@ -48,6 +48,31 @@ def test_latest_transactions_after_ingest(tmp_path, monkeypatch):
     assert set(t["fields"]) >= {"Date", "Property", "Amount"}
 
 
+def test_source_transactions_empty(tmp_path, monkeypatch):
+    monkeypatch.setattr(ingest, "DATA_DIR", tmp_path / "parsed")
+    result = mcp_tools.source_transactions("epic_property_management")
+    assert result["source_key"] == "epic_property_management"
+    assert result["count"] == 0 and result["transactions"] == []
+
+
+def test_source_transactions_scopes_to_one_source(tmp_path, monkeypatch):
+    monkeypatch.setattr(ingest, "DATA_DIR", tmp_path / "parsed")
+    manifest = ServiceManifest(tmp_path / "services.yaml")
+    manifest.add(Service(key="epic_property_management", label="Epic",
+                         parser="buildium_owner_statement", status="implemented"))
+    ingest.ingest_source("epic_property_management", FIXTURE, manifest=manifest)
+
+    # A run for a DIFFERENT source must not leak into this source's view.
+    other = Transaction(source_key="dfcu_financial_bank", date=datetime(2026, 7, 1),
+                        amount=99.0, description="x", fields={"Amount": "99.00"})
+    ingest._persist("dfcu_financial_bank", [other], FIXTURE, "test", None)
+
+    result = mcp_tools.source_transactions("epic_property_management")
+    assert result["source_key"] == "epic_property_management"
+    assert result["count"] == 6
+    assert all("Property" in t["fields"] for t in result["transactions"])
+
+
 def test_run_scraper_requires_a_built_scraper():
     with pytest.raises(mcp_tools.ToolError, match="No scraper built"):
         mcp_tools.run_scraper("first_federal_loan")

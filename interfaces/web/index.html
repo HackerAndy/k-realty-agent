@@ -160,6 +160,53 @@
   #toast.err { background: #f7e6e5; color: var(--danger); display: block; }
   :root[data-theme="dark"] #toast.ok { background: #223229; }
   :root[data-theme="dark"] #toast.err { background: #3d2828; }
+
+  /* ── Ingest accordion (per-source acquire + validation) ── */
+  .acc { display: flex; flex-direction: column; gap: 10px; }
+  .accitem { background: var(--card); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  .accitem.open { border-color: color-mix(in oklab, var(--accent) 45%, var(--border)); }
+  .acchead { display: flex; align-items: center; gap: 12px; padding: 14px 16px; cursor: pointer; }
+  .acchead:hover { background: #f2f1ec; }
+  :root[data-theme="dark"] .acchead:hover { background: #292d30; }
+  .accitem.open .acchead { border-bottom: 1px solid var(--border); }
+  .acchead .sdot { width: 8px; height: 8px; border-radius: 999px; flex: none; background: #b8b9b3; }
+  .acchead .sdot.ready { background: var(--success); }
+  .acchead .sdot.trig { background: #c99a3a; }
+  .acchead .info { flex: 1; min-width: 0; }
+  .acchead .nm { font-weight: 600; font-size: 14.5px; }
+  .acchead .meta { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .acchead .rt { text-align: right; font-size: 13px; }
+  .acchead .rt .net { font-weight: 600; }
+  .acchead .rt .netlbl { color: var(--muted); font-size: 11px; }
+  .acchead .caret { color: var(--muted); font-size: 18px; transition: transform .12s; display: inline-block; }
+  .accitem.open .caret { transform: rotate(90deg); }
+  .accbody { padding: 16px; }
+  .accbody .actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
+
+  .kstrip { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; margin-bottom: 14px; }
+  .kstrip .k { background: var(--card); padding: 11px 13px; }
+  .kstrip .k .l { font-size: 11.5px; color: var(--muted); }
+  .kstrip .k .v { font-size: 18px; font-weight: 600; margin-top: 3px; }
+  .controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+  .controls .grp { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); }
+  .controls select { font: inherit; font-size: 13px; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--card); color: var(--text); cursor: pointer; }
+  .controls input[type=search] { flex: 1; min-width: 170px; font: inherit; font-size: 13px; padding: 6px 11px; border-radius: 8px; border: 1px solid var(--border); background: var(--card); color: var(--text); }
+  .controls .hint { font-size: 11.5px; color: var(--muted); }
+  .tbl-wrap { border: 1px solid var(--border); border-radius: 10px; overflow-x: auto; }
+  .tbl-wrap table td, .tbl-wrap table th { border-top: 1px solid var(--border); }
+  .tbl-wrap thead th { background: color-mix(in oklab, var(--muted) 8%, var(--card)); position: sticky; top: 0; }
+  .rollup { border-top: 1px solid var(--border); }
+  .rollup:first-child { border-top: none; }
+  .rollup-h { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; font-size: 13px; cursor: pointer; }
+  .rollup-h:hover { background: #f2f1ec; }
+  :root[data-theme="dark"] .rollup-h:hover { background: #292d30; }
+  .rollup-h .cnt { color: var(--muted); font-size: 12px; font-weight: 400; margin-left: 8px; }
+  .rollup-h .caret { color: var(--muted); display: inline-block; transition: transform .12s; }
+  .rollup.open .rollup-h .caret { transform: rotate(90deg); }
+  .rollup-body { display: none; }
+  .rollup.open .rollup-body { display: block; }
+  .notbuilt { background: color-mix(in oklab, var(--muted) 7%, var(--card)); border: 1px dashed var(--border); border-radius: 10px; padding: 18px; text-align: center; color: var(--muted); font-size: 13px; }
+  .notbuilt b { color: var(--text); }
 </style>
 </head>
 <body>
@@ -226,6 +273,13 @@
   const actionStepHistory = {};
   const actionRunState = {};
 
+  // Ingest accordion state: which source is expanded, per-source validation
+  // controls (group/search), and a cache of each source's transactions.
+  const ingestOpen = { key: null };
+  const sourceView = {};      // source_key -> { group, query }
+  const sourceTxnCache = {};  // source_key -> source_transactions() result
+  const svState = k => sourceView[k] || (sourceView[k] = { group: 'None', query: '' });
+
   function llmHost(baseUrl) {
     if (!baseUrl) return 'not set';
     try {
@@ -246,7 +300,7 @@
   function toast(msg, ok) { const t = el('toast'); t.textContent = msg; t.style.display = ''; t.className = ok ? 'ok' : 'err'; }
   function clearToast() { const t = el('toast'); t.className = ''; t.style.display = 'none'; }
   function sourceDomId(sourceKey) { return String(sourceKey || '').replace(/[^a-zA-Z0-9_-]/g, '_'); }
-  function setSourceButtonsDisabled(disabled) { document.querySelectorAll('.src button').forEach(b => b.disabled = disabled); }
+  function setSourceButtonsDisabled(disabled) { document.querySelectorAll('.accbody button, .src button').forEach(b => b.disabled = disabled); }
 
   function defaultUploadSteps(fileName) {
     return [
@@ -438,6 +492,8 @@
     el('panel').innerHTML = '';
   }
 
+  function esc(v) { return String(v == null ? '' : v).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
   async function renderIngest() {
     el('panel').innerHTML = '<div class="empty">Loading sources…</div>';
     const [sourcesRes, pendingRes] = await Promise.allSettled([
@@ -458,28 +514,154 @@
       const pendingErr = (pendingRes.reason && pendingRes.reason.message) ? pendingRes.reason.message : 'unknown error';
       toast('Loaded sources, but pending approvals failed: ' + pendingErr, false);
     }
+    const pendingKeys = new Set(pending.map(p => p.key));
 
-    let html = '';
-    for (const p of pending) {
-      html += '<div class="src"><div><b>' + p.label + '</b><span class="tag">parser built</span><div class="meta">awaiting approval</div></div>' +
-        '<button class="btn" onclick="act(\'activate_parser\',{source_key:\'' + p.key + '\'})">Activate</button></div>';
-    }
-    for (const s of sources) {
-      let action = '';
-      if (s.has_scraper) action = '<button class="btn" onclick="act(\'run_scraper\',{source_key:\'' + s.key + '\'})">Run scraper</button>';
-      else if (s.is_trigger) action = '<button class="btn" onclick="act(\'fetch_source\',{source_key:\'' + s.key + '\'})">Fetch</button>';
-      else if (canUploadForInputType(s.input_type)) action = sourceUploadAction(s.key);
-      html += '<div class="src"><div><b>' + s.label + '</b>' +
-        (s.has_scraper ? '<span class="tag">scraper</span>' : '') + (s.parser_built ? '<span class="tag">parser</span>' : '') +
-        '<div class="meta">' + s.status + ' · ' + (s.input_type || '') + '</div></div>' + action + '</div>';
-      if (action) html += sourceUploadStepsRow(s.key);
-    }
-    el('panel').innerHTML = html || '<div class="empty">No sources.</div>';
+    if (!sources.length) { el('panel').innerHTML = '<div class="empty">No sources.</div>'; return; }
 
-    // Rehydrate persisted step timelines so completed/failed processing remains visible.
+    // Load transactions for the open source before rendering its body.
+    const openKey = ingestOpen.key;
+    if (openKey && sources.some(s => s.key === openKey) && !sourceTxnCache[openKey]) {
+      try { sourceTxnCache[openKey] = await callTool('source_transactions', { source_key: openKey }); }
+      catch (e) { sourceTxnCache[openKey] = { error: e.message, transactions: [], count: 0, money_in: 0, money_out: 0 }; }
+    }
+
+    let html = '<div class="acc">';
     for (const s of sources) {
-      const prior = actionStepHistory[s.key];
-      if (prior && prior.length) renderUploadSteps(s.key, prior);
+      const isOpen = s.key === openKey;
+      const isPending = pendingKeys.has(s.key);
+      const dotClass = s.status === 'implemented' ? 'ready' : (s.is_trigger ? 'trig' : '');
+      const tags = (s.has_scraper ? '<span class="tag">scraper</span>' : '') +
+        (s.parser_built ? '<span class="tag">parser</span>' : '') +
+        (isPending ? '<span class="tag">needs approval</span>' : '');
+      const data = isOpen ? sourceTxnCache[s.key] : null;
+      const rt = (data && data.count)
+        ? '<div class="rt"><div class="net ' + (netOf(data) < 0 ? 'neg' : 'pos') + '">' + money(netOf(data)) + '</div><div class="netlbl">net · ' + data.count + ' rows</div></div>'
+        : '';
+      html += '<div class="accitem' + (isOpen ? ' open' : '') + '">' +
+        '<div class="acchead" onclick="toggleSource(\'' + s.key + '\')">' +
+          '<span class="sdot ' + dotClass + '"></span>' +
+          '<div class="info"><div class="nm">' + esc(s.label) + tags + '</div>' +
+            '<div class="meta">' + esc(s.status) + ' · ' + esc(s.input_type || '') + '</div></div>' +
+          rt + '<span class="caret">&#8250;</span></div>' +
+        (isOpen ? '<div class="accbody">' + sourceBodyHTML(s, isPending) + '</div>' : '') +
+      '</div>';
+    }
+    html += '</div>';
+    el('panel').innerHTML = html;
+
+    // Rehydrate the open source's action step timeline + wire its file input.
+    if (openKey) {
+      const prior = actionStepHistory[openKey];
+      if (prior && prior.length) renderUploadSteps(openKey, prior);
+    }
+  }
+
+  function netOf(data) { return (data.money_in || 0) + (data.money_out || 0); }
+
+  function toggleSource(key) {
+    ingestOpen.key = (ingestOpen.key === key) ? null : key;
+    renderIngest();
+  }
+
+  function sourceActionHTML(s, isPending) {
+    let btns = '';
+    if (isPending) btns += '<button class="btn" onclick="act(\'activate_parser\',{source_key:\'' + s.key + '\'})">Activate parser</button>';
+    if (s.has_scraper) btns += '<button class="btn" onclick="act(\'run_scraper\',{source_key:\'' + s.key + '\'})">Run scraper</button>';
+    else if (s.is_trigger) btns += '<button class="btn" onclick="act(\'fetch_source\',{source_key:\'' + s.key + '\'})">Fetch now</button>';
+    else if (canUploadForInputType(s.input_type)) btns += sourceUploadAction(s.key);
+    return btns;
+  }
+
+  function sourceBodyHTML(s, isPending) {
+    const actions = '<div class="actions">' + sourceActionHTML(s, isPending) + '</div>' + sourceUploadStepsRow(s.key);
+    const data = sourceTxnCache[s.key];
+    if (!data) return actions + '<div class="empty">Loading transactions…</div>';
+    if (data.error) return actions + '<div class="notbuilt">Couldn’t load transactions: ' + esc(data.error) + '</div>';
+    if (!data.transactions || !data.transactions.length) {
+      const msg = s.is_trigger
+        ? 'This is a <b>delivery trigger</b>, not a ledger. Fetched documents are ingested under the source they’re routed to — nothing to validate here directly.'
+        : 'No transactions yet. Acquire data above to validate it here.';
+      return actions + '<div class="notbuilt">' + msg + '</div>';
+    }
+    return actions + '<div id="detail-' + sourceDomId(s.key) + '" class="__detail">' + validationHTML(s.key, data) + '</div>';
+  }
+
+  function faithfulCols(rows) { return rows.length ? Object.keys(rows[0].fields || {}) : []; }
+
+  function txnTableHTML(rows) {
+    if (!rows.length) return '<div class="empty">No rows match.</div>';
+    const cols = faithfulCols(rows);
+    if (!cols.length) return '<div class="empty">No columns to show.</div>';
+    const head = cols.map(c => '<th class="' + (c === 'Amount' ? 'amt' : '') + '">' + esc(c) + '</th>').join('');
+    const body = rows.map(t => '<tr>' + cols.map(c => {
+      const v = (t.fields || {})[c];
+      if (c === 'Amount') { const n = parseFloat(v); return '<td class="amt ' + (n < 0 ? 'neg' : 'pos') + '">' + (isNaN(n) ? esc(v) : money(n)) + '</td>'; }
+      return '<td title="' + esc(v) + '">' + esc(v) + '</td>';
+    }).join('') + '</tr>').join('');
+    return '<div class="tbl-wrap"><table><thead><tr>' + head + '</tr></thead><tbody>' + body + '</tbody></table></div>';
+  }
+
+  function validationHTML(key, data) {
+    const view = svState(key);
+    const rowsAll = data.transactions || [];
+    const cols = faithfulCols(rowsAll);
+    const net = netOf(data);
+    const strip = '<div class="kstrip">' +
+      '<div class="k"><div class="l">Money in</div><div class="v pos">' + money(data.money_in || 0) + '</div></div>' +
+      '<div class="k"><div class="l">Money out</div><div class="v neg">' + money(data.money_out || 0) + '</div></div>' +
+      '<div class="k"><div class="l">Net</div><div class="v ' + (net < 0 ? 'neg' : 'pos') + '">' + money(net) + '</div></div>' +
+      '<div class="k"><div class="l">Rows</div><div class="v">' + (data.count || 0) + '</div></div></div>';
+
+    const groupSafe = cols.includes(view.group) ? view.group : 'None';
+    const opts = ['None'].concat(cols).map(o =>
+      '<option value="' + esc(o) + '"' + (o === groupSafe ? ' selected' : '') + '>' + (o === 'None' ? 'None (flat ledger)' : esc(o)) + '</option>').join('');
+    const controls = '<div class="controls">' +
+      '<div class="grp">Group by <select onchange="setSourceGroup(\'' + key + '\',this.value)">' + opts + '</select></div>' +
+      '<input type="search" placeholder="Search this source…" value="' + esc(view.query) + '" oninput="setSourceQuery(\'' + key + '\',this.value)">' +
+      '<span class="hint">columns are this source’s own</span></div>';
+
+    // filter
+    let rows = rowsAll.slice();
+    if (view.query.trim()) {
+      const q = view.query.toLowerCase();
+      rows = rows.filter(t => Object.values(t.fields || {}).some(v => String(v).toLowerCase().includes(q)));
+    }
+
+    let bodyHTML;
+    if (groupSafe === 'None') {
+      bodyHTML = txnTableHTML(rows);
+    } else {
+      const g = {};
+      rows.forEach(t => { const gk = (t.fields || {})[groupSafe] || '—'; (g[gk] = g[gk] || []).push(t); });
+      const keys = Object.keys(g).sort((a, b) => g[b].length - g[a].length);
+      bodyHTML = '<div class="tbl-wrap">' + (keys.length ? keys.map((gk, i) => {
+        const gnet = g[gk].reduce((sum, t) => sum + t.amount, 0);
+        return '<div class="rollup" id="ru_' + sourceDomId(key) + '_' + i + '">' +
+          '<div class="rollup-h" onclick="toggleRollup(\'' + key + '\',' + i + ')">' +
+            '<span><span class="caret">&#8250;</span> <b>' + esc(gk) + '</b><span class="cnt">' + g[gk].length + ' rows</span></span>' +
+            '<span class="' + (gnet < 0 ? 'neg' : 'pos') + '">' + money(gnet) + '</span></div>' +
+          '<div class="rollup-body">' + txnTableHTML(g[gk]) + '</div></div>';
+      }).join('') : '<div class="empty">No rows match.</div>') + '</div>';
+    }
+    return strip + controls + bodyHTML;
+  }
+
+  function toggleRollup(key, i) { const r = el('ru_' + sourceDomId(key) + '_' + i); if (r) r.classList.toggle('open'); }
+
+  function setSourceGroup(key, value) { svState(key).group = value.startsWith('None') ? 'None' : value; renderDetailInPlace(key); }
+  function setSourceQuery(key, value) { svState(key).query = value; renderDetailInPlace(key, true); }
+
+  function renderDetailInPlace(key, keepFocus) {
+    const data = sourceTxnCache[key];
+    const holder = el('detail-' + sourceDomId(key));
+    if (!holder || !data || !data.transactions || !data.transactions.length) return;
+    const active = document.activeElement;
+    const wasSearch = active && active.type === 'search';
+    const caret = wasSearch ? active.selectionStart : null;
+    holder.innerHTML = validationHTML(key, data);
+    if (keepFocus && wasSearch) {
+      const ns = holder.querySelector('input[type=search]');
+      if (ns) { ns.focus(); try { ns.setSelectionRange(caret, caret); } catch (e) {} }
     }
   }
 
@@ -577,6 +759,7 @@
           toast('upload_ingest done' + (payload.count != null ? ' — ' + payload.count + ' transactions' : '') + '.', true);
           await loadStatus();
           await loadKpis();
+          delete sourceTxnCache[sourceKey];
           if (current === 'ingest') await renderIngest();
           resolve(payload);
         } else {
@@ -706,6 +889,7 @@
 
       toast(tool + ' done' + (r.count != null ? ' — ' + r.count + ' transactions' : '') + '.', true);
       await loadStatus(); await loadKpis();
+      if (sourceKey) delete sourceTxnCache[sourceKey];
       if (current === 'ingest') await renderIngest();
     } catch (e) {
       if (sourceKey && runId && !isCurrentActionRun(sourceKey, runId)) return;

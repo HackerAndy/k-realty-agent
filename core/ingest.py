@@ -156,5 +156,22 @@ def load_latest_parsed() -> dict | None:
     return data
 
 
+def load_latest_parsed_for(source_key: str) -> dict | None:
+    """Most recent persisted parse for ONE source, or None. Matches on the run's
+    stored source_key (not the filename) so key prefixes can't collide."""
+    if not DATA_DIR.exists():
+        return None
+    runs = sorted(DATA_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for path in runs:
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if data.get("source_key") == source_key:
+            data["run_path"] = str(path)
+            return data
+    return None
+
+
 def transactions_from_run(run: dict) -> list[Transaction]:
     return [Transaction.model_validate(t) for t in run["transactions"]]
