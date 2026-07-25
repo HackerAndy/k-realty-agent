@@ -9,23 +9,40 @@
     --bg: #faf9f5; --card: #ffffff; --border: #e7e5df; --text: #1c1b19;
     --muted: #6b6a64; --accent: #3b6d3b; --danger: #a3312d; --success: #2c6a3a;
     --radius: 10px;
+    --accent-soft: #e9f1e7; --faint: #9a9c92;
+    --shadow: 0 1px 2px rgba(28,27,25,.05), 0 6px 20px rgba(28,27,25,.06);
   }
   :root[data-theme="dark"] {
     --bg: #161818; --card: #202325; --border: #34393d; --text: #e8ecef;
     --muted: #a2abb2; --accent: #88c888; --danger: #f08a84; --success: #94d89f;
+    --accent-soft: #26302a; --faint: #7c847c;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.35);
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--text);
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     line-height: 1.5; }
   .wrap { max-width: 900px; margin: 0 auto; padding: 24px 20px 60px; }
-  header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 20px; flex-wrap: wrap; }
-  h1 { font-size: 19px; font-weight: 600; margin: 0; }
-  .sub { font-size: 13px; color: var(--muted); margin-top: 2px; }
-  .chips { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .chip { font-size: 12px; padding: 4px 10px; border-radius: var(--radius); border: 1px solid var(--border); background: var(--card); color: var(--muted); display: inline-flex; align-items: center; gap: 5px; }
   .chip.warn { background: #fbf1e0; border-color: #e6d9b8; color: #855009; }
   :root[data-theme="dark"] .chip.warn { background: #3f3525; border-color: #6c5a3e; color: #f3c98f; }
+  /* ── Top bar (brand + Input→Process→Report pills), from the accordion mockup ── */
+  .topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 22px; flex-wrap: wrap; }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .brand .mark { width: 28px; height: 28px; border-radius: 8px; background: var(--accent); color: #fff; display: grid; place-items: center; font-weight: 700; font-size: 15px; }
+  :root[data-theme="dark"] .brand .mark { color: #12160f; }
+  .brand b { font-size: 15px; font-weight: 650; letter-spacing: -.01em; }
+  .pillars { display: flex; gap: 4px; background: var(--card); border: 1px solid var(--border); border-radius: 999px; padding: 4px; box-shadow: var(--shadow); }
+  .pillars button { font: inherit; font-size: 13px; border: none; background: transparent; color: var(--muted); padding: 7px 15px; border-radius: 999px; cursor: pointer; display: inline-flex; align-items: center; gap: 7px; }
+  .pillars button .step { font-size: 10px; font-weight: 700; color: var(--faint); }
+  .pillars button.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+  .pillars button.on .step { color: var(--accent); }
+  .pillars button:not(.on):hover { color: var(--text); }
+  .topbar .right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+  .pagehead { margin: 0 2px 18px; }
+  .pagehead h1 { font-size: 20px; font-weight: 650; letter-spacing: -.015em; margin: 0; }
+  .pagehead p { margin: 3px 0 0; color: var(--muted); font-size: 13.5px; }
+
   button { font: inherit; cursor: pointer; }
   .btn { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 7px 12px; color: var(--text); font-size: 13px; }
   .btn:hover { background: #f2f1ec; }
@@ -47,21 +64,6 @@
   }
   .icon-btn:hover { background: #f2f1ec; color: var(--text); }
   :root[data-theme="dark"] .icon-btn:hover { background: #292d30; }
-  .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
-  .kpi { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; }
-  .kpi .lbl { font-size: 12px; color: var(--muted); }
-  .kpi .val { font-size: 22px; font-weight: 600; margin-top: 4px; }
-  .kpi-graph { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; margin-bottom: 20px; }
-  .kpi-graph .lbl { font-size: 12px; color: var(--muted); margin-bottom: 10px; }
-  .pie-wrap { display: flex; align-items: center; justify-content: center; gap: 28px; flex-wrap: wrap; }
-  .pie-wrap svg { width: 180px; height: 180px; display: block; }
-  .pie-legend { display: flex; flex-direction: column; gap: 8px; min-width: 170px; }
-  .pie-item { display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 13px; }
-  .dot { width: 10px; height: 10px; border-radius: 999px; display: inline-block; margin-right: 7px; }
-  .dot.in { background: var(--success); }
-  .dot.out { background: var(--danger); }
-  .pie-item .name { color: var(--muted); white-space: nowrap; }
-  .pie-empty { color: var(--muted); font-size: 13px; }
   .view {
     opacity: 1;
     transform: translateY(0);
@@ -72,51 +74,6 @@
     opacity: 0;
     transform: translateY(6px);
   }
-  nav {
-    display: flex;
-    gap: 12px;
-    margin-top: 18px;
-    width: min(900px, 100%);
-    margin-left: auto;
-    margin-right: auto;
-    justify-content: center;
-  }
-  nav button {
-    border: 1px solid var(--border);
-    background: var(--card);
-    border-radius: var(--radius);
-    padding: 12px 16px;
-    font-size: 14px;
-    color: var(--muted);
-    flex: 1;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    font-weight: 500;
-  }
-  nav button:hover { background: #f2f1ec; color: var(--text); }
-  :root[data-theme="dark"] nav button:hover { background: #292d30; }
-  nav button.active {
-    color: var(--text);
-    border-color: color-mix(in oklab, var(--accent) 45%, var(--border));
-    box-shadow: 0 0 0 1px color-mix(in oklab, var(--accent) 35%, transparent) inset;
-    font-weight: 600;
-  }
-  .nav-ico {
-    line-height: 1;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-  }
-  .nav-ico svg { display: block; }
-  .nav-ico.ingest svg { width: 24px; height: 24px; }
-  .nav-ico.process svg { width: 24px; height: 24px; }
-  .nav-ico.reporting svg { width: 20px; height: 20px; }
-  .nav-ico.ingest { color: var(--text); }
-  .nav-ico.process { color: #3d5263; }
-  :root[data-theme="dark"] .nav-ico.process { color: #9ab3c6; }
-  .nav-ico.reporting { color: var(--text); }
   .panel { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 4px 0; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th, td { text-align: left; padding: 9px 14px; border-top: 1px solid var(--border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 220px; }
@@ -211,40 +168,23 @@
 </head>
 <body>
 <div class="wrap">
-  <header>
-    <div>
-      <h1>K-Realty · property finance</h1>
-      <div class="sub">Local dashboard </div>
+  <div class="topbar">
+    <div class="brand"><span class="mark">K</span><b>K-Realty</b></div>
+    <div class="pillars">
+      <button id="nav-ingest" onclick="show('ingest')"><span class="step">1</span>Ingest</button>
+      <button id="nav-process" onclick="show('process')"><span class="step">2</span>Process</button>
+      <button id="nav-reporting" onclick="show('reporting')"><span class="step">3</span>Report</button>
     </div>
-    <div class="chips">
+    <div class="right">
       <span class="chip" id="llm">LLM …</span>
       <span class="chip" id="pending" style="display:none"></span>
-      <button class="btn" onclick="refresh()">Refresh</button>
       <button class="icon-btn" id="theme-toggle" onclick="toggleTheme()" aria-label="Enable dark mode" title="Enable dark mode"><span id="theme-icon" aria-hidden="true">&#9790;</span></button>
     </div>
-  </header>
-
-  <div id="reporting-content" class="view">
-    <div class="kpis">
-      <div class="kpi"><div class="lbl">Money in</div><div class="val pos" id="k-in">—</div></div>
-      <div class="kpi"><div class="lbl">Money out</div><div class="val neg" id="k-out">—</div></div>
-      <div class="kpi"><div class="lbl">Net</div><div class="val" id="k-net">—</div></div>
-      <div class="kpi"><div class="lbl">Transactions</div><div class="val" id="k-count">—</div></div>
-    </div>
-
-    <div class="kpi-graph">
-      <div class="lbl">Cash flow mix</div>
-      <div id="kpi-pie" class="pie-wrap"><div class="pie-empty">No transaction totals yet.</div></div>
-    </div>
   </div>
+  <div class="pagehead" id="pagehead"><h1>Overview</h1></div>
 
-  <div class="panel view is-hidden" id="panel"></div>
+  <div class="panel view" id="panel"></div>
 
-  <nav>
-    <button id="nav-ingest" onclick="show('ingest')"><span class="nav-ico ingest" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none"><path d="M4.2 3.8 8.8 8.4" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M6.2 8.4h2.6V5.8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><path d="M6 15V11" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M10 15V8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M14 15v-3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></span>Ingest data</button>
-    <button id="nav-process" onclick="show('process')"><span class="nav-ico process" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M14.3 2.7h-4.6l-.4 2.1a7.8 7.8 0 0 0-1.8.8L5.6 4.3 2.3 7.6l1.3 1.9c-.3.6-.6 1.2-.8 1.8l-2.1.4v4.6l2.1.4c.2.6.5 1.3.8 1.8l-1.3 1.9 3.3 3.3 1.9-1.3c.6.3 1.2.6 1.8.8l.4 2.1h4.6l.4-2.1c.6-.2 1.2-.5 1.8-.8l1.9 1.3 3.3-3.3-1.3-1.9c.3-.6.6-1.2.8-1.8l2.1-.4v-4.6l-2.1-.4a7.2 7.2 0 0 0-.8-1.8l1.3-1.9-3.3-3.3-1.9 1.3c-.6-.3-1.2-.6-1.8-.8z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><circle cx="12" cy="12" r="3.2" stroke="currentColor" stroke-width="1.5"/></svg></span>Process data</button>
-    <button id="nav-reporting" class="active" onclick="show('reporting')"><span class="nav-ico reporting" aria-hidden="true"><svg viewBox="0 0 20 20" fill="none"><rect x="2.5" y="2.5" width="15" height="15" rx="2" stroke="currentColor" stroke-width="1.5"/><path d="M6 13V9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M10 13V6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/><path d="M14 13v-3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></span>Reporting</button>
-  </nav>
   <div id="toast"></div>
 </div>
 
@@ -428,42 +368,6 @@
     setTheme(currentTheme === 'dark' ? 'light' : 'dark');
   }
 
-  function pieSlicePath(cx, cy, r, startAngle, endAngle) {
-    const x1 = cx + r * Math.cos(startAngle);
-    const y1 = cy + r * Math.sin(startAngle);
-    const x2 = cx + r * Math.cos(endAngle);
-    const y2 = cy + r * Math.sin(endAngle);
-    const largeArc = endAngle - startAngle > Math.PI ? 1 : 0;
-    return 'M ' + cx + ' ' + cy + ' L ' + x1 + ' ' + y1 + ' A ' + r + ' ' + r + ' 0 ' + largeArc + ' 1 ' + x2 + ' ' + y2 + ' Z';
-  }
-
-  function renderKpiPie(moneyIn, moneyOut) {
-    const income = Math.max(0, Number(moneyIn) || 0);
-    const outgoing = Math.abs(Number(moneyOut) || 0);
-    const total = income + outgoing;
-    const host = el('kpi-pie');
-
-    if (!total) {
-      host.innerHTML = '<div class="pie-empty">No transaction totals yet.</div>';
-      return;
-    }
-
-    const start = -Math.PI / 2;
-    const split = start + (income / total) * Math.PI * 2;
-    const incomePath = pieSlicePath(100, 100, 78, start, split);
-    const outPath = pieSlicePath(100, 100, 78, split, start + Math.PI * 2);
-
-    host.innerHTML = '<svg viewBox="0 0 200 200" aria-label="Money in versus money out pie chart" role="img">' +
-      '<circle cx="100" cy="100" r="78" fill="none" stroke="var(--border)" stroke-width="1"></circle>' +
-      '<path d="' + incomePath + '" fill="var(--success)"></path>' +
-      '<path d="' + outPath + '" fill="var(--danger)"></path>' +
-      '</svg>' +
-      '<div class="pie-legend">' +
-      '<div class="pie-item"><span class="name"><span class="dot in"></span>Money in</span><b>' + money(income) + '</b></div>' +
-      '<div class="pie-item"><span class="name"><span class="dot out"></span>Money out</span><b>' + money(outgoing) + '</b></div>' +
-      '</div>';
-  }
-
   async function loadStatus() {
     try {
       const s = await callTool('status');
@@ -475,21 +379,9 @@
     } catch (e) { el('llm').textContent = 'LLM: unavailable'; }
   }
 
-  async function loadKpis() {
-    const d = await callTool('latest_transactions', { limit: 200 });
-    el('k-in').textContent = money(d.money_in || 0);
-    el('k-out').textContent = money(d.money_out || 0);
-    const net = (d.money_in || 0) + (d.money_out || 0);
-    el('k-net').textContent = money(net);
-    el('k-net').className = 'val ' + (net < 0 ? 'neg' : 'pos');
-    el('k-count').textContent = d.count || 0;
-    renderKpiPie(d.money_in || 0, d.money_out || 0);
-    return d;
-  }
-
-  async function renderReporting() {
-    await loadKpis();
-    el('panel').innerHTML = '';
+  function renderReporting() {
+    el('panel').innerHTML = '<div class="empty">Reporting — cross-source summaries, P&amp;L, and Schedule&nbsp;E — isn’t built yet. ' +
+      'It’s the third pillar, after ingested data has been processed. For now, validate each source’s data under <b>Ingest</b>.</div>';
   }
 
   function esc(v) { return String(v == null ? '' : v).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
@@ -758,7 +650,6 @@
           if (progressPct) progressPct.textContent = '100%';
           toast('upload_ingest done' + (payload.count != null ? ' — ' + payload.count + ' transactions' : '') + '.', true);
           await loadStatus();
-          await loadKpis();
           delete sourceTxnCache[sourceKey];
           if (current === 'ingest') await renderIngest();
           resolve(payload);
@@ -802,7 +693,8 @@
         if (status && status.status === 'completed') {
           latest = updateUploadStep(latest, 'done', 'success', 'Complete');
           renderUploadSteps(sourceKey, latest);
-          await loadStatus(); await loadKpis();
+          await loadStatus();
+          delete sourceTxnCache[sourceKey];
           if (current === 'ingest') await renderIngest();
           if (resumeTool) {
             // The original action failed only because the session was stale —
@@ -888,7 +780,7 @@
       }
 
       toast(tool + ' done' + (r.count != null ? ' — ' + r.count + ' transactions' : '') + '.', true);
-      await loadStatus(); await loadKpis();
+      await loadStatus();
       if (sourceKey) delete sourceTxnCache[sourceKey];
       if (current === 'ingest') await renderIngest();
     } catch (e) {
@@ -947,20 +839,24 @@
     }
   }
 
+  const PAGEHEAD = {
+    ingest: { h: 'Data sources', p: 'Acquire and validate each source before processing.' },
+    process: { h: 'Process data', p: 'Categorize and reconcile ingested transactions — the second pillar.' },
+    reporting: { h: 'Reporting', p: 'Cross-source summaries and statements — the third pillar.' },
+  };
+
   function show(section) {
     current = section;
-    for (const s of ['reporting', 'ingest', 'process']) el('nav-' + s).className = s === section ? 'active' : '';
-    el('reporting-content').className = 'view' + (section === 'reporting' ? '' : ' is-hidden');
-    el('panel').className = 'panel view' + (section === 'reporting' ? ' is-hidden' : '');
+    for (const s of ['reporting', 'ingest', 'process']) el('nav-' + s).classList.toggle('on', s === section);
+    const ph = PAGEHEAD[section];
+    el('pagehead').innerHTML = '<h1>' + ph.h + '</h1><p>' + ph.p + '</p>';
     clearToast();
     ({ reporting: renderReporting, ingest: renderIngest, process: renderProcess })[section]();
   }
 
-  async function refresh() { clearToast(); await loadStatus(); show(current); }
-
   setTheme(initialTheme());
   loadStatus();
-  show('reporting');
+  show('ingest');
 </script>
 </body>
 </html>
