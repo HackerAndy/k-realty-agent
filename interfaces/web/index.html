@@ -127,9 +127,35 @@
   .src { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 14px; border-top: 1px solid var(--border); font-size: 13px; }
   .src:first-child { border-top: none; }
   .src .meta { color: var(--muted); font-size: 12px; }
+  .src-actions { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; min-width: 170px; }
+  .src-actions .btn { width: fit-content; }
+  .upload-progress { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+  .upload-progress progress { width: 120px; height: 8px; }
+  .upload-steps-row { display: none; border-top: 1px dashed var(--border); padding: 8px 14px 11px 14px; }
+  .upload-steps { display: flex; align-items: center; gap: 8px; overflow-x: auto; white-space: nowrap; }
+  .upload-step { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--muted); }
+  .upload-step::before { content: ''; width: 8px; height: 8px; border-radius: 999px; background: #b8b9b3; flex: 0 0 auto; }
+  .upload-step.pending::before { background: #b8b9b3; }
+  .upload-step.in-progress::before { background: #2f77d1; }
+  .upload-step.success::before { background: var(--success); }
+  .upload-step.failed::before { background: var(--danger); }
+  .upload-step-sep { color: var(--muted); font-size: 12px; }
   .tag { font-size: 11px; padding: 2px 7px; border-radius: 6px; background: #eceae3; color: var(--muted); margin-left: 6px; }
   .empty { padding: 22px 14px; color: var(--muted); font-size: 13px; }
-  #toast { position: sticky; bottom: 0; margin-top: 16px; font-size: 13px; padding: 10px 14px; border-radius: var(--radius); display: none; }
+  #toast {
+    position: fixed;
+    left: 50%;
+    bottom: 20px;
+    transform: translateX(-50%);
+    font-size: 13px;
+    padding: 10px 16px;
+    border-radius: var(--radius);
+    display: none;
+    z-index: 1000;
+    max-width: min(90vw, 520px);
+    text-align: center;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, .18);
+  }
   #toast.ok { background: #e8f1e8; color: var(--success); display: block; }
   #toast.err { background: #f7e6e5; color: var(--danger); display: block; }
   :root[data-theme="dark"] #toast.ok { background: #223229; }
@@ -183,7 +209,13 @@
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(args)
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.detail || (name + ' failed'));
+    if (!res.ok) {
+      const detail = data && Object.prototype.hasOwnProperty.call(data, 'detail') ? data.detail : null;
+      const msg = (detail && detail.message) ? detail.message : (detail || (name + ' failed'));
+      const err = new Error(msg);
+      err.detail = detail;
+      throw err;
+    }
     return data;
   }
 
@@ -191,6 +223,8 @@
   const el = id => document.getElementById(id);
   let current = 'reporting';
   const THEME_KEY = 'krealty-theme';
+  const actionStepHistory = {};
+  const actionRunState = {};
 
   function llmHost(baseUrl) {
     if (!baseUrl) return 'not set';
@@ -209,8 +243,115 @@
     }
   }
 
-  function toast(msg, ok) { const t = el('toast'); t.textContent = msg; t.className = ok ? 'ok' : 'err'; }
-  function clearToast() { el('toast').className = ''; el('toast').style.display = 'none'; }
+  function toast(msg, ok) { const t = el('toast'); t.textContent = msg; t.style.display = ''; t.className = ok ? 'ok' : 'err'; }
+  function clearToast() { const t = el('toast'); t.className = ''; t.style.display = 'none'; }
+  function sourceDomId(sourceKey) { return String(sourceKey || '').replace(/[^a-zA-Z0-9_-]/g, '_'); }
+  function setSourceButtonsDisabled(disabled) { document.querySelectorAll('.src button').forEach(b => b.disabled = disabled); }
+
+  function defaultUploadSteps(fileName) {
+    return [
+      { key: 'selected_file', label: 'File selected' + (fileName ? ': ' + fileName : ''), status: 'success' },
+      { key: 'upload_to_server', label: 'Upload to server (0%)', status: 'pending' },
+      { key: 'save_temp_file', label: 'Save temp file', status: 'pending' },
+      { key: 'ingest_document', label: 'Parse and persist', status: 'pending' },
+      { key: 'cleanup_temp_file', label: 'Cleanup temp file', status: 'pending' },
+      { key: 'done', label: 'Complete', status: 'pending' },
+    ];
+  }
+
+  function renderUploadSteps(sourceKey, steps) {
+    const host = el('upload-steps-' + sourceDomId(sourceKey));
+    const row = el('upload-steps-row-' + sourceDomId(sourceKey));
+    if (!host || !row) return;
+    row.style.display = 'block';
+
+    let html = '';
+    steps.forEach((step, idx) => {
+      const cls = step.status || 'pending';
+      const title = step.error ? (' title="' + String(step.error).replace(/"/g, '&quot;') + '"') : '';
+      html += '<span class="upload-step ' + cls + '"' + title + '>' + (step.label || step.key) + '</span>';
+      if (idx < steps.length - 1) html += '<span class="upload-step-sep">&gt;</span>';
+    });
+    host.innerHTML = html;
+    actionStepHistory[sourceKey] = steps.map(s => ({ ...s }));
+  }
+
+  function startActionRun(sourceKey, tool) {
+    const runId = Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+    actionRunState[sourceKey] = { runId, tool };
+    return runId;
+  }
+
+  function isCurrentActionRun(sourceKey, runId) {
+    const state = actionRunState[sourceKey];
+    return !!state && state.runId === runId;
+  }
+
+  function defaultActionSteps(tool) {
+    if (tool === 'run_scraper') {
+      return [
+        { key: 'run_scraper', label: 'Run scraper', status: 'pending' },
+        { key: 'persist_scraped', label: 'Persist scraped transactions', status: 'pending' },
+        { key: 'done', label: 'Complete', status: 'pending' },
+      ];
+    }
+    if (tool === 'fetch_source') {
+      return [
+        { key: 'fetch_and_ingest', label: 'Fetch and ingest', status: 'pending' },
+        { key: 'done', label: 'Complete', status: 'pending' },
+      ];
+    }
+    if (tool === 'activate_parser') {
+      return [
+        { key: 'activate_parser', label: 'Activate parser', status: 'pending' },
+        { key: 'done', label: 'Complete', status: 'pending' },
+      ];
+    }
+    if (tool === 'start_login_recovery') {
+      return [
+        { key: 'launch_browser', label: 'Launch recovery browser', status: 'pending' },
+        { key: 'user_login', label: 'Log in, then CLOSE the browser window to save the session', status: 'pending' },
+        { key: 'session_saved', label: 'Session saved', status: 'pending' },
+        { key: 'done', label: 'Complete', status: 'pending' },
+      ];
+    }
+    return [
+      { key: 'execute', label: 'Execute', status: 'pending' },
+      { key: 'done', label: 'Complete', status: 'pending' },
+    ];
+  }
+
+  function updateUploadStep(steps, key, status, label, error) {
+    const next = steps.map(s => ({ ...s }));
+    const idx = next.findIndex(s => s.key === key);
+    if (idx >= 0) {
+      next[idx].status = status || next[idx].status;
+      if (label) next[idx].label = label;
+      if (error) next[idx].error = error;
+    }
+    return next;
+  }
+
+  function applyServerUploadSteps(steps, serverSteps) {
+    let next = steps.map(s => ({ ...s }));
+    for (const serverStep of (serverSteps || [])) {
+      const existing = next.find(s => s.key === serverStep.key);
+      if (existing) {
+        next = updateUploadStep(next, serverStep.key, serverStep.status, serverStep.label, serverStep.error);
+      } else {
+        const doneIdx = next.findIndex(s => s.key === 'done');
+        const inserted = {
+          key: serverStep.key,
+          label: serverStep.label || serverStep.key,
+          status: serverStep.status || 'pending',
+          error: serverStep.error,
+        };
+        if (doneIdx >= 0) next.splice(doneIdx, 0, inserted);
+        else next.push(inserted);
+      }
+    }
+    return next;
+  }
 
   function setTheme(theme) {
     const root = document.documentElement;
@@ -299,7 +440,25 @@
 
   async function renderIngest() {
     el('panel').innerHTML = '<div class="empty">Loading sources…</div>';
-    const [sources, pending] = await Promise.all([callTool('list_sources'), callTool('pending_approvals')]);
+    const [sourcesRes, pendingRes] = await Promise.allSettled([
+      callTool('list_sources'),
+      callTool('pending_approvals')
+    ]);
+
+    if (sourcesRes.status !== 'fulfilled') {
+      const msg = (sourcesRes.reason && sourcesRes.reason.message) ? sourcesRes.reason.message : 'unknown error';
+      el('panel').innerHTML = '<div class="empty">Could not load sources: ' + msg + '</div>';
+      toast('Failed to load sources: ' + msg, false);
+      return;
+    }
+
+    const sources = sourcesRes.value || [];
+    const pending = pendingRes.status === 'fulfilled' ? (pendingRes.value || []) : [];
+    if (pendingRes.status !== 'fulfilled') {
+      const pendingErr = (pendingRes.reason && pendingRes.reason.message) ? pendingRes.reason.message : 'unknown error';
+      toast('Loaded sources, but pending approvals failed: ' + pendingErr, false);
+    }
+
     let html = '';
     for (const p of pending) {
       html += '<div class="src"><div><b>' + p.label + '</b><span class="tag">parser built</span><div class="meta">awaiting approval</div></div>' +
@@ -309,11 +468,137 @@
       let action = '';
       if (s.has_scraper) action = '<button class="btn" onclick="act(\'run_scraper\',{source_key:\'' + s.key + '\'})">Run scraper</button>';
       else if (s.is_trigger) action = '<button class="btn" onclick="act(\'fetch_source\',{source_key:\'' + s.key + '\'})">Fetch</button>';
+      else if (canUploadForInputType(s.input_type)) action = sourceUploadAction(s.key);
       html += '<div class="src"><div><b>' + s.label + '</b>' +
         (s.has_scraper ? '<span class="tag">scraper</span>' : '') + (s.parser_built ? '<span class="tag">parser</span>' : '') +
         '<div class="meta">' + s.status + ' · ' + (s.input_type || '') + '</div></div>' + action + '</div>';
+      if (action) html += sourceUploadStepsRow(s.key);
     }
     el('panel').innerHTML = html || '<div class="empty">No sources.</div>';
+
+    // Rehydrate persisted step timelines so completed/failed processing remains visible.
+    for (const s of sources) {
+      const prior = actionStepHistory[s.key];
+      if (prior && prior.length) renderUploadSteps(s.key, prior);
+    }
+  }
+
+  function sourceUploadAction(sourceKey) {
+    const sid = sourceDomId(sourceKey);
+    return '<div class="src-actions">' +
+      '<button class="btn" onclick="chooseUpload(\'' + sourceKey + '\')">Upload file</button>' +
+      '<input id="upload-input-' + sid + '" type="file" style="display:none" accept=".pdf,.csv,text/csv,application/pdf" onchange="handleUploadFile(\'' + sourceKey + '\', event)" />' +
+      '<div class="upload-progress" id="upload-progress-' + sid + '" style="display:none">' +
+      '<progress id="upload-bar-' + sid + '" max="100" value="0"></progress>' +
+      '<span id="upload-pct-' + sid + '">0%</span>' +
+      '</div></div>';
+  }
+
+  function sourceUploadStepsRow(sourceKey) {
+    const sid = sourceDomId(sourceKey);
+    return '<div class="upload-steps-row" id="upload-steps-row-' + sid + '"><div class="upload-steps" id="upload-steps-' + sid + '"></div></div>';
+  }
+
+  function canUploadForInputType(inputType) {
+    return inputType === 'pdf_statement' || inputType === 'csv_export' || inputType === 'html_scrape';
+  }
+
+  function chooseUpload(sourceKey) {
+    const input = el('upload-input-' + sourceDomId(sourceKey));
+    if (input) input.click();
+  }
+
+  function handleUploadFile(sourceKey, event) {
+    const input = event && event.target;
+    const file = input && input.files && input.files[0];
+    if (!file) return;
+    uploadIngest(sourceKey, file).finally(() => {
+      if (input) input.value = '';
+    });
+  }
+
+  function uploadIngest(sourceKey, file) {
+    clearToast();
+    setSourceButtonsDisabled(true);
+    const runId = startActionRun(sourceKey, 'upload_ingest');
+    const sid = sourceDomId(sourceKey);
+    const progressWrap = el('upload-progress-' + sid);
+    const progressBar = el('upload-bar-' + sid);
+    const progressPct = el('upload-pct-' + sid);
+    if (progressWrap) progressWrap.style.display = 'flex';
+    if (progressBar) progressBar.value = 0;
+    if (progressPct) progressPct.textContent = '0%';
+    let steps = defaultUploadSteps(file.name);
+    steps = updateUploadStep(steps, 'upload_to_server', 'in-progress', 'Upload to server (0%)');
+    renderUploadSteps(sourceKey, steps);
+    toast('Uploading ' + file.name + '… 0%', true);
+
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/upload_ingest/' + encodeURIComponent(sourceKey));
+
+      xhr.upload.onprogress = (evt) => {
+        if (!isCurrentActionRun(sourceKey, runId)) return;
+        if (!evt.lengthComputable) return;
+        const pct = Math.min(100, Math.round((evt.loaded / evt.total) * 100));
+        if (progressBar) progressBar.value = pct;
+        if (progressPct) progressPct.textContent = pct + '%';
+        steps = updateUploadStep(steps, 'upload_to_server', 'in-progress', 'Upload to server (' + pct + '%)');
+        renderUploadSteps(sourceKey, steps);
+        toast('Uploading ' + file.name + '… ' + pct + '%', true);
+      };
+
+      xhr.onerror = () => {
+        if (!isCurrentActionRun(sourceKey, runId)) return;
+        steps = updateUploadStep(steps, 'upload_to_server', 'failed', 'Upload to server', 'Network error');
+        renderUploadSteps(sourceKey, steps);
+        toast('upload_ingest failed: network error', false);
+        if (progressWrap) progressWrap.style.display = 'none';
+        setSourceButtonsDisabled(false);
+        reject(new Error('Network error'));
+      };
+
+      xhr.onload = async () => {
+        if (!isCurrentActionRun(sourceKey, runId)) return;
+        let payload = {};
+        try {
+          payload = xhr.responseText ? JSON.parse(xhr.responseText) : {};
+        } catch {
+          payload = {};
+        }
+
+        if (xhr.status >= 200 && xhr.status < 300) {
+          steps = updateUploadStep(steps, 'upload_to_server', 'success', 'Upload to server (100%)');
+          steps = applyServerUploadSteps(steps, payload.steps);
+          steps = updateUploadStep(steps, 'done', 'success', 'Complete');
+          renderUploadSteps(sourceKey, steps);
+          if (progressBar) progressBar.value = 100;
+          if (progressPct) progressPct.textContent = '100%';
+          toast('upload_ingest done' + (payload.count != null ? ' — ' + payload.count + ' transactions' : '') + '.', true);
+          await loadStatus();
+          await loadKpis();
+          if (current === 'ingest') await renderIngest();
+          resolve(payload);
+        } else {
+          const detail = payload && payload.detail ? payload.detail : ('HTTP ' + xhr.status);
+          const detailMessage = detail && detail.message ? detail.message : detail;
+          const serverSteps = detail && detail.steps ? detail.steps : [];
+          steps = updateUploadStep(steps, 'upload_to_server', 'success', 'Upload to server (100%)');
+          steps = applyServerUploadSteps(steps, serverSteps);
+          if (!serverSteps.length) steps = updateUploadStep(steps, 'done', 'failed', 'Complete', String(detailMessage));
+          else steps = updateUploadStep(steps, 'done', 'failed', 'Complete');
+          renderUploadSteps(sourceKey, steps);
+          toast('upload_ingest failed: ' + detailMessage, false);
+          if (progressWrap) progressWrap.style.display = 'none';
+          setSourceButtonsDisabled(false);
+          reject(new Error(detailMessage));
+        }
+      };
+
+      const form = new FormData();
+      form.append('file', file);
+      xhr.send(form);
+    });
   }
 
   function renderProcess() {
@@ -321,18 +606,160 @@
       'It’s deliberately deferred: ingested transactions are stored faithfully first.</div>';
   }
 
-  async function act(tool, args) {
+  function beginLoginRecoveryPolling(sourceKey, runId, resumeTool, resumeArgs) {
+    const poll = async () => {
+      if (!isCurrentActionRun(sourceKey, runId)) return;
+      try {
+        const status = await callTool('login_recovery_status', { source_key: sourceKey });
+        if (!isCurrentActionRun(sourceKey, runId)) return;
+        let latest = actionStepHistory[sourceKey] || defaultActionSteps('start_login_recovery');
+        if (status && Array.isArray(status.steps)) {
+          latest = applyServerUploadSteps(latest, status.steps);
+        }
+        if (status && status.status === 'completed') {
+          latest = updateUploadStep(latest, 'done', 'success', 'Complete');
+          renderUploadSteps(sourceKey, latest);
+          await loadStatus(); await loadKpis();
+          if (current === 'ingest') await renderIngest();
+          if (resumeTool) {
+            // The original action failed only because the session was stale —
+            // now that login is recovered, automatically continue it instead
+            // of leaving the operator to notice and re-click it themselves.
+            toast('Login recovered. Re-running ' + resumeTool + '…', true);
+            await act(resumeTool, resumeArgs, { allowAutoRecovery: false });
+          } else {
+            setSourceButtonsDisabled(false);
+          }
+          return;
+        }
+        if (status && status.status === 'failed') {
+            const failure = status && status.message ? status.message : 'login recovery failed';
+            latest = updateUploadStep(latest, 'done', 'failed', 'Complete', failure);
+          renderUploadSteps(sourceKey, latest);
+          setSourceButtonsDisabled(false);
+          return;
+        }
+        renderUploadSteps(sourceKey, latest);
+        setTimeout(poll, 2000);
+      } catch (err) {
+        if (!isCurrentActionRun(sourceKey, runId)) return;
+        let latest = actionStepHistory[sourceKey] || defaultActionSteps('start_login_recovery');
+        latest = updateUploadStep(latest, 'done', 'failed', 'Complete', err && err.message ? err.message : 'status check failed');
+        renderUploadSteps(sourceKey, latest);
+        setSourceButtonsDisabled(false);
+      }
+    };
+    setTimeout(poll, 1200);
+  }
+
+  function shouldAutoRecoverLogin(tool, err) {
+    if (tool !== 'run_scraper') return false;
+    const detail = err && err.detail ? err.detail : null;
+    const msg = String((detail && detail.message) || (err && err.message) || '');
+    const authLike = /(\b401\b|unauthor|session|login|credential|sign[\s-]?in|2fa|verification)/i;
+    if (authLike.test(msg)) return true;
+    const stepErrors = detail && Array.isArray(detail.steps)
+      ? detail.steps.map(s => String(s && s.error ? s.error : '')).join(' | ')
+      : '';
+    return authLike.test(stepErrors);
+  }
+
+  async function act(tool, args, options = {}) {
+    const allowAutoRecovery = options.allowAutoRecovery !== false;
     clearToast();
-    const btns = document.querySelectorAll('.src button'); btns.forEach(b => b.disabled = true);
+    setSourceButtonsDisabled(true);
     toast('Running ' + tool + '…', true);
+    const sourceKey = args && args.source_key ? args.source_key : null;
+    let runId = null;
+    let steps = null;
+    if (sourceKey) {
+      runId = startActionRun(sourceKey, tool);
+      steps = defaultActionSteps(tool);
+      const first = steps.find(s => s.key !== 'done');
+      if (first) {
+        steps = updateUploadStep(steps, first.key, 'in-progress', first.label);
+      }
+      renderUploadSteps(sourceKey, steps);
+    }
+
     try {
       const r = await callTool(tool, args);
+      if (sourceKey && runId && !isCurrentActionRun(sourceKey, runId)) return;
+      if (steps) {
+        if (r && Array.isArray(r.steps) && r.steps.length) {
+          steps = applyServerUploadSteps(steps, r.steps);
+        } else {
+          const first = steps.find(s => s.status === 'in-progress') || steps.find(s => s.key !== 'done');
+          if (first) steps = updateUploadStep(steps, first.key, 'success', first.label);
+        }
+        if (tool === 'start_login_recovery') {
+          steps = updateUploadStep(steps, 'done', 'in-progress', 'Complete');
+        } else {
+          steps = updateUploadStep(steps, 'done', 'success', 'Complete');
+        }
+        renderUploadSteps(sourceKey, steps);
+      }
+
+      if (tool === 'start_login_recovery' && sourceKey) {
+        beginLoginRecoveryPolling(sourceKey, runId);
+      }
+
       toast(tool + ' done' + (r.count != null ? ' — ' + r.count + ' transactions' : '') + '.', true);
       await loadStatus(); await loadKpis();
       if (current === 'ingest') await renderIngest();
     } catch (e) {
+      if (sourceKey && runId && !isCurrentActionRun(sourceKey, runId)) return;
+      if (steps) {
+        const detail = e && e.detail ? e.detail : null;
+        const serverSteps = detail && Array.isArray(detail.steps) ? detail.steps : [];
+        if (serverSteps.length) {
+          steps = applyServerUploadSteps(steps, serverSteps);
+        } else {
+          const first = steps.find(s => s.status === 'in-progress') || steps.find(s => s.key !== 'done');
+          if (first) steps = updateUploadStep(steps, first.key, 'failed', first.label, e && e.message ? e.message : 'failed');
+        }
+        steps = updateUploadStep(steps, 'done', 'failed', 'Complete', e && e.message ? e.message : 'failed');
+        renderUploadSteps(sourceKey, steps);
+      }
+
+      if (allowAutoRecovery && sourceKey && shouldAutoRecoverLogin(tool, e)) {
+        toast('Auth/session issue detected. Starting login recovery…', false);
+        const recoveryRunId = startActionRun(sourceKey, 'start_login_recovery');
+        let recoverySteps = defaultActionSteps('start_login_recovery');
+        recoverySteps = updateUploadStep(recoverySteps, 'launch_browser', 'in-progress', 'Launch recovery browser');
+        renderUploadSteps(sourceKey, recoverySteps);
+
+        try {
+          const recovery = await callTool('start_login_recovery', { source_key: sourceKey });
+          if (!isCurrentActionRun(sourceKey, recoveryRunId)) return;
+          if (recovery && Array.isArray(recovery.steps)) {
+            recoverySteps = applyServerUploadSteps(recoverySteps, recovery.steps);
+          }
+          recoverySteps = updateUploadStep(recoverySteps, 'done', 'in-progress', 'Complete');
+          renderUploadSteps(sourceKey, recoverySteps);
+          toast('Recovery browser opened. Complete login in browser, then close it to save session.', true);
+          // Once the operator finishes logging in, automatically re-run the
+          // scraper call that originally failed — don't leave data un-pulled.
+          beginLoginRecoveryPolling(sourceKey, recoveryRunId, tool, args);
+          return;
+        } catch (recoveryErr) {
+          if (!isCurrentActionRun(sourceKey, recoveryRunId)) return;
+          recoverySteps = updateUploadStep(
+            recoverySteps,
+            'done',
+            'failed',
+            'Complete',
+            recoveryErr && recoveryErr.message ? recoveryErr.message : 'failed to start recovery'
+          );
+          renderUploadSteps(sourceKey, recoverySteps);
+          toast('Automatic login recovery failed: ' + (recoveryErr && recoveryErr.message ? recoveryErr.message : 'unknown error'), false);
+          setSourceButtonsDisabled(false);
+          return;
+        }
+      }
+
       toast(tool + ' failed: ' + e.message, false);
-      document.querySelectorAll('.src button').forEach(b => b.disabled = false);
+      setSourceButtonsDisabled(false);
     }
   }
 

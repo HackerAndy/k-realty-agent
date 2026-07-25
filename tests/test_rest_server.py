@@ -40,3 +40,51 @@ def test_bad_arguments_map_to_400():
 def test_dashboard_is_served():
     r = client.get("/")
     assert r.status_code == 200 and "K-Realty" in r.text and "callTool" in r.text
+
+
+def test_upload_ingest_success(monkeypatch):
+    called = {}
+
+    def fake_ingest_document(source_key: str, path: str):
+        called["source_key"] = source_key
+        called["path"] = path
+        return {"source_key": source_key, "count": 2}
+
+    monkeypatch.setattr("interfaces.rest_server.mcp_tools.ingest_document", fake_ingest_document)
+
+    r = client.post(
+        "/api/upload_ingest/dfcu_financial_bank",
+        files={"file": ("statement.csv", b"Date,Description,Amount\n", "text/csv")},
+    )
+
+    assert r.status_code == 200
+    assert r.json()["count"] == 2
+    assert isinstance(r.json().get("steps"), list)
+    assert any(s.get("key") == "save_temp_file" and s.get("status") == "success" for s in r.json()["steps"])
+    assert any(s.get("key") == "ingest_document" and s.get("status") == "success" for s in r.json()["steps"])
+    assert any(s.get("key") == "cleanup_temp_file" and s.get("status") == "success" for s in r.json()["steps"])
+    assert called["source_key"] == "dfcu_financial_bank"
+    assert called["path"]
+
+
+def test_upload_ingest_maps_toolerror_to_400(monkeypatch):
+    class FakeToolError(RuntimeError):
+        pass
+
+    monkeypatch.setattr("interfaces.rest_server.mcp_tools.ToolError", FakeToolError)
+
+    def fake_ingest_toolerror(source_key: str, path: str):
+        raise FakeToolError("not ingestible")
+
+    monkeypatch.setattr("interfaces.rest_server.mcp_tools.ingest_document", fake_ingest_toolerror)
+
+    r = client.post(
+        "/api/upload_ingest/dfcu_financial_bank",
+        files={"file": ("statement.csv", b"Date,Description,Amount\n", "text/csv")},
+    )
+
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert detail["message"] == "not ingestible"
+    assert isinstance(detail.get("steps"), list)
+    assert any(s.get("key") == "ingest_document" and s.get("status") == "failed" for s in detail["steps"])

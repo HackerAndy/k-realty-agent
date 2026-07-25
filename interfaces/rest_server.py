@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import tempfile
+import time
 
-from fastapi import Body, FastAPI, HTTPException
+from fastapi import Body, FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 from interfaces import mcp_tools
@@ -48,9 +50,100 @@ def call_tool(name: str, args: dict = Body(default={})):
     try:
         return fn(**(args or {}))
     except mcp_tools.ToolError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        detail = exc.args[0] if exc.args else str(exc)
+        raise HTTPException(status_code=400, detail=detail) from exc
     except TypeError as exc:
         raise HTTPException(status_code=400, detail=f"Bad arguments for '{name}': {exc}") from exc
+
+
+@app.post("/api/upload_ingest/{source_key}")
+async def upload_ingest(source_key: str, file: UploadFile = File(...)):
+    """Upload a source document and ingest it for the given source key."""
+    suffix = Path(file.filename or "uploaded").suffix
+    tmp_path: Path | None = None
+    steps: list[dict] = []
+    result: dict | None = None
+    error: HTTPException | None = None
+
+    save_started = time.perf_counter()
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            chunk = await file.read()
+            tmp.write(chunk)
+            tmp_path = Path(tmp.name)
+        steps.append({
+            "key": "save_temp_file",
+            "label": "Save temp file",
+            "status": "success",
+            "duration_ms": int((time.perf_counter() - save_started) * 1000),
+            "details": {"bytes": len(chunk), "suffix": suffix},
+        })
+    except Exception as exc:
+        steps.append({
+            "key": "save_temp_file",
+            "label": "Save temp file",
+            "status": "failed",
+            "duration_ms": int((time.perf_counter() - save_started) * 1000),
+            "error": str(exc),
+        })
+        error = HTTPException(status_code=500, detail={"message": f"Upload save failed: {exc}", "steps": steps})
+
+    if error is None and tmp_path is not None:
+        ingest_started = time.perf_counter()
+        try:
+            result = mcp_tools.ingest_document(source_key=source_key, path=str(tmp_path))
+            steps.append({
+                "key": "ingest_document",
+                "label": "Parse and persist",
+                "status": "success",
+                "duration_ms": int((time.perf_counter() - ingest_started) * 1000),
+                "details": {"count": result.get("count")},
+            })
+        except mcp_tools.ToolError as exc:
+            steps.append({
+                "key": "ingest_document",
+                "label": "Parse and persist",
+                "status": "failed",
+                "duration_ms": int((time.perf_counter() - ingest_started) * 1000),
+                "error": str(exc),
+            })
+            error = HTTPException(status_code=400, detail={"message": str(exc), "steps": steps})
+        except Exception as exc:
+            steps.append({
+                "key": "ingest_document",
+                "label": "Parse and persist",
+                "status": "failed",
+                "duration_ms": int((time.perf_counter() - ingest_started) * 1000),
+                "error": str(exc),
+            })
+            error = HTTPException(status_code=500, detail={"message": str(exc), "steps": steps})
+
+    cleanup_started = time.perf_counter()
+    try:
+        await file.close()
+        if tmp_path and tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+        steps.append({
+            "key": "cleanup_temp_file",
+            "label": "Cleanup temp file",
+            "status": "success",
+            "duration_ms": int((time.perf_counter() - cleanup_started) * 1000),
+        })
+    except Exception as exc:
+        steps.append({
+            "key": "cleanup_temp_file",
+            "label": "Cleanup temp file",
+            "status": "failed",
+            "duration_ms": int((time.perf_counter() - cleanup_started) * 1000),
+            "error": str(exc),
+        })
+        if error is None:
+            error = HTTPException(status_code=500, detail={"message": f"Cleanup failed: {exc}", "steps": steps})
+
+    if error is not None:
+        raise error
+
+    return {**(result or {}), "steps": steps}
 
 
 def main() -> None:

@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 import core.fetch_ingest as fetch_ingest
+import core.tools.service_manifest as service_manifest_module
 from core.ingest import IngestError
 from core.tools.email_fetcher import _attachment_parts, build_gmail_query
 from core.tools.service_manifest import FetchConfig, Service, ServiceManifest
@@ -82,3 +83,45 @@ def test_fetch_and_ingest_refuses_delivery_to_source_without_parser(tmp_path):
     manifest.set_fetch("email", FetchConfig(provider="gmail", delivers_to="epic"))
     with pytest.raises(IngestError, match="no active parser"):
         fetch_ingest.fetch_and_ingest("email", manifest=manifest)
+
+
+def test_manifest_load_merges_multiple_yaml_documents(tmp_path):
+    path = tmp_path / "services.yaml"
+    path.write_text(
+        "services:\n"
+        "- key: email\n"
+        "  label: Email\n"
+        "---\n"
+        "services:\n"
+        "- key: epic\n"
+        "  label: Epic\n"
+    )
+
+    loaded = ServiceManifest(path).load()
+    assert [s.key for s in loaded] == ["email", "epic"]
+
+
+def test_manifest_load_falls_back_when_single_load_crashes(tmp_path, monkeypatch):
+    path = tmp_path / "services.yaml"
+    path.write_text(
+        "services:\n"
+        "- key: email\n"
+        "  label: Email\n"
+        "---\n"
+        "services:\n"
+        "- key: epic\n"
+        "  label: Epic\n"
+    )
+
+    original_load = service_manifest_module._yaml.load
+
+    def boom(_: str):
+        raise AttributeError("simulated ruamel crash")
+
+    monkeypatch.setattr(service_manifest_module._yaml, "load", boom)
+    try:
+        loaded = ServiceManifest(path).load()
+    finally:
+        monkeypatch.setattr(service_manifest_module._yaml, "load", original_load)
+
+    assert [s.key for s in loaded] == ["email", "epic"]

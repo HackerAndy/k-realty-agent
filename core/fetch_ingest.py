@@ -41,11 +41,21 @@ def fetch_and_ingest(
     manifest: ServiceManifest | None = None,
     limit: int = 5,
     on_event: Callable[[str], None] = print,
+    on_step: Callable[[dict], None] | None = None,
 ) -> list[dict]:
     """Fetch documents for `source_key` and ingest each through its delivers_to
     source. Returns one ingest run dict per document ingested."""
+    def _step(key: str, label: str, status: str = "success", **details) -> None:
+        if on_step is None:
+            return
+        rec = {"key": key, "label": label, "status": status}
+        if details:
+            rec["details"] = details
+        on_step(rec)
+
     manifest = manifest or ServiceManifest()
     source = manifest.get(source_key)
+    _step("resolve_source", "Resolve source", source_key=source_key)
     cfg = source.fetch
     if cfg is None:
         raise IngestError(log.failure(
@@ -55,6 +65,7 @@ def fetch_and_ingest(
             remediation="Set up the fetch for this source in the TUI first.",
             context={"source_key": source_key},
         ))
+    _step("load_fetch_config", "Load fetch config", provider=cfg.provider, delivers_to=cfg.delivers_to)
 
     target = manifest.get(cfg.delivers_to)
     if not target.parser or target.status != "implemented":
@@ -66,12 +77,14 @@ def fetch_and_ingest(
             remediation="Build/activate the delivered source's parser first.",
             context={"source_key": source_key, "delivers_to": cfg.delivers_to, "status": target.status},
         ))
+    _step("validate_delivery_target", "Validate delivery target", target=cfg.delivers_to, parser=target.parser)
 
     # Provider dispatch — gmail today; imap/other providers slot in here later.
     if cfg.provider == "gmail":
         from core.tools.email_fetcher import GmailFetcher
 
         fetcher = GmailFetcher(source_key)
+        _step("init_provider", "Initialize provider", provider="gmail")
     else:
         raise IngestError(log.failure(
             operation="fetch_and_ingest",
@@ -82,19 +95,31 @@ def fetch_and_ingest(
         ))
 
     on_event(f"Searching {source.label} for messages matching the configured criteria...")
+    _step("search_messages", "Search messages", provider=cfg.provider, limit=limit)
     documents = fetcher.search_and_fetch(cfg, limit=limit)
+    _step("messages_fetched", "Fetch message attachments", documents=len(documents))
     if not documents:
         on_event("No matching messages found. Nothing to ingest.")
+        _step("fetch_complete", "Fetch complete", ingested=0)
         return []
 
     runs: list[dict] = []
     dest_dir = INBOX_DIR / source_key
     for doc in documents:
         saved = doc.save(dest_dir)
+        _step("save_attachment", "Save attachment", filename=doc.filename, path=str(saved))
         on_event(f"Fetched '{doc.filename}' (received {doc.received or 'unknown date'}) "
                  f"→ ingesting via {target.label}'s parser.")
         run = ingest_source(cfg.delivers_to, saved, manifest=manifest)
         run["fetched_from"] = source_key
         run["fetched_message_id"] = doc.message_id
         runs.append(run)
+        _step(
+            "ingest_document",
+            "Ingest fetched document",
+            filename=doc.filename,
+            run_path=run.get("run_path"),
+            count=run.get("transaction_count"),
+        )
+    _step("fetch_complete", "Fetch complete", ingested=len(runs))
     return runs

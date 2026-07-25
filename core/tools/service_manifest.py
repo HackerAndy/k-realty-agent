@@ -98,8 +98,56 @@ class ServiceManifest:
             doc = CommentedMap()
             doc["services"] = []
             return doc
-        with self.manifest_path.open() as f:
-            doc = _yaml.load(f) or CommentedMap()
+        raw = self.manifest_path.read_text()
+        try:
+            doc = _yaml.load(raw) or CommentedMap()
+        except Exception as exc:
+            # If an accidental YAML document separator (---) slips into the file,
+            # merge all documents so the app stays operable and logs a warning.
+            parser = YAML()
+            parser.preserve_quotes = True
+            parser.width = 4096
+            try:
+                docs = list(parser.load_all(raw))
+            except Exception as parse_exc:  # pragma: no cover - defensive path
+                raise ServiceManifestError(log.failure(
+                    operation="load_manifest",
+                    code="MANIFEST_INVALID_YAML",
+                    message=f"Could not parse {self.manifest_path} as YAML.",
+                    remediation="Fix YAML syntax in core/policies/services.yaml and retry.",
+                    context={"manifest": str(self.manifest_path)},
+                    exc=parse_exc,
+                )) from parse_exc
+
+            merged = CommentedMap()
+            merged["services"] = []
+            for i, item in enumerate(docs):
+                if item is None:
+                    continue
+                if not isinstance(item, dict):
+                    raise ServiceManifestError(log.failure(
+                        operation="load_manifest",
+                        code="MANIFEST_INVALID_YAML",
+                        message=f"YAML document #{i + 1} in {self.manifest_path} is not a mapping.",
+                        remediation="Each YAML document must be a mapping with a 'services' list.",
+                        context={"manifest": str(self.manifest_path), "document_index": i + 1},
+                        exc=exc,
+                    )) from exc
+                services = item.get("services")
+                if services:
+                    merged["services"].extend(services)
+
+            log.event(
+                operation="load_manifest",
+                code="MANIFEST_MULTI_DOC_MERGED",
+                message=(
+                    f"Loaded {self.manifest_path} as {len(docs)} YAML documents and merged 'services'. "
+                    "Remove accidental '---' separators to keep a single-document manifest."
+                ),
+                context={"manifest": str(self.manifest_path), "documents": len(docs)},
+                level="warning",
+            )
+            doc = merged
         if not doc.get("services"):
             doc["services"] = []
         return doc

@@ -11,6 +11,10 @@ here; it all delegates to core/.
 from __future__ import annotations
 
 from pathlib import Path
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
 
 from core import source_status
 from core.fetch_ingest import fetch_and_ingest, persist_scraped
@@ -18,11 +22,34 @@ from core.ingest import ingest_source, load_latest_parsed, transactions_from_run
 from core.models import Transaction
 from core.scrapers import get_scraper, has_scraper
 from core.tools import llm_provider
-from core.tools.service_manifest import ServiceManifest
+from core.tools.browser_session import reset_profile
+from core.tools.service_manifest import ServiceManifest, ServiceManifestError
 
 
 class ToolError(RuntimeError):
     """Surfaced to the MCP client as a tool error."""
+
+
+_LOGIN_RECOVERY_PROCS: dict[str, subprocess.Popen] = {}
+_LOGIN_RECOVERY_META: dict[str, dict[str, str]] = {}
+
+
+def _tail_text(path: Path, max_lines: int = 25) -> str:
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception:
+        return ""
+    if not lines:
+        return ""
+    return "\n".join(lines[-max_lines:]).strip()
+
+
+def _load_services() -> list:
+    """Load manifest services with client-friendly error mapping."""
+    try:
+        return ServiceManifest().load()
+    except ServiceManifestError as exc:
+        raise ToolError(str(exc)) from exc
 
 
 def _summary(txns: list[Transaction]) -> dict:
@@ -61,7 +88,7 @@ def list_sources() -> list[dict]:
             "parser_built": source_status.parser_built(s.key),
             "has_scraper": has_scraper(s.key),
         }
-        for s in ServiceManifest().load()
+        for s in _load_services()
     ]
 
 
@@ -77,7 +104,8 @@ def latest_transactions(limit: int = 200) -> dict:
 
 def pending_approvals() -> list[dict]:
     """Sources whose parser is built but not yet activated — awaiting the operator's yes."""
-    return [{"key": s.key, "label": s.label} for s in source_status.pending_approvals()]
+    services = _load_services()
+    return [{"key": s.key, "label": s.label} for s in source_status.pending_approvals(services)]
 
 
 def llm_status() -> dict:
@@ -89,7 +117,7 @@ def llm_status() -> dict:
 
 def status() -> dict:
     """Overall harness status — LLM, source counts, pending approvals, latest ingest."""
-    services = ServiceManifest().load()
+    services = _load_services()
     run = load_latest_parsed()
     return {
         "llm": llm_status(),
@@ -119,18 +147,205 @@ def run_scraper(source_key: str, save: bool = True, limit: int = 200) -> dict:
     the result unless save=False. Requires the source's scraper to be built already."""
     if not has_scraper(source_key):
         raise ToolError(f"No scraper built for '{source_key}'. Build one first (build_scraper).")
-    txns = get_scraper(source_key)()
+
+    steps: list[dict] = []
+
+    scrape_started = time.perf_counter()
+    try:
+        txns = get_scraper(source_key)()
+        steps.append({
+            "key": "run_scraper",
+            "label": "Run scraper",
+            "status": "success",
+            "duration_ms": int((time.perf_counter() - scrape_started) * 1000),
+            "details": {"count": len(txns)},
+        })
+    except Exception as exc:
+        steps.append({
+            "key": "run_scraper",
+            "label": "Run scraper",
+            "status": "failed",
+            "duration_ms": int((time.perf_counter() - scrape_started) * 1000),
+            "error": str(exc),
+        })
+        raise ToolError({"message": str(exc), "steps": steps}) from exc
+
     result = {"source_key": source_key, **_summary(txns), "transactions": _rows(txns, limit)}
-    if save and txns:
-        result["run_path"] = persist_scraped(txns, source_key)["run_path"]
-    return result
+
+    persist_started = time.perf_counter()
+    try:
+        if save and txns:
+            result["run_path"] = persist_scraped(txns, source_key)["run_path"]
+            steps.append({
+                "key": "persist_scraped",
+                "label": "Persist scraped transactions",
+                "status": "success",
+                "duration_ms": int((time.perf_counter() - persist_started) * 1000),
+            })
+        else:
+            steps.append({
+                "key": "persist_scraped",
+                "label": "Persist scraped transactions",
+                "status": "success",
+                "duration_ms": int((time.perf_counter() - persist_started) * 1000),
+                "details": {"skipped": True},
+            })
+    except Exception as exc:
+        steps.append({
+            "key": "persist_scraped",
+            "label": "Persist scraped transactions",
+            "status": "failed",
+            "duration_ms": int((time.perf_counter() - persist_started) * 1000),
+            "error": str(exc),
+        })
+        raise ToolError({"message": str(exc), "steps": steps}) from exc
+
+    return {**result, "steps": steps}
 
 
 def fetch_source(source_key: str) -> dict:
     """Fetch a source's document from its inbox and ingest it (e.g. the 'email' source)."""
-    runs = fetch_and_ingest(source_key)
-    return {"source_key": source_key,
-            "ingested": [{"run_path": r["run_path"], "count": r["transaction_count"]} for r in runs]}
+    steps: list[dict] = []
+    def _on_step(step: dict) -> None:
+        steps.append(step)
+
+    fetch_started = time.perf_counter()
+    try:
+        runs = fetch_and_ingest(source_key, on_step=_on_step)
+        steps.append({
+            "key": "fetch_and_ingest",
+            "label": "Fetch and ingest",
+            "status": "success",
+            "duration_ms": int((time.perf_counter() - fetch_started) * 1000),
+            "details": {"documents": len(runs)},
+        })
+    except Exception as exc:
+        steps.append({
+            "key": "fetch_and_ingest",
+            "label": "Fetch and ingest",
+            "status": "failed",
+            "duration_ms": int((time.perf_counter() - fetch_started) * 1000),
+            "error": str(exc),
+        })
+        raise ToolError({"message": str(exc), "steps": steps}) from exc
+
+    return {
+        "source_key": source_key,
+        "ingested": [{"run_path": r["run_path"], "count": r["transaction_count"]} for r in runs],
+        "steps": steps,
+    }
+
+
+def start_login_recovery(source_key: str) -> dict:
+    """Open a visible persistent browser for manual re-login of a portal source."""
+    services = _load_services()
+    service = next((s for s in services if s.key == source_key), None)
+    if service is None:
+        raise ToolError(f"Unknown source '{source_key}'.")
+    if not service.login_url:
+        raise ToolError(f"Source '{source_key}' has no login_url configured.")
+
+    existing = _LOGIN_RECOVERY_PROCS.get(source_key)
+    if existing and existing.poll() is None:
+        meta = _LOGIN_RECOVERY_META.get(source_key, {})
+        return {
+            "source_key": source_key,
+            "status": "running",
+            "pid": existing.pid,
+            "login_url": meta.get("login_url", service.login_url),
+            "steps": [
+                {"key": "launch_browser", "label": "Launch recovery browser", "status": "success"},
+                {"key": "user_login", "label": "Log in, then CLOSE the browser window to save the session", "status": "in-progress"},
+            ],
+        }
+
+    # Reap any orphaned worker/browser left over from a prior attempt (e.g. a
+    # worker that outlived a server restart) before starting a fresh one —
+    # launching against an already-open profile just piles up blank tabs.
+    reset_profile(source_key)
+
+    cmd = [sys.executable, "-m", "core.tools.login_recovery_worker", source_key, service.login_url]
+    logs_dir = Path("data/logs/login_recovery")
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    log_path = logs_dir / f"{source_key}-{stamp}.log"
+    log_fh = log_path.open("w", encoding="utf-8")
+    proc = subprocess.Popen(
+        cmd,
+        stdout=log_fh,
+        stderr=log_fh,
+        start_new_session=True,
+    )
+    log_fh.close()
+    _LOGIN_RECOVERY_PROCS[source_key] = proc
+    _LOGIN_RECOVERY_META[source_key] = {
+        "login_url": service.login_url,
+        "log_path": str(log_path),
+    }
+    return {
+        "source_key": source_key,
+        "status": "running",
+        "pid": proc.pid,
+        "login_url": service.login_url,
+        "log_path": str(log_path),
+        "steps": [
+            {"key": "launch_browser", "label": "Launch recovery browser", "status": "success"},
+            {"key": "user_login", "label": "Log in, then CLOSE the browser window to save the session", "status": "in-progress"},
+        ],
+    }
+
+
+def login_recovery_status(source_key: str) -> dict:
+    """Check whether a login recovery browser session is still active."""
+    proc = _LOGIN_RECOVERY_PROCS.get(source_key)
+    meta = _LOGIN_RECOVERY_META.get(source_key, {})
+    if proc is None:
+        return {
+            "source_key": source_key,
+            "status": "idle",
+            "steps": [
+                {"key": "launch_browser", "label": "Launch recovery browser", "status": "pending"},
+                {"key": "user_login", "label": "Log in, then CLOSE the browser window to save the session", "status": "pending"},
+                {"key": "session_saved", "label": "Session saved", "status": "pending"},
+            ],
+        }
+
+    exit_code = proc.poll()
+    if exit_code is None:
+        return {
+            "source_key": source_key,
+            "status": "running",
+            "pid": proc.pid,
+            "login_url": meta.get("login_url"),
+            "log_path": meta.get("log_path"),
+            "steps": [
+                {"key": "launch_browser", "label": "Launch recovery browser", "status": "success"},
+                {"key": "user_login", "label": "Log in, then CLOSE the browser window to save the session", "status": "in-progress"},
+                {"key": "session_saved", "label": "Session saved", "status": "pending"},
+            ],
+        }
+
+    _LOGIN_RECOVERY_PROCS.pop(source_key, None)
+    _LOGIN_RECOVERY_META.pop(source_key, None)
+    ok = exit_code == 0
+    failure_detail = None
+    log_path_str = meta.get("log_path")
+    if not ok and log_path_str:
+        tail = _tail_text(Path(log_path_str))
+        failure_detail = tail or None
+    return {
+        "source_key": source_key,
+        "status": "completed" if ok else "failed",
+        "exit_code": exit_code,
+        "login_url": meta.get("login_url"),
+        "log_path": log_path_str,
+        **({"message": failure_detail} if failure_detail else {}),
+        "steps": [
+            {"key": "launch_browser", "label": "Launch recovery browser", "status": "success"},
+            {"key": "user_login", "label": "Log in, then CLOSE the browser window to save the session", "status": "success" if ok else "failed"},
+            {"key": "session_saved", "label": "Session saved", "status": "success" if ok else "failed"},
+        ],
+    }
 
 
 def activate_parser(source_key: str) -> dict:
@@ -143,5 +358,12 @@ def activate_parser(source_key: str) -> dict:
 
 # The tools the MCP server registers, in one place.
 READ_TOOLS = [list_sources, latest_transactions, pending_approvals, llm_status, status]
-ACTION_TOOLS = [ingest_document, run_scraper, fetch_source, activate_parser]
+ACTION_TOOLS = [
+    ingest_document,
+    run_scraper,
+    fetch_source,
+    activate_parser,
+    start_login_recovery,
+    login_recovery_status,
+]
 ALL_TOOLS = READ_TOOLS + ACTION_TOOLS

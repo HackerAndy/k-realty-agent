@@ -15,6 +15,8 @@ This module must stay framework-free (no langgraph/langchain imports).
 
 from __future__ import annotations
 
+import time
+
 from playwright.sync_api import Page
 
 from core.tools.credential_store import CredentialStore
@@ -22,6 +24,33 @@ from core.tools.credential_store import CredentialStore
 
 class BuildiumLoginError(RuntimeError):
     pass
+
+
+def _looks_authenticated(page: Page) -> bool:
+    """Best-effort signal that the persistent profile is already signed in."""
+    url = (page.url or "").lower()
+    return "/manager/app" in url
+
+
+def _find_email_field(page: Page, timeout_ms: int):
+    """Try known Buildium login form selectors, newest/most-specific first."""
+    candidates = [
+        page.get_by_label("Email address"),
+        page.get_by_label("Email"),
+        page.locator("input[type='email']"),
+    ]
+
+    deadline = time.time() + (timeout_ms / 1000.0)
+    while time.time() < deadline:
+        for candidate in candidates:
+            try:
+                candidate.wait_for(state="visible", timeout=500)
+                return candidate
+            except Exception:
+                continue
+        if _looks_authenticated(page):
+            return None
+    return None
 
 
 def login(page: Page, portal_url: str, service_key: str, timeout_ms: int = 45000) -> None:
@@ -42,11 +71,21 @@ def login(page: Page, portal_url: str, service_key: str, timeout_ms: int = 45000
 
     page.goto(portal_url, timeout=timeout_ms, wait_until="domcontentloaded")
 
-    email_field = page.get_by_label("Email address")
+    if _looks_authenticated(page):
+        return
+
+    email_field = _find_email_field(page, timeout_ms)
+    if email_field is None:
+        if _looks_authenticated(page):
+            return
+        raise BuildiumLoginError(
+            f"Login form for '{service_key}' was not detected. Re-run bootstrap_login() "
+            "and verify the portal still uses email/password sign-in."
+        )
+
     password_field = page.get_by_label("Password")
     sign_in_button = page.get_by_role("button", name="Sign in", exact=True)
 
-    email_field.wait_for(state="visible", timeout=timeout_ms)
     email_field.fill(creds["username"])
     password_field.fill(creds["password"])
     sign_in_button.click()
