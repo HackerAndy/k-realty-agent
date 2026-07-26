@@ -204,6 +204,99 @@ def test_start_login_recovery_and_status(monkeypatch):
     assert any(s.get("key") == "session_saved" and s.get("status") == "success" for s in done["steps"])
 
 
+@pytest.mark.parametrize(
+    "args, message",
+    [
+        ({"provider": "bogus"}, "Unknown provider"),
+        ({"provider": "anthropic"}, "API key is required"),
+        ({"provider": "openai_compatible", "model": "m"}, "base URL is required"),
+        ({"provider": "openai_compatible", "base_url": "http://x/v1"}, "model is required"),
+    ],
+)
+def test_set_llm_provider_rejects_incomplete_config(monkeypatch, args, message):
+    """Guards must fire BEFORE anything is written — a half-configured provider
+    would silently break every agent run."""
+    def boom(*a, **k):
+        raise AssertionError("must not store an incomplete provider")
+
+    monkeypatch.setattr(mcp_tools.llm_provider, "store_llm_credential", boom)
+    with pytest.raises(mcp_tools.ToolError, match=message):
+        mcp_tools.set_llm_provider(**args)
+
+
+def test_set_llm_provider_stores_and_loads(monkeypatch):
+    stored = {}
+    monkeypatch.setattr(mcp_tools.llm_provider, "store_llm_credential",
+                        lambda provider, **kw: stored.update({"provider": provider, **kw}))
+    monkeypatch.setattr(mcp_tools.llm_provider, "load_into_env", lambda: True)
+    # Never read the operator's real vault from a test — a failure would print
+    # their actual key into pytest output.
+    monkeypatch.setattr(mcp_tools.llm_provider, "stored_api_key", lambda provider=None: None)
+    monkeypatch.setattr(mcp_tools, "llm_status", lambda: {"configured": True})
+
+    result = mcp_tools.set_llm_provider("openai_compatible", base_url=" http://x/v1 ", model=" m ")
+    assert result["saved"] is True
+    # Whitespace trimmed so a stray paste can't produce an unreachable URL.
+    assert stored == {"provider": "openai_compatible", "api_key": None, "base_url": "http://x/v1", "model": "m"}
+
+
+def test_set_llm_provider_keeps_stored_key_when_field_left_blank(monkeypatch):
+    """CredentialStore.set() replaces the whole record, so saving with a blank key
+    field used to WIPE the stored key. Blank must mean 'keep what's saved'."""
+    stored = {}
+    monkeypatch.setattr(mcp_tools.llm_provider, "store_llm_credential",
+                        lambda provider, **kw: stored.update({"provider": provider, **kw}))
+    monkeypatch.setattr(mcp_tools.llm_provider, "load_into_env", lambda: True)
+    monkeypatch.setattr(mcp_tools.llm_provider, "stored_api_key",
+                        lambda provider=None: "sk-from-vault" if provider == "anthropic" else None)
+    monkeypatch.setattr(mcp_tools, "llm_status", lambda: {"configured": True})
+
+    result = mcp_tools.set_llm_provider("anthropic", api_key=None, model="claude-opus-4-8")
+    assert stored["api_key"] == "sk-from-vault"
+    assert result["reused_stored_api_key"] is True
+
+
+def test_set_llm_provider_does_not_reuse_a_key_across_providers(monkeypatch):
+    """An Anthropic key must never be handed to a local OpenAI-compatible server."""
+    monkeypatch.setattr(mcp_tools.llm_provider, "stored_api_key",
+                        lambda provider=None: None)  # guard says: different provider
+
+    with pytest.raises(mcp_tools.ToolError, match="API key is required"):
+        mcp_tools.set_llm_provider("anthropic")
+
+
+def test_llm_status_reports_key_presence_not_the_key(monkeypatch):
+    monkeypatch.setattr(mcp_tools.llm_provider, "current_config",
+                        lambda: {"provider": "anthropic", "model": "m", "api_key": "<stored>"})
+    monkeypatch.setattr(mcp_tools.llm_provider, "is_configured", lambda: True)
+
+    st = mcp_tools.llm_status()
+    assert st["api_key_set"] is True
+    assert "api_key" not in st
+
+
+def test_list_llm_models_falls_back_to_the_stored_key(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(mcp_tools.llm_provider, "stored_api_key", lambda provider=None: "local-key")
+
+    def capture(base_url, api_key=None):
+        seen["api_key"] = api_key
+        return ["m1"]
+
+    monkeypatch.setattr(mcp_tools.llm_provider, "list_models", capture)
+    assert mcp_tools.list_llm_models("http://x/v1")["models"] == ["m1"]
+    assert seen["api_key"] == "local-key"
+
+
+def test_list_llm_models_surfaces_the_real_reason(monkeypatch):
+    def unreachable(base_url, api_key=None):
+        raise RuntimeError("could not reach http://x/v1/models: No route to host")
+
+    monkeypatch.setattr(mcp_tools.llm_provider, "list_models", unreachable)
+    with pytest.raises(mcp_tools.ToolError, match="No route to host"):
+        mcp_tools.list_llm_models("http://x/v1")
+
+
 @pytest.mark.parametrize("fn", [mcp_tools.list_sources, mcp_tools.pending_approvals, mcp_tools.status])
 def test_manifest_errors_map_to_toolerror(monkeypatch, fn):
     def boom(self):

@@ -127,10 +127,12 @@ def pending_approvals() -> list[dict]:
 
 
 def llm_status() -> dict:
-    """Which LLM provider the harness is configured to use."""
+    """Which LLM provider the harness is configured to use. `api_key_set` says
+    whether a key is in the vault — never the key itself."""
     cfg = llm_provider.current_config() or {}
     return {"configured": llm_provider.is_configured(),
-            "provider": cfg.get("provider"), "model": cfg.get("model"), "base_url": cfg.get("base_url")}
+            "provider": cfg.get("provider"), "model": cfg.get("model"), "base_url": cfg.get("base_url"),
+            "api_key_set": bool(cfg.get("api_key"))}
 
 
 def status() -> dict:
@@ -366,6 +368,66 @@ def login_recovery_status(source_key: str) -> dict:
     }
 
 
+def list_llm_models(base_url: str, api_key: str | None = None) -> dict:
+    """Ask an OpenAI-compatible server which models it actually has, so the
+    operator picks a real one instead of guessing. Surfaces the real reason on
+    failure rather than silently returning nothing."""
+    if not (base_url or "").strip():
+        raise ToolError("A base URL is required to list models.")
+    # Blank field = "use the key I already stored", so it never has to be retyped.
+    api_key = (api_key or "").strip() or llm_provider.stored_api_key("openai_compatible")
+    try:
+        return {"base_url": base_url, "models": llm_provider.list_models(base_url.strip(), api_key)}
+    except RuntimeError as exc:
+        # Already a logged, actionable "message remediation" string — don't bury it.
+        raise ToolError(str(exc)) from exc
+    except Exception as exc:
+        raise ToolError(f"Couldn't list models from {base_url}: {exc}") from exc
+
+
+def set_llm_provider(
+    provider: str,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    model: str | None = None,
+) -> dict:
+    """Store which LLM the harness uses (encrypted in .secrets/) and load it into
+    the environment immediately. 'anthropic' needs an api_key; 'openai_compatible'
+    needs base_url + model, key optional."""
+    if provider not in llm_provider.PROVIDERS:
+        raise ToolError(f"Unknown provider '{provider}'. Known: {list(llm_provider.PROVIDERS)}")
+
+    api_key = (api_key or "").strip() or None
+    base_url = (base_url or "").strip() or None
+    model = (model or "").strip() or None
+
+    # CredentialStore.set() REPLACES the whole record, so an omitted key would
+    # wipe the stored one. Blank field means "keep the key I already saved" —
+    # the operator only retypes it to change it.
+    reused_key = False
+    if not api_key:
+        api_key = llm_provider.stored_api_key(provider)
+        reused_key = api_key is not None
+
+    if provider == "anthropic":
+        if not api_key:
+            raise ToolError("An Anthropic API key is required.")
+    else:
+        if not base_url:
+            raise ToolError("A base URL is required for an OpenAI-compatible server.")
+        if not model:
+            raise ToolError("A model is required — list the server's models and pick one.")
+
+    try:
+        llm_provider.store_llm_credential(provider, api_key=api_key, base_url=base_url, model=model)
+        llm_provider.load_into_env()
+    except Exception as exc:
+        raise ToolError(f"Couldn't save the LLM provider: {exc}") from exc
+    # Report the reuse so it's visible, not silent — the operator should know the
+    # saved key came from the vault rather than from what they just typed.
+    return {"saved": True, "reused_stored_api_key": reused_key, **llm_status()}
+
+
 def activate_parser(source_key: str) -> dict:
     """Approve a built parser — activate it so the source uses it automatically."""
     if not source_status.parser_built(source_key):
@@ -383,5 +445,7 @@ ACTION_TOOLS = [
     activate_parser,
     start_login_recovery,
     login_recovery_status,
+    list_llm_models,
+    set_llm_provider,
 ]
 ALL_TOOLS = READ_TOOLS + ACTION_TOOLS

@@ -64,6 +64,23 @@
   }
   .icon-btn:hover { background: #f2f1ec; color: var(--text); }
   :root[data-theme="dark"] .icon-btn:hover { background: #292d30; }
+  .icon-btn.on { background: var(--accent-soft); color: var(--accent); }
+
+  /* ── Settings form ── */
+  .setting { padding: 16px; }
+  .setting + .setting { border-top: 1px solid var(--border); }
+  .setting h2 { font-size: 14px; font-weight: 600; margin: 0 0 3px; }
+  .setting .note { color: var(--muted); font-size: 12.5px; margin: 0 0 14px; }
+  .field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; max-width: 460px; }
+  .field label { font-size: 12.5px; color: var(--muted); }
+  .field input, .field select { font: inherit; font-size: 13px; padding: 8px 11px; border-radius: 8px; border: 1px solid var(--border); background: var(--card); color: var(--text); }
+  .field .sub { font-size: 11.5px; color: var(--faint); }
+  .seg { display: inline-flex; gap: 4px; border: 1px solid var(--border); border-radius: 999px; padding: 4px; margin-bottom: 16px; }
+  .seg button { font-size: 13px; border: none; background: transparent; color: var(--muted); padding: 6px 14px; border-radius: 999px; }
+  .seg button.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .kv { font-size: 12.5px; color: var(--muted); margin-bottom: 14px; }
+  .kv b { color: var(--text); font-weight: 600; }
   .view {
     opacity: 1;
     transform: translateY(0);
@@ -178,6 +195,7 @@
     <div class="right">
       <span class="chip" id="llm">LLM …</span>
       <span class="chip" id="pending" style="display:none"></span>
+      <button class="icon-btn" id="nav-settings" onclick="show('settings')" aria-label="Settings" title="Settings">&#9881;</button>
       <button class="icon-btn" id="theme-toggle" onclick="toggleTheme()" aria-label="Enable dark mode" title="Enable dark mode"><span id="theme-icon" aria-hidden="true">&#9790;</span></button>
     </div>
   </div>
@@ -680,6 +698,117 @@
       'It’s deliberately deferred: ingested transactions are stored faithfully first.</div>';
   }
 
+  // ── Settings: which LLM the harness drives. Stored encrypted in .secrets/. ──
+  const llmForm = { provider: null, models: [] };
+
+  async function renderSettings() {
+    el('panel').innerHTML = '<div class="empty">Loading settings…</div>';
+    let cfg = {};
+    try { cfg = await callTool('llm_status'); } catch (e) { cfg = { error: e.message }; }
+    if (llmForm.provider === null) llmForm.provider = cfg.provider || 'anthropic';
+
+    const currently = cfg.configured
+      ? 'Currently: <b>' + esc(cfg.provider === 'anthropic' ? 'Claude API' : 'Local / OpenAI-compatible') + '</b>' +
+        (cfg.model ? ' · <b>' + esc(cfg.model) + '</b>' : '') +
+        (cfg.base_url ? ' · ' + esc(cfg.base_url) : '')
+      : 'No LLM provider is set up yet.';
+
+    const seg = '<div class="seg">' +
+      '<button class="' + (llmForm.provider === 'anthropic' ? 'on' : '') + '" onclick="pickProvider(\'anthropic\')">Claude API</button>' +
+      '<button class="' + (llmForm.provider === 'openai_compatible' ? 'on' : '') + '" onclick="pickProvider(\'openai_compatible\')">Local server</button>' +
+      '</div>';
+
+    // A key already in the vault never has to be retyped: leaving the field
+    // blank keeps it. Only the fact that one is stored is shown, never its value.
+    const sameProvider = cfg.provider === llmForm.provider;
+    const keyStored = !!cfg.api_key_set && sameProvider;
+    const keyHint = keyStored
+      ? '<span class="sub">A key is already saved in .secrets/ — leave blank to keep it, or type a new one to replace it.</span>'
+      : '<span class="sub">Stored encrypted in .secrets/ — never written into the repo.</span>';
+    const keyPlaceholder = keyStored ? '•••••••••••• saved' : 'sk-ant-…';
+
+    let form;
+    if (llmForm.provider === 'anthropic') {
+      form =
+        '<div class="field"><label for="llm-key">Anthropic API key</label>' +
+        '<input type="password" id="llm-key" placeholder="' + keyPlaceholder + '" autocomplete="off">' +
+        keyHint + '</div>' +
+        '<div class="field"><label for="llm-model">Model</label>' +
+        '<input type="text" id="llm-model" value="' + esc(sameProvider && cfg.model ? cfg.model : 'claude-opus-4-8') + '"></div>';
+    } else {
+      const opts = llmForm.models.length
+        ? '<div class="field"><label for="llm-model-sel">Model</label><select id="llm-model-sel">' +
+          llmForm.models.map(m => '<option' + (sameProvider && m === cfg.model ? ' selected' : '') + '>' + esc(m) + '</option>').join('') +
+          '</select><span class="sub">Listed live from that server.</span></div>'
+        : '';
+      const baseVal = (sameProvider && cfg.base_url) ? cfg.base_url : 'http://klabss-MacBook-Pro.local:9090/v1';
+      form =
+        '<div class="field"><label for="llm-base">Base URL</label>' +
+        '<input type="text" id="llm-base" value="' + esc(baseVal) + '"></div>' +
+        '<div class="field"><label for="llm-key">API key <span class="sub">(optional for local servers)</span></label>' +
+        '<input type="password" id="llm-key" placeholder="' + (keyStored ? '•••••••••••• saved' : 'usually blank for a local server') + '" autocomplete="off">' +
+        (keyStored ? keyHint : '') + '</div>' +
+        '<div class="row" style="margin-bottom:12px"><button class="btn" onclick="loadLlmModels()">List models on that server</button></div>' +
+        opts +
+        (llmForm.models.length ? '' :
+          '<div class="field"><label for="llm-model">Model</label><input type="text" id="llm-model" value="' +
+          esc(sameProvider && cfg.model ? cfg.model : '') + '" placeholder="type it exactly, or list them above"></div>');
+    }
+
+    el('panel').innerHTML =
+      '<div class="setting"><h2>LLM provider</h2>' +
+      '<p class="note">Which model the harness uses to build parsers/scrapers and extract data.</p>' +
+      '<div class="kv">' + currently + '</div>' + seg + form +
+      '<div class="row"><button class="btn" onclick="saveLlmProvider()">Save provider</button></div></div>' +
+      '<div class="setting"><h2>Credentials &amp; services</h2>' +
+      '<p class="note">Portal logins and the source manifest are managed from a separate local script, ' +
+      'so secrets are typed straight into your terminal:</p>' +
+      '<div class="kv"><b>poetry run python scripts/manage_secrets.py</b></div></div>';
+  }
+
+  function pickProvider(p) { llmForm.provider = p; llmForm.models = []; renderSettings(); }
+
+  async function loadLlmModels() {
+    const base = el('llm-base').value;
+    const key = el('llm-key').value;
+    clearToast();
+    toast('Listing models on ' + base + '…', true);
+    try {
+      const r = await callTool('list_llm_models', { base_url: base, api_key: key || null });
+      if (!r.models || !r.models.length) { toast('That server reported no models.', false); return; }
+      llmForm.models = r.models;
+      await renderSettings();
+      el('llm-base').value = base;
+      if (key) el('llm-key').value = key;
+      toast('Found ' + r.models.length + ' model' + (r.models.length > 1 ? 's' : '') + '.', true);
+    } catch (e) {
+      toast(e.message, false);
+    }
+  }
+
+  async function saveLlmProvider() {
+    clearToast();
+    const args = { provider: llmForm.provider };
+    const keyEl = el('llm-key');
+    args.api_key = keyEl ? keyEl.value : null;
+    if (llmForm.provider === 'openai_compatible') {
+      args.base_url = el('llm-base').value;
+      const sel = el('llm-model-sel');
+      args.model = sel ? sel.value : (el('llm-model') ? el('llm-model').value : null);
+    } else {
+      args.model = el('llm-model') ? el('llm-model').value : null;
+    }
+    try {
+      const r = await callTool('set_llm_provider', args);
+      toast('LLM provider saved.' + (r.reused_stored_api_key ? ' Kept the API key already in the vault.' : ''), true);
+      await loadStatus();
+      llmForm.models = [];
+      await renderSettings();
+    } catch (e) {
+      toast('Couldn’t save: ' + e.message, false);
+    }
+  }
+
   function beginLoginRecoveryPolling(sourceKey, runId, resumeTool, resumeArgs) {
     const poll = async () => {
       if (!isCurrentActionRun(sourceKey, runId)) return;
@@ -843,15 +972,17 @@
     ingest: { h: 'Data sources', p: 'Acquire and validate each source before processing.' },
     process: { h: 'Process data', p: 'Categorize and reconcile ingested transactions — the second pillar.' },
     reporting: { h: 'Reporting', p: 'Cross-source summaries and statements — the third pillar.' },
+    settings: { h: 'Settings', p: 'How the harness is wired up — the LLM it drives, and where secrets live.' },
   };
 
   function show(section) {
     current = section;
     for (const s of ['reporting', 'ingest', 'process']) el('nav-' + s).classList.toggle('on', s === section);
+    el('nav-settings').classList.toggle('on', section === 'settings');
     const ph = PAGEHEAD[section];
     el('pagehead').innerHTML = '<h1>' + ph.h + '</h1><p>' + ph.p + '</p>';
     clearToast();
-    ({ reporting: renderReporting, ingest: renderIngest, process: renderProcess })[section]();
+    ({ reporting: renderReporting, ingest: renderIngest, process: renderProcess, settings: renderSettings })[section]();
   }
 
   setTheme(initialTheme());
