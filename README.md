@@ -86,3 +86,12 @@ poetry run python scripts/manage_secrets.py setup          # guided, all 9 servi
 ```bash
 poetry run python scripts/check_portability.py
 ```
+
+## Troubleshooting
+
+- **Local LLM unreachable on macOS** — a local/LAN model server fails with
+  `[Errno 65] No route to host` even though `curl` reaches it from the same
+  shell. This is macOS Local Network privacy denying the Python binary, not a
+  network fault. Cause, the persistent SSH-tunnel workaround (with launchd
+  plist), and why granting the permission isn't durable across interpreter
+  upgrades: [docs/local-llm-on-macos.md](docs/local-llm-on-macos.md).
