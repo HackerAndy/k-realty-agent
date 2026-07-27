@@ -30,7 +30,7 @@ services:
     newer_than_days: 45
 - key: epic_property_management
   label: Epic Property Management
-  login_url: https://epicpropertymanagement.managebuilding.com
+  login_url: https://epicpropertymanagement.managebuilding.com/manager
   notes: Buildium-powered owner portal. PDF Owner Statement is the primary monthly source; parser verified against a real statement (reconciles to statement totals).
   input_type: pdf_statement
   access: email_attachment
