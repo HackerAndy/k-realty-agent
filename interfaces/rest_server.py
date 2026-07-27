@@ -146,6 +146,32 @@ async def upload_ingest(source_key: str, file: UploadFile = File(...)):
     return {**(result or {}), "steps": steps}
 
 
+@app.post("/api/upload_sample/{source_key}")
+async def upload_sample(source_key: str, file: UploadFile = File(...)):
+    """Save a sample document for the agent to build a parser against.
+
+    Unlike /api/upload_ingest this KEEPS the file: the build runs in a background
+    process for minutes and re-reads the sample, and a revise pass needs it again.
+    Lands in data/samples/ (gitignored, like all financial documents)."""
+    suffix = Path(file.filename or "sample").suffix
+    safe_key = "".join(c for c in source_key if c.isalnum() or c in "_-")
+    if not safe_key:
+        raise HTTPException(status_code=400, detail={"message": f"Invalid source key '{source_key}'."})
+
+    samples_dir = REPO_ROOT / "data" / "samples"
+    samples_dir.mkdir(parents=True, exist_ok=True)
+    dest = samples_dir / f"{safe_key}-sample{suffix}"
+    try:
+        dest.write_bytes(await file.read())
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail={"message": f"Couldn't save the sample: {exc}"}) from exc
+    finally:
+        await file.close()
+
+    return {"source_key": source_key, "sample_path": str(dest),
+            "filename": file.filename, "bytes": dest.stat().st_size}
+
+
 def main() -> None:
     """Pin cwd to the repo root (relative paths), load secrets + the LLM provider,
     then serve on localhost. Bind 0.0.0.0 only if you deliberately want it on the

@@ -10,13 +10,16 @@ here; it all delegates to core/.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
 from datetime import datetime, timezone
 
-from core import source_status
+from core import progress, source_status
+from core.observability import get_logger
 from core.fetch_ingest import fetch_and_ingest, persist_scraped
 from core.ingest import (
     ingest_source,
@@ -31,12 +34,19 @@ from core.tools.browser_session import reset_profile
 from core.tools.service_manifest import ServiceManifest, ServiceManifestError
 
 
+log = get_logger("interfaces.mcp_tools")
+
+
 class ToolError(RuntimeError):
     """Surfaced to the MCP client as a tool error."""
 
 
 _LOGIN_RECOVERY_PROCS: dict[str, subprocess.Popen] = {}
 _LOGIN_RECOVERY_META: dict[str, dict[str, str]] = {}
+
+# One in-flight agent build per source; its run file carries the streamed progress.
+_BUILD_PROCS: dict[str, subprocess.Popen] = {}
+_BUILD_META: dict[str, dict[str, str]] = {}
 
 
 def _tail_text(path: Path, max_lines: int = 25) -> str:
@@ -120,6 +130,23 @@ def source_transactions(source_key: str, limit: int = 500) -> dict:
             **_summary(txns), "transactions": _rows(txns, limit)}
 
 
+def action_progress(source_key: str) -> dict:
+    """The phases of a long action currently running for this source (browser
+    launch, sign-in, each API call), with elapsed times.
+
+    Safe to poll WHILE the action runs — that's the point: it turns a silent
+    30-60s "Run scraper" into named steps the operator can watch."""
+    steps = progress.read(source_key)
+    running = next((s for s in steps if s.get("status") == "in-progress"), None)
+    return {
+        "source_key": source_key,
+        "steps": steps,
+        "current": running.get("label") if running else None,
+        "current_elapsed_s": round(time.time() - running["started_at"], 1)
+        if running and running.get("started_at") else None,
+    }
+
+
 def pending_approvals() -> list[dict]:
     """Sources whose parser is built but not yet activated — awaiting the operator's yes."""
     services = _load_services()
@@ -172,7 +199,12 @@ def run_scraper(source_key: str, save: bool = True, limit: int = 200) -> dict:
 
     scrape_started = time.perf_counter()
     try:
-        txns = get_scraper(source_key)()
+        # Open a live progress channel so the phases INSIDE the scraper (browser
+        # launch, sign-in, each API call) are visible while it runs — poll them
+        # with action_progress(). Without this the operator sees one "Run scraper"
+        # step for 30-60s, indistinguishable from a hang.
+        with progress.channel(source_key):
+            txns = get_scraper(source_key)()
         steps.append({
             "key": "run_scraper",
             "label": "Run scraper",
@@ -256,14 +288,69 @@ def fetch_source(source_key: str) -> dict:
     }
 
 
-def start_login_recovery(source_key: str) -> dict:
-    """Open a visible persistent browser for manual re-login of a portal source."""
+# Why a human had to step in. Ordered most-specific first — the first match wins,
+# so "verification code" isn't swallowed by the broader session/sign-in pattern.
+# Shown to the operator: a browser opening unexplained is exactly the black box
+# this project forbids.
+_AUTH_REASONS: tuple[tuple[str, str, str], ...] = (
+    ("two_factor",
+     r"2fa|two[\s-]?factor|verification code|verify (it'?s )?you|one[\s-]?time (code|pass)|otp|authenticator",
+     "The portal asked for a 2FA / verification code. That code only reaches you, so the "
+     "harness can't complete this sign-in on its own."),
+    ("captcha",
+     r"captcha|recaptcha|hcaptcha|are you a human|bot (check|detection)",
+     "The portal presented a CAPTCHA. The harness will not solve those, so you need to "
+     "sign in once yourself."),
+    ("bad_credentials",
+     r"incorrect password|invalid (password|credential|login)|wrong password|bad credential|\b403\b",
+     "The stored credentials were rejected. Sign in manually to confirm them — and update "
+     "them via scripts/manage_secrets.py if they've changed."),
+    # The OBSERVATION is "no sign-in form found" — do not assert a redesign, which
+    # is the least likely of several causes. Ordered by real-world likelihood.
+    ("login_form_not_found",
+     r"login form .*not detected|was not detected|no such element|selector",
+     "The harness couldn't find the sign-in form on the page. Usually that means the page "
+     "hadn't finished rendering, or you were already signed in and it didn't recognize the "
+     "page; a redesigned login form is possible but less likely. Signing in once captures a "
+     "fresh session either way."),
+    ("page_timeout",
+     r"timeout .*(waiting for|exceeded)|timed out",
+     "The portal didn't respond in time. That's usually slowness or a redirect rather than a "
+     "login problem — signing in once confirms which."),
+    ("session_expired",
+     r"\b401\b|unauthor|session|expired|signed out|logged out|sign[\s-]?in|login",
+     "The saved browser session expired, so the portal wants a fresh interactive sign-in."),
+)
+
+
+def classify_auth_failure(message: str) -> dict:
+    """Map a portal failure message to WHY a human is needed. Returns
+    {reason, explanation} — `reason` is 'unknown' when nothing matches, and the
+    explanation says so rather than inventing a cause."""
+    text = (message or "").lower()
+    for reason, pattern, explanation in _AUTH_REASONS:
+        if re.search(pattern, text):
+            return {"reason": reason, "explanation": explanation}
+    return {
+        "reason": "unknown",
+        "explanation": "The portal blocked automated sign-in, but the harness couldn't tell why "
+                       "from the error. Signing in once manually captures a fresh session.",
+    }
+
+
+def start_login_recovery(source_key: str, trigger_error: str = "") -> dict:
+    """Open a visible persistent browser for manual re-login of a portal source.
+
+    Pass `trigger_error` (the failure that prompted this) so the operator is told
+    WHY a human is needed rather than just seeing a browser appear."""
     services = _load_services()
     service = next((s for s in services if s.key == source_key), None)
     if service is None:
         raise ToolError(f"Unknown source '{source_key}'.")
     if not service.login_url:
         raise ToolError(f"Source '{source_key}' has no login_url configured.")
+
+    why = classify_auth_failure(trigger_error)
 
     existing = _LOGIN_RECOVERY_PROCS.get(source_key)
     if existing and existing.poll() is None:
@@ -273,6 +360,7 @@ def start_login_recovery(source_key: str) -> dict:
             "status": "running",
             "pid": existing.pid,
             "login_url": meta.get("login_url", service.login_url),
+            **{k: meta.get(k, why[k]) for k in ("reason", "explanation")},
             "steps": [
                 {"key": "launch_browser", "label": "Launch recovery browser", "status": "success"},
                 {"key": "user_login", "label": "Log in, then CLOSE the browser window to save the session", "status": "in-progress"},
@@ -301,6 +389,8 @@ def start_login_recovery(source_key: str) -> dict:
     _LOGIN_RECOVERY_META[source_key] = {
         "login_url": service.login_url,
         "log_path": str(log_path),
+        "started_at": time.monotonic(),
+        **why,
     }
     return {
         "source_key": source_key,
@@ -308,11 +398,43 @@ def start_login_recovery(source_key: str) -> dict:
         "pid": proc.pid,
         "login_url": service.login_url,
         "log_path": str(log_path),
+        **why,
         "steps": [
             {"key": "launch_browser", "label": "Launch recovery browser", "status": "success"},
             {"key": "user_login", "label": "Log in, then CLOSE the browser window to save the session", "status": "in-progress"},
         ],
     }
+
+
+# A wedged worker (locked profile, phantom tab) leaves the process alive with no
+# browser. Give the browser this long to appear before calling it stuck.
+_RECOVERY_BROWSER_GRACE_S = 45.0
+
+
+def _recovery_browser_alive(source_key: str) -> bool:
+    """Is a Chromium actually running against this source's profile? A live worker
+    with no browser is the signature of a wedged launch."""
+    from core.tools.browser_session import DEFAULT_PROFILE_ROOT, _find_pids
+    profile_dir = DEFAULT_PROFILE_ROOT / source_key
+    return bool(_find_pids(f"user-data-dir={profile_dir}"))
+
+
+def cancel_login_recovery(source_key: str) -> dict:
+    """Kill a running/wedged recovery worker so the operator can retry. The escape
+    hatch for a browser that never opened or never registered as closed."""
+    proc = _LOGIN_RECOVERY_PROCS.get(source_key)
+    if proc is None:
+        return {"source_key": source_key, "status": "idle", "cancelled": False}
+    if proc.poll() is None:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+    _LOGIN_RECOVERY_PROCS.pop(source_key, None)
+    _LOGIN_RECOVERY_META.pop(source_key, None)
+    reset_profile(source_key)   # release the profile lock so a retry can launch
+    return {"source_key": source_key, "status": "cancelled", "cancelled": True}
 
 
 def login_recovery_status(source_key: str) -> dict:
@@ -332,12 +454,49 @@ def login_recovery_status(source_key: str) -> dict:
 
     exit_code = proc.poll()
     if exit_code is None:
+        elapsed = time.monotonic() - meta.get("started_at", time.monotonic())
+        browser_alive = _recovery_browser_alive(source_key)
+        # Worker alive, past the grace period, but no browser against this
+        # profile: the launch wedged. Say so instead of spinning forever.
+        if not browser_alive and elapsed > _RECOVERY_BROWSER_GRACE_S:
+            message = (
+                "The recovery browser isn't running (it either never opened or has already "
+                "quit), but the worker is still waiting. Cancel the recovery and retry — "
+                "close any other Chromium windows using this source's profile first."
+            )
+            log.failure(
+                operation="login_recovery_status",
+                code="LOGIN_RECOVERY_WEDGED",
+                message=f"Recovery worker for '{source_key}' is alive with no browser.",
+                remediation="Cancel the recovery (cancel_login_recovery) and retry.",
+                context={"source_key": source_key, "pid": proc.pid, "elapsed_s": round(elapsed, 1),
+                         "log_path": meta.get("log_path")},
+            )
+            return {
+                "source_key": source_key,
+                "status": "stuck",
+                "pid": proc.pid,
+                "elapsed_s": round(elapsed, 1),
+                "message": message,
+                "browser_running": False,
+                **{k: meta[k] for k in ("reason", "explanation") if k in meta},
+                "steps": [
+                    {"key": "launch_browser", "label": "Launch recovery browser",
+                     "status": "failed", "error": message},
+                    {"key": "user_login", "label": "Log in, then CLOSE the browser window to save the session",
+                     "status": "pending"},
+                    {"key": "session_saved", "label": "Session saved", "status": "pending"},
+                ],
+            }
         return {
             "source_key": source_key,
             "status": "running",
             "pid": proc.pid,
+            "elapsed_s": round(elapsed, 1),
+            "browser_running": browser_alive,
             "login_url": meta.get("login_url"),
             "log_path": meta.get("log_path"),
+            **{k: meta[k] for k in ("reason", "explanation") if k in meta},
             "steps": [
                 {"key": "launch_browser", "label": "Launch recovery browser", "status": "success"},
                 {"key": "user_login", "label": "Log in, then CLOSE the browser window to save the session", "status": "in-progress"},
@@ -428,6 +587,179 @@ def set_llm_provider(
     return {"saved": True, "reused_stored_api_key": reused_key, **llm_status()}
 
 
+def start_build(
+    kind: str,
+    source_key: str,
+    mode: str = "build",
+    sample_path: str | None = None,
+    feedback: str = "",
+    portal_url: str = "",
+) -> dict:
+    """Start the embedded agent building (or revising) a parser/scraper for a
+    source, in the background. An agent build takes minutes, so this returns
+    immediately — poll build_status() for progress and the result.
+
+    Nothing is activated: the operator reviews the verification and approves via
+    activate_parser."""
+    if kind not in ("parser", "scraper"):
+        raise ToolError(f"Unknown build kind '{kind}'. Use 'parser' or 'scraper'.")
+    if mode not in ("build", "revise"):
+        raise ToolError(f"Unknown build mode '{mode}'. Use 'build' or 'revise'.")
+
+    services = _load_services()
+    service = next((s for s in services if s.key == source_key), None)
+    if service is None:
+        raise ToolError(f"Unknown source '{source_key}'.")
+
+    if kind == "parser":
+        if not sample_path:
+            raise ToolError("A sample document is required — upload one first.")
+        sample = Path(sample_path).expanduser()
+        if not sample.exists():
+            raise ToolError(f"No file at {sample}")
+        sample_path = str(sample)
+    else:
+        portal_url = (portal_url or service.login_url or "").strip()
+        if mode == "build" and not portal_url:
+            raise ToolError(f"Source '{source_key}' has no portal URL to demonstrate against.")
+    if mode == "revise" and not (feedback or "").strip() and kind == "parser":
+        raise ToolError("Say what needs changing — revise needs feedback.")
+
+    if not llm_provider.is_configured():
+        raise ToolError("No LLM provider is configured. Set one in Settings first.")
+
+    existing = _BUILD_PROCS.get(source_key)
+    if existing and existing.poll() is None:
+        raise ToolError(f"A build is already running for '{source_key}'. Wait for it to finish.")
+
+    run_dir = Path("data/logs/builds")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    run_file = run_dir / f"{kind}-{source_key}-{stamp}.jsonl"
+    run_file.touch()
+
+    cmd = [
+        sys.executable, "-m", "orchestration.build_worker",
+        "--kind", kind, "--mode", mode,
+        "--source-key", source_key,
+        "--run-file", str(run_file),
+        "--source-label", service.label or "",
+    ]
+    if sample_path:
+        cmd += ["--sample-path", sample_path]
+    if feedback:
+        cmd += ["--feedback", feedback]
+    if portal_url:
+        cmd += ["--portal-url", portal_url]
+
+    log_path = run_file.with_suffix(".log")
+    with log_path.open("w", encoding="utf-8") as log_fh:
+        proc = subprocess.Popen(cmd, stdout=log_fh, stderr=log_fh, start_new_session=True)
+    _BUILD_PROCS[source_key] = proc
+    _BUILD_META[source_key] = {
+        "kind": kind, "mode": mode, "run_file": str(run_file), "log_path": str(log_path),
+    }
+    return {
+        "source_key": source_key, "kind": kind, "mode": mode, "status": "running",
+        "pid": proc.pid, "run_file": str(run_file),
+        "steps": _build_steps(kind, mode, "running"),
+    }
+
+
+def _build_steps(kind: str, mode: str, status: str) -> list[dict]:
+    """The build's stages, for the same step timeline the other actions render."""
+    verb = "Build" if mode == "build" else "Revise"
+    running, done = ("in-progress", "pending"), ("success", "success")
+    agent_state, verify_state = running if status == "running" else done
+    if status == "failed":
+        agent_state, verify_state = "failed", "pending"
+    return [
+        {"key": "agent_codegen", "label": f"{verb} the {kind} (agent writes code + a test)",
+         "status": agent_state},
+        {"key": "verify", "label": "Re-run the agent's test independently", "status": verify_state},
+    ]
+
+
+def _read_run_file(path: Path) -> tuple[list[str], dict | None, dict | None]:
+    """Parse the worker's JSONL protocol into (events, result, failure)."""
+    events: list[str] = []
+    result: dict | None = None
+    failure: dict | None = None
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return events, result, failure
+    for line in lines:
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue  # a partially-written final line while the worker is mid-flush
+        kind = rec.get("type")
+        if kind == "event":
+            events.append(rec.get("text", ""))
+        elif kind == "result":
+            result = rec.get("result")
+        elif kind == "failed":
+            failure = {"error": rec.get("error", "build failed"), "traceback": rec.get("traceback")}
+    return events, result, failure
+
+
+def build_status(source_key: str, event_offset: int = 0) -> dict:
+    """Progress of the running/last build for a source. `event_offset` returns only
+    events after that index, so the GUI can tail a long build cheaply.
+
+    status: idle | running | completed | failed. `completed` means the build RAN —
+    read `result.verification.ok` to see whether the code actually passed."""
+    proc = _BUILD_PROCS.get(source_key)
+    meta = _BUILD_META.get(source_key, {})
+    if proc is None or not meta:
+        return {"source_key": source_key, "status": "idle", "events": [],
+                "event_count": 0, "steps": []}
+
+    run_file = Path(meta["run_file"])
+    events, result, failure = _read_run_file(run_file)
+    exit_code = proc.poll()
+    kind, mode = meta.get("kind", "parser"), meta.get("mode", "build")
+
+    if exit_code is None:
+        status = "running"
+    elif failure or result is None or exit_code != 0:
+        status = "failed"
+    else:
+        status = "completed"
+
+    payload = {
+        "source_key": source_key, "kind": kind, "mode": mode, "status": status,
+        "events": events[event_offset:], "event_count": len(events),
+        "steps": _build_steps(kind, mode, status),
+    }
+    if status == "running":
+        return payload
+
+    if status == "failed":
+        detail = failure or {}
+        message = detail.get("error") or _tail_text(Path(meta["log_path"])) or "The build failed."
+        payload["message"] = message
+        payload["steps"] = [
+            {**s, "status": "failed", "error": message} if s["key"] == "agent_codegen" else s
+            for s in payload["steps"]
+        ]
+        return payload
+
+    verification = (result or {}).get("verification") or {}
+    payload["result"] = result
+    payload["passed"] = bool(verification.get("ok"))
+    if not payload["passed"]:
+        # Ran, but the code isn't acceptable — say so plainly instead of implying success.
+        payload["steps"] = [
+            {**s, "status": "failed",
+             "error": (verification.get("test") or {}).get("output", "")[-2000:] or verification.get("error", "")}
+            if s["key"] == "verify" else s
+            for s in payload["steps"]
+        ]
+    return payload
+
+
 def activate_parser(source_key: str) -> dict:
     """Approve a built parser — activate it so the source uses it automatically."""
     if not source_status.parser_built(source_key):
@@ -437,7 +769,8 @@ def activate_parser(source_key: str) -> dict:
 
 
 # The tools the MCP server registers, in one place.
-READ_TOOLS = [list_sources, latest_transactions, source_transactions, pending_approvals, llm_status, status]
+READ_TOOLS = [list_sources, latest_transactions, source_transactions, action_progress,
+              pending_approvals, llm_status, status]
 ACTION_TOOLS = [
     ingest_document,
     run_scraper,
@@ -445,7 +778,10 @@ ACTION_TOOLS = [
     activate_parser,
     start_login_recovery,
     login_recovery_status,
+    cancel_login_recovery,
     list_llm_models,
     set_llm_provider,
+    start_build,
+    build_status,
 ]
 ALL_TOOLS = READ_TOOLS + ACTION_TOOLS

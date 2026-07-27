@@ -4,6 +4,10 @@ Same tool functions as the MCP server, over HTTP via one generic dispatch
 endpoint. Verifies dispatch, error mapping, and that the dashboard is served.
 """
 
+from pathlib import Path
+
+import pytest
+
 from fastapi.testclient import TestClient
 
 from interfaces.rest_server import app
@@ -65,6 +69,56 @@ def test_upload_ingest_success(monkeypatch):
     assert any(s.get("key") == "cleanup_temp_file" and s.get("status") == "success" for s in r.json()["steps"])
     assert called["source_key"] == "dfcu_financial_bank"
     assert called["path"]
+
+
+def test_upload_sample_keeps_the_file_for_the_agent(tmp_path, monkeypatch):
+    """Unlike upload_ingest, this must NOT delete the file — a background build
+    re-reads the sample for minutes, and a revise pass needs it again."""
+    monkeypatch.setattr("interfaces.rest_server.REPO_ROOT", tmp_path)
+
+    r = client.post(
+        "/api/upload_sample/dfcu_financial_bank",
+        files={"file": ("statement.csv", b"Date,Description,Amount\n", "text/csv")},
+    )
+
+    assert r.status_code == 200
+    body = r.json()
+    saved = Path(body["sample_path"])
+    assert saved.exists(), "the sample must survive the request"
+    assert saved.read_bytes() == b"Date,Description,Amount\n"
+    assert saved.suffix == ".csv"
+    assert saved.parent == tmp_path / "data" / "samples"   # gitignored, like all financial docs
+    assert body["bytes"] == 24
+
+
+@pytest.mark.parametrize("key", ["..", "../../etc", "..%2F..%2Fetc", "a/../../b"])
+def test_upload_sample_cannot_escape_the_samples_dir(tmp_path, monkeypatch, key):
+    """source_key reaches the filesystem, so it must never write outside
+    data/samples/ — whether it is rejected, unrouted, or sanitized."""
+    monkeypatch.setattr("interfaces.rest_server.REPO_ROOT", tmp_path)
+
+    r = client.post(f"/api/upload_sample/{key}", files={"file": ("x.csv", b"a", "text/csv")})
+
+    if r.status_code == 200:
+        saved = Path(r.json()["sample_path"]).resolve()
+        assert (tmp_path / "data" / "samples").resolve() in saved.parents
+    else:
+        # 400 = sanitized to nothing; 404 = the path never matched the route.
+        assert r.status_code in (400, 404)
+
+
+def test_upload_sample_filename_suffix_cannot_escape(tmp_path, monkeypatch):
+    """The suffix comes from the client-supplied filename."""
+    monkeypatch.setattr("interfaces.rest_server.REPO_ROOT", tmp_path)
+
+    r = client.post(
+        "/api/upload_sample/dfcu_financial_bank",
+        files={"file": ("../../evil.csv", b"a", "text/csv")},
+    )
+
+    assert r.status_code == 200
+    saved = Path(r.json()["sample_path"]).resolve()
+    assert (tmp_path / "data" / "samples").resolve() in saved.parents
 
 
 def test_upload_ingest_maps_toolerror_to_400(monkeypatch):

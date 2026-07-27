@@ -114,6 +114,9 @@
   .upload-step.success::before { background: var(--success); }
   .upload-step.failed::before { background: var(--danger); }
   .upload-step-sep { color: var(--muted); font-size: 12px; }
+  .recovery-why { font-size: 12.5px; line-height: 1.55; color: var(--text); background: #fbf1e0; border: 1px solid #e6d9b8; border-radius: 8px; padding: 9px 12px; margin-bottom: 10px; }
+  .recovery-why b { display: inline-block; margin-bottom: 2px; }
+  :root[data-theme="dark"] .recovery-why { background: #3f3525; border-color: #6c5a3e; color: #f3e2c4; }
   .tag { font-size: 11px; padding: 2px 7px; border-radius: 6px; background: #eceae3; color: var(--muted); margin-left: 6px; }
   .empty { padding: 22px 14px; color: var(--muted); font-size: 13px; }
   #toast {
@@ -181,6 +184,25 @@
   .rollup.open .rollup-body { display: block; }
   .notbuilt { background: color-mix(in oklab, var(--muted) 7%, var(--card)); border: 1px dashed var(--border); border-radius: 10px; padding: 18px; text-align: center; color: var(--muted); font-size: 13px; }
   .notbuilt b { color: var(--text); }
+
+  /* ── Agent build panel (writes a parser, then must pass its own test) ── */
+  .build { border: 1px solid var(--border); border-radius: 10px; margin-top: 14px; overflow: hidden; }
+  .build-h { display: flex; align-items: center; gap: 10px; padding: 11px 14px; background: color-mix(in oklab, var(--muted) 6%, var(--card)); border-bottom: 1px solid var(--border); font-size: 13px; font-weight: 600; }
+  .build-h .spin { width: 12px; height: 12px; border-radius: 999px; border: 2px solid color-mix(in oklab, var(--accent) 35%, transparent); border-top-color: var(--accent); animation: spin .7s linear infinite; flex: none; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .build-h .spin { animation: none; } }
+  .build-b { padding: 14px; }
+  .verdict { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; font-weight: 600; padding: 4px 11px; border-radius: 999px; }
+  .verdict.pass { color: var(--success); background: color-mix(in oklab, var(--success) 14%, transparent); }
+  .verdict.fail { color: var(--danger); background: color-mix(in oklab, var(--danger) 14%, transparent); }
+  .stream { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; line-height: 1.6; background: color-mix(in oklab, var(--muted) 8%, var(--card)); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; max-height: 220px; overflow: auto; white-space: pre-wrap; word-break: break-word; color: var(--muted); }
+  .stream .last { color: var(--text); }
+  .build-b .label { font-size: 11.5px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); margin: 14px 0 6px; }
+  .build-b .label:first-child { margin-top: 0; }
+  .build-b textarea { width: 100%; font: inherit; font-size: 13px; padding: 9px 11px; border-radius: 8px; border: 1px solid var(--border); background: var(--card); color: var(--text); resize: vertical; min-height: 62px; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 550; }
+  :root[data-theme="dark"] .btn.primary { color: #12160f; }
+  .btn.primary:hover { filter: brightness(1.06); background: var(--accent); }
 </style>
 </head>
 <body>
@@ -484,16 +506,229 @@
 
   function sourceBodyHTML(s, isPending) {
     const actions = '<div class="actions">' + sourceActionHTML(s, isPending) + '</div>' + sourceUploadStepsRow(s.key);
+    const build = buildHTML(s);
     const data = sourceTxnCache[s.key];
-    if (!data) return actions + '<div class="empty">Loading transactions…</div>';
-    if (data.error) return actions + '<div class="notbuilt">Couldn’t load transactions: ' + esc(data.error) + '</div>';
+    if (!data) return actions + '<div class="empty">Loading transactions…</div>' + build;
+    if (data.error) return actions + '<div class="notbuilt">Couldn’t load transactions: ' + esc(data.error) + '</div>' + build;
     if (!data.transactions || !data.transactions.length) {
       const msg = s.is_trigger
         ? 'This is a <b>delivery trigger</b>, not a ledger. Fetched documents are ingested under the source they’re routed to — nothing to validate here directly.'
-        : 'No transactions yet. Acquire data above to validate it here.';
-      return actions + '<div class="notbuilt">' + msg + '</div>';
+        : (s.parser_built
+            ? 'No transactions yet. Acquire data above to validate it here.'
+            : 'No parser for this source yet — build one below, then acquire data.');
+      return actions + '<div class="notbuilt">' + msg + '</div>' + build;
     }
-    return actions + '<div id="detail-' + sourceDomId(s.key) + '" class="__detail">' + validationHTML(s.key, data) + '</div>';
+    return actions + '<div id="detail-' + sourceDomId(s.key) + '" class="__detail">' +
+      validationHTML(s.key, data) + '</div>' + build;
+  }
+
+  // ── Agent build: sample -> agent writes parser + test -> operator approves ──
+  // Long-running, so start_build returns immediately and we tail build_status.
+  const buildState = {};   // source_key -> { sample, events, status, result, passed, feedback, token }
+  const bs = k => buildState[k] || (buildState[k] = { sample: null, events: [], status: 'idle', feedback: '' });
+
+  function buildHTML(s) {
+    if (s.is_trigger) return '';   // a trigger has no parser of its own to build
+    const st = bs(s.key);
+    const sid = sourceDomId(s.key);
+    const verb = s.parser_built ? 'Rebuild' : 'Build';
+
+    let inner;
+    if (st.status === 'running') {
+      const shown = st.events.slice(-40);
+      inner = '<div class="stream" id="stream-' + sid + '">' +
+        (shown.length ? shown.map((e, i) =>
+          '<span class="' + (i === shown.length - 1 ? 'last' : '') + '">' + esc(e) + '</span>').join('\n')
+          : 'Starting the agent…') + '</div>' +
+        '<div class="row" style="margin-top:12px"><span class="hint">This takes a few minutes. ' +
+        'You can leave this page open; progress keeps streaming.</span></div>';
+    } else if (st.status === 'completed' || st.status === 'failed') {
+      inner = buildResultHTML(s, st);
+    } else {
+      inner =
+        '<p class="note" style="margin:0 0 12px">The harness writes the ' +
+        (s.input_type === 'html_scrape' ? 'parser' : 'parser') +
+        ' itself: give it one real sample document, and its own agent writes the code <b>and a test</b>, ' +
+        'then re-runs that test independently. Nothing activates until you approve it.</p>' +
+        (st.sample
+          ? '<div class="kv">Sample: <b>' + esc(st.sample.filename) + '</b> (' + st.sample.bytes.toLocaleString() + ' bytes)</div>'
+          : '') +
+        '<div class="row">' +
+        '<button class="btn" onclick="chooseSample(\'' + s.key + '\')">' +
+          (st.sample ? 'Choose a different sample' : 'Choose a sample document') + '</button>' +
+        '<input id="sample-input-' + sid + '" type="file" style="display:none" accept=".pdf,.csv,text/csv,application/pdf" ' +
+          'onchange="handleSampleFile(\'' + s.key + '\', event)" />' +
+        (st.sample
+          ? '<button class="btn primary" onclick="startBuild(\'' + s.key + '\')">' + verb + ' the parser</button>'
+          : '') +
+        '</div>';
+    }
+
+    return '<div class="build"><div class="build-h">' +
+      (st.status === 'running' ? '<span class="spin"></span>' : '') +
+      (st.status === 'running' ? 'Agent is writing the parser…' : verb + ' this source’s parser') +
+      '</div><div class="build-b" id="build-' + sid + '">' + inner + '</div></div>';
+  }
+
+  function buildResultHTML(s, st) {
+    const sid = sourceDomId(s.key);
+    if (st.status === 'failed') {
+      return '<div class="verdict fail">Build failed</div>' +
+        '<div class="label">What went wrong</div>' +
+        '<div class="stream">' + esc(st.message || 'The build failed.') + '</div>' +
+        '<div class="row" style="margin-top:12px">' +
+        '<button class="btn" onclick="resetBuild(\'' + s.key + '\')">Start over</button>' +
+        (st.sample ? '<button class="btn primary" onclick="startBuild(\'' + s.key + '\')">Try again</button>' : '') +
+        '</div>';
+    }
+
+    const r = st.result || {};
+    const v = r.verification || {};
+    const test = v.test || {};
+    const txns = v.transactions || [];
+    const verdict = st.passed
+      ? '<div class="verdict pass">Test passed — ' + txns.length + ' transactions parsed</div>'
+      : '<div class="verdict fail">Not approvable — the test did not pass</div>';
+
+    let body = verdict;
+    if (r.agent_summary) body += '<div class="label">What the agent did</div><div class="stream">' + esc(r.agent_summary) + '</div>';
+
+    // The gate: the harness re-ran the agent's own test in a clean subprocess.
+    body += '<div class="label">Independent test run' + (test.ok ? ' — passed' : ' — failed') + '</div>' +
+      '<div class="stream">' + esc((test.output || v.error || '(no output)').slice(-3000)) + '</div>';
+    if (v.untested_code && v.untested_code.length) {
+      body += '<div class="label">Written without a test</div><div class="stream">' +
+        esc(v.untested_code.join('\n')) + '</div>';
+    }
+
+    if (txns.length) {
+      body += '<div class="label">Parsed from your sample — check these are right</div>' +
+        txnTableHTML(txns.slice(0, 25).map(t => ({ amount: t.amount, fields: t.fields })));
+    }
+
+    body += '<div class="label">Not right? Tell the agent what to change</div>' +
+      '<textarea id="feedback-' + sid + '" placeholder="e.g. the Amount column is losing negatives on refunds">' + esc(st.feedback || '') + '</textarea>' +
+      '<div class="row" style="margin-top:10px">' +
+      (st.passed
+        ? '<button class="btn primary" onclick="approveBuild(\'' + s.key + '\')">Approve &amp; activate</button>'
+        : '') +
+      '<button class="btn" onclick="reviseBuild(\'' + s.key + '\')">Revise with the agent</button>' +
+      '<button class="btn" onclick="resetBuild(\'' + s.key + '\')">Dismiss</button>' +
+      '</div>';
+    return body;
+  }
+
+  function chooseSample(key) { const i = el('sample-input-' + sourceDomId(key)); if (i) i.click(); }
+
+  async function handleSampleFile(key, event) {
+    const input = event && event.target;
+    const file = input && input.files && input.files[0];
+    if (!file) return;
+    clearToast();
+    toast('Saving ' + file.name + '…', true);
+    const form = new FormData();
+    form.append('file', file);
+    try {
+      const res = await fetch('/api/upload_sample/' + encodeURIComponent(key), { method: 'POST', body: form });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error((data.detail && data.detail.message) || data.detail || 'upload failed');
+      bs(key).sample = data;
+      toast('Sample saved. Ready to build.', true);
+      await renderIngest();
+    } catch (e) {
+      toast('Couldn’t save the sample: ' + e.message, false);
+    } finally {
+      if (input) input.value = '';
+    }
+  }
+
+  async function startBuild(key, mode) {
+    const st = bs(key);
+    if (!st.sample) { toast('Choose a sample document first.', false); return; }
+    clearToast();
+    const args = { kind: 'parser', source_key: key, mode: mode || 'build', sample_path: st.sample.sample_path };
+    if (mode === 'revise') args.feedback = st.feedback || '';
+    try {
+      await callTool('start_build', args);
+      st.status = 'running'; st.events = []; st.result = null; st.passed = false; st.message = null;
+      st.token = (st.token || 0) + 1;
+      await renderIngest();
+      pollBuild(key, st.token);
+    } catch (e) {
+      toast('Couldn’t start the build: ' + e.message, false);
+    }
+  }
+
+  function pollBuild(key, token) {
+    const tick = async () => {
+      const st = bs(key);
+      if (st.token !== token) return;            // a newer build superseded this one
+      let s;
+      try {
+        s = await callTool('build_status', { source_key: key, event_offset: st.events.length });
+      } catch (e) {
+        st.status = 'failed'; st.message = 'Lost contact with the build: ' + e.message;
+        await renderIngest();
+        return;
+      }
+      if (st.token !== token) return;
+      if (s.events && s.events.length) st.events = st.events.concat(s.events);
+
+      if (s.status === 'running') {
+        // Update only the stream so typing/scroll elsewhere isn't disturbed.
+        const host = el('stream-' + sourceDomId(key));
+        if (host) {
+          const shown = st.events.slice(-40);
+          host.innerHTML = shown.map((e, i) =>
+            '<span class="' + (i === shown.length - 1 ? 'last' : '') + '">' + esc(e) + '</span>').join('\n');
+          host.scrollTop = host.scrollHeight;
+        } else {
+          await renderIngest();
+        }
+        setTimeout(tick, 2000);
+        return;
+      }
+
+      st.status = s.status;
+      st.result = s.result || null;
+      st.passed = !!s.passed;
+      st.message = s.message || null;
+      if (s.status === 'completed') {
+        toast(s.passed ? 'Build finished and its test passed — review it below.'
+                       : 'Build finished, but its test did NOT pass. Not approvable.', !!s.passed);
+      } else {
+        toast('Build failed: ' + (s.message || 'unknown error'), false);
+      }
+      await loadStatus();
+      delete sourceTxnCache[key];
+      await renderIngest();
+    };
+    setTimeout(tick, 1500);
+  }
+
+  function readFeedback(key) {
+    const t = el('feedback-' + sourceDomId(key));
+    return t ? t.value.trim() : '';
+  }
+
+  async function reviseBuild(key) {
+    const fb = readFeedback(key);
+    if (!fb) { toast('Say what needs changing first.', false); return; }
+    bs(key).feedback = fb;
+    await startBuild(key, 'revise');
+  }
+
+  async function approveBuild(key) {
+    bs(key).feedback = readFeedback(key);
+    await act('activate_parser', { source_key: key });
+    resetBuild(key);
+  }
+
+  function resetBuild(key) {
+    const st = bs(key);
+    st.status = 'idle'; st.events = []; st.result = null; st.passed = false; st.message = null;
+    st.token = (st.token || 0) + 1;   // orphan any in-flight poller
+    renderIngest();
   }
 
   function faithfulCols(rows) { return rows.length ? Object.keys(rows[0].fields || {}) : []; }
@@ -809,7 +1044,21 @@
     }
   }
 
-  function beginLoginRecoveryPolling(sourceKey, runId, resumeTool, resumeArgs) {
+  // Stop waiting after this long. Without a deadline a wedged worker — or an
+  // 'idle' status after a server restart — polled forever showing "in-progress".
+  const RECOVERY_DEADLINE_MS = 10 * 60 * 1000;
+
+  function endRecovery(sourceKey, stepKey, message) {
+    let latest = actionStepHistory[sourceKey] || defaultActionSteps('start_login_recovery');
+    latest = updateUploadStep(latest, stepKey, 'failed', null, message);
+    latest = updateUploadStep(latest, 'done', 'failed', 'Complete', message);
+    renderUploadSteps(sourceKey, latest);
+    toast(message, false);
+    setSourceButtonsDisabled(false);
+  }
+
+  function beginLoginRecoveryPolling(sourceKey, runId, resumeTool, resumeArgs, deadline) {
+    const until = deadline || (Date.now() + RECOVERY_DEADLINE_MS);
     const poll = async () => {
       if (!isCurrentActionRun(sourceKey, runId)) return;
       try {
@@ -818,6 +1067,28 @@
         let latest = actionStepHistory[sourceKey] || defaultActionSteps('start_login_recovery');
         if (status && Array.isArray(status.steps)) {
           latest = applyServerUploadSteps(latest, status.steps);
+        }
+
+        // The browser never opened / already quit while the worker waits on.
+        if (status && status.status === 'stuck') {
+          renderUploadSteps(sourceKey, latest);
+          endRecovery(sourceKey, 'launch_browser',
+            status.message || 'The recovery browser isn’t running. Cancel and retry.');
+          showRecoveryCancel(sourceKey);
+          return;
+        }
+        // Nothing is being tracked — e.g. agent-web restarted since it started.
+        if (status && status.status === 'idle') {
+          endRecovery(sourceKey, 'user_login',
+            'Login recovery is no longer being tracked (the server may have restarted). Run it again.');
+          return;
+        }
+        if (Date.now() > until) {
+          endRecovery(sourceKey, 'user_login',
+            'Gave up waiting for the login to finish. If the browser is still open, finish signing in and ' +
+            'close its window, then retry; otherwise cancel the recovery and start again.');
+          showRecoveryCancel(sourceKey);
+          return;
         }
         if (status && status.status === 'completed') {
           latest = updateUploadStep(latest, 'done', 'success', 'Complete');
@@ -847,13 +1118,72 @@
         setTimeout(poll, 2000);
       } catch (err) {
         if (!isCurrentActionRun(sourceKey, runId)) return;
-        let latest = actionStepHistory[sourceKey] || defaultActionSteps('start_login_recovery');
-        latest = updateUploadStep(latest, 'done', 'failed', 'Complete', err && err.message ? err.message : 'status check failed');
-        renderUploadSteps(sourceKey, latest);
-        setSourceButtonsDisabled(false);
+        endRecovery(sourceKey, 'user_login',
+          'Lost contact with the recovery: ' + (err && err.message ? err.message : 'status check failed'));
       }
     };
     setTimeout(poll, 1200);
+  }
+
+  function showRecoveryCancel(sourceKey) {
+    const row = el('upload-steps-row-' + sourceDomId(sourceKey));
+    if (!row || row.querySelector('.recovery-cancel')) return;
+    const wrap = document.createElement('div');
+    wrap.className = 'row recovery-cancel';
+    wrap.style.marginTop = '8px';
+    wrap.innerHTML = '<button class="btn" onclick="cancelRecovery(\'' + sourceKey + '\')">' +
+      'Cancel recovery &amp; release the browser profile</button>';
+    row.appendChild(wrap);
+  }
+
+  async function cancelRecovery(sourceKey) {
+    clearToast();
+    try {
+      await callTool('cancel_login_recovery', { source_key: sourceKey });
+      toast('Recovery cancelled. You can run it again now.', true);
+      actionStepHistory[sourceKey] = null;
+      const row = el('upload-steps-row-' + sourceDomId(sourceKey));
+      if (row) { row.style.display = 'none'; row.innerHTML = '<div class="upload-steps" id="upload-steps-' + sourceDomId(sourceKey) + '"></div>'; }
+      setSourceButtonsDisabled(false);
+      if (current === 'ingest') await renderIngest();
+    } catch (e) {
+      toast('Couldn’t cancel: ' + e.message, false);
+    }
+  }
+
+  const REASON_LABEL = {
+    two_factor: '2FA / verification code required',
+    captcha: 'CAPTCHA presented',
+    bad_credentials: 'Stored credentials rejected',
+    login_form_not_found: 'Sign-in form not found on the page',
+    page_timeout: 'Portal didn’t respond in time',
+    session_expired: 'Saved session expired',
+    unknown: 'Automated sign-in blocked',
+  };
+
+  /** The portal's own failure text, step errors included — what the classifier reads. */
+  function recoveryTriggerText(err) {
+    const detail = err && err.detail ? err.detail : null;
+    const parts = [(detail && detail.message) || (err && err.message) || ''];
+    if (detail && Array.isArray(detail.steps)) {
+      for (const s of detail.steps) if (s && s.error) parts.push(String(s.error));
+    }
+    return parts.filter(Boolean).join(' | ');
+  }
+
+  /** Say WHY a human is needed, above the step timeline. */
+  function showRecoveryReason(sourceKey, recovery) {
+    if (!recovery || !recovery.explanation) return;
+    const row = el('upload-steps-row-' + sourceDomId(sourceKey));
+    if (!row) return;
+    row.style.display = 'block';
+    const old = row.querySelector('.recovery-why');
+    if (old) old.remove();
+    const why = document.createElement('div');
+    why.className = 'recovery-why';
+    why.innerHTML = '<b>Why you’re needed: ' + esc(REASON_LABEL[recovery.reason] || REASON_LABEL.unknown) +
+      '</b><br>' + esc(recovery.explanation);
+    row.insertBefore(why, row.firstChild);
   }
 
   function shouldAutoRecoverLogin(tool, err) {
@@ -868,6 +1198,36 @@
     return authLike.test(stepErrors);
   }
 
+  /** Poll the phases INSIDE a long action so a silent 30-60s step becomes
+   *  named progress. Stops when `stop.done` flips. */
+  function followActionProgress(sourceKey, runId, stop) {
+    const tick = async () => {
+      if (stop.done || !isCurrentActionRun(sourceKey, runId)) return;
+      try {
+        const p = await callTool('action_progress', { source_key: sourceKey });
+        if (stop.done || !isCurrentActionRun(sourceKey, runId)) return;
+        if (p.steps && p.steps.length) {
+          const host = el('upload-steps-' + sourceDomId(sourceKey));
+          const row = el('upload-steps-row-' + sourceDomId(sourceKey));
+          if (host && row) {
+            row.style.display = 'block';
+            host.innerHTML = p.steps.map((s, i) => {
+              const secs = s.duration_ms != null ? (s.duration_ms / 1000).toFixed(1) + 's'
+                : (s.status === 'in-progress' && p.current_elapsed_s != null && s.label === p.current
+                    ? p.current_elapsed_s + 's' : '');
+              const label = esc(s.label) + (secs ? ' (' + secs + ')' : '');
+              const title = s.error ? ' title="' + esc(s.error) + '"' : '';
+              return '<span class="upload-step ' + (s.status || 'pending') + '"' + title + '>' + label + '</span>' +
+                (i < p.steps.length - 1 ? '<span class="upload-step-sep">&gt;</span>' : '');
+            }).join('');
+          }
+        }
+      } catch (e) { /* progress is best-effort; never fail the action over it */ }
+      if (!stop.done) setTimeout(tick, 1000);
+    };
+    setTimeout(tick, 400);
+  }
+
   async function act(tool, args, options = {}) {
     const allowAutoRecovery = options.allowAutoRecovery !== false;
     clearToast();
@@ -876,6 +1236,7 @@
     const sourceKey = args && args.source_key ? args.source_key : null;
     let runId = null;
     let steps = null;
+    const stopProgress = { done: false };
     if (sourceKey) {
       runId = startActionRun(sourceKey, tool);
       steps = defaultActionSteps(tool);
@@ -884,10 +1245,15 @@
         steps = updateUploadStep(steps, first.key, 'in-progress', first.label);
       }
       renderUploadSteps(sourceKey, steps);
+      // These are the tools with phases worth watching live.
+      if (tool === 'run_scraper' || tool === 'fetch_source') {
+        followActionProgress(sourceKey, runId, stopProgress);
+      }
     }
 
     try {
       const r = await callTool(tool, args);
+      stopProgress.done = true;   // the action finished; stop tailing its phases
       if (sourceKey && runId && !isCurrentActionRun(sourceKey, runId)) return;
       if (steps) {
         if (r && Array.isArray(r.steps) && r.steps.length) {
@@ -913,6 +1279,7 @@
       if (sourceKey) delete sourceTxnCache[sourceKey];
       if (current === 'ingest') await renderIngest();
     } catch (e) {
+      stopProgress.done = true;
       if (sourceKey && runId && !isCurrentActionRun(sourceKey, runId)) return;
       if (steps) {
         const detail = e && e.detail ? e.detail : null;
@@ -935,13 +1302,20 @@
         renderUploadSteps(sourceKey, recoverySteps);
 
         try {
-          const recovery = await callTool('start_login_recovery', { source_key: sourceKey });
+          // Pass the failure that triggered this so the server can tell the
+          // operator WHY a human is needed — a browser opening unexplained is
+          // exactly the black box this project forbids.
+          const recovery = await callTool('start_login_recovery', {
+            source_key: sourceKey,
+            trigger_error: recoveryTriggerText(e),
+          });
           if (!isCurrentActionRun(sourceKey, recoveryRunId)) return;
           if (recovery && Array.isArray(recovery.steps)) {
             recoverySteps = applyServerUploadSteps(recoverySteps, recovery.steps);
           }
           recoverySteps = updateUploadStep(recoverySteps, 'done', 'in-progress', 'Complete');
           renderUploadSteps(sourceKey, recoverySteps);
+          showRecoveryReason(sourceKey, recovery);
           toast('Recovery browser opened. Complete login in browser, then close it to save session.', true);
           // Once the operator finishes logging in, automatically re-run the
           // scraper call that originally failed — don't leave data un-pulled.

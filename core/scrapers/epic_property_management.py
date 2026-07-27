@@ -20,6 +20,7 @@ from typing import Any
 
 from playwright.sync_api import Page
 
+from core import progress
 from core.models import Transaction
 from core.observability import get_logger
 from core.scrapers.base import ScrapeError
@@ -178,8 +179,10 @@ def retrieve() -> list[Transaction]:
             ) from exc
 
         # ── fetch GL account IDs ──
+        progress.step("gl_accounts", "Fetch the chart of accounts")
         try:
             gl_account_ids = _get_gl_account_ids(page)
+            progress.done("gl_accounts", details={"accounts": len(gl_account_ids)})
         except ScrapeError:
             raise
         except Exception as exc:
@@ -208,8 +211,11 @@ def retrieve() -> list[Transaction]:
             "UnitIds": None,
         }
 
+        progress.step("gl_transactions",
+                      f"Fetch general-ledger transactions ({start_date} to {end_date})")
         try:
             raw = _post_json(page, f"{BASE_URL}/manager/api/generalLedger/transactions", body)
+            progress.done("gl_transactions", details={"rows": len(raw) if raw else 0})
         except ScrapeError:
             raise
         except Exception as exc:
@@ -224,4 +230,7 @@ def retrieve() -> list[Transaction]:
                 )
             ) from exc
 
-        return _extract(raw)
+        progress.step("extract", "Parse rows into transactions")
+        transactions = _extract(raw)
+        progress.done("extract", details={"transactions": len(transactions)})
+        return transactions
