@@ -20,31 +20,21 @@ import signal
 import subprocess
 import threading
 import time
-from urllib.parse import urlparse, urlunparse
 
 from playwright.sync_api import Page, sync_playwright
+
+from core import progress
 
 DEFAULT_PROFILE_ROOT = Path(".browser_profiles")
 
 
-def _preferred_login_url(url: str) -> str:
-    """Normalize known portal roots to the page users actually log in on.
-
-    Buildium roots commonly redirect, but opening /manager directly is more
-    reliable in persistent recovery sessions.
-    """
-    parsed = urlparse(url)
-    host = (parsed.netloc or "").lower()
-    path = parsed.path or ""
-    if "managebuilding.com" in host and path in ("", "/"):
-        return urlunparse(parsed._replace(path="/manager"))
-    return url
-
-
 def _open_login_page(page: Page, url: str) -> None:
-    target = _preferred_login_url(url)
+    """Open exactly the URL given. This module is tier-1 GENERIC: it must not
+    know any portal's URL layout. A platform's quirks (e.g. Buildium serving its
+    resident site at the bare root) belong in that platform's module, and the
+    right per-source sign-in URL belongs in services.yaml."""
     page.bring_to_front()
-    page.goto(target, wait_until="domcontentloaded", timeout=45_000)
+    page.goto(url, wait_until="domcontentloaded", timeout=45_000)
 
 
 def _find_pids(pattern: str) -> list[int]:
@@ -111,15 +101,20 @@ def launch(
     runs, without needing to repeat login/2FA every time.
     """
     profile_dir = _profile_dir(service_key, profile_root)
+    # Browser startup is seconds of silence to the operator; name it while it runs.
+    progress.step("browser_launch", "Start browser session")
     with sync_playwright() as playwright:
         context = playwright.chromium.launch_persistent_context(
             str(profile_dir), headless=headless
         )
+        progress.done("browser_launch")
         try:
             page = context.pages[0] if context.pages else context.new_page()
             yield page
         finally:
+            progress.step("browser_close", "Close browser session")
             context.close()
+            progress.done("browser_close")
 
 
 def bootstrap_login(
@@ -143,10 +138,14 @@ def bootstrap_login_until_window_closed(
     service_key: str,
     url: str,
     profile_root: Path = DEFAULT_PROFILE_ROOT,
+    max_wait_s: float = 15 * 60,
 ) -> None:
     """Open a visible persistent browser for manual login and keep it alive
-    until the user closes all pages/windows. Closing the context then persists
-    cookies/session for future headless runs.
+    until the user closes the window OR quits the browser. Closing the context
+    then persists cookies/session for future headless runs.
+
+    Gives up after `max_wait_s` rather than waiting forever, so the worker (and
+    the UI polling it) can never hang indefinitely.
     """
     profile_dir = _profile_dir(service_key, profile_root)
     # Clear out any orphaned worker/browser still holding this profile before
@@ -195,14 +194,46 @@ def bootstrap_login_until_window_closed(
             # hang indefinitely even though the user closed the real page.
             # Tracking our own page reference sidesteps that entirely: any
             # phantom tabs Chromium creates afterward are irrelevant.
+            #
+            # page.is_closed() alone is NOT enough: it reads locally cached state
+            # that only updates when Chromium delivers a CDP close event. Quit the
+            # browser abruptly (Cmd-Q, crash, force quit) and that event never
+            # arrives — is_closed() stays False forever and this loop spun while
+            # the operator had in fact logged in and quit, exactly as instructed.
+            # So also consult OS truth: no Chromium process is still holding this
+            # profile => the browser is gone, whatever CDP thinks. Plus an absolute
+            # deadline, so this can never hang indefinitely again.
+            deadline = time.monotonic() + max_wait_s
+            gone_checks = 0
+            reason = "deadline"
             while True:
                 try:
                     if page.is_closed():
+                        reason = "page closed"
                         break
                 except Exception:
-                    # Browser/connection died out from under us — treat as closed.
+                    reason = "browser connection lost"
+                    break
+                # Two consecutive empty checks, so a momentary pgrep miss during
+                # startup or a relaunch can't end the session early.
+                if not _find_pids(f"user-data-dir={profile_dir}"):
+                    gone_checks += 1
+                    if gone_checks >= 2:
+                        reason = "no browser process left for this profile"
+                        break
+                else:
+                    gone_checks = 0
+                if time.monotonic() > deadline:
                     break
                 time.sleep(0.5)
+            # Written to the worker's log file, so a future hang is diagnosable
+            # instead of leaving a 0-byte log behind.
+            print(f"[browser_session] recovery for '{service_key}' finished: {reason}", flush=True)
+            if reason == "deadline":
+                raise RuntimeError(
+                    f"Gave up waiting for the '{service_key}' login after {int(max_wait_s / 60)} minutes. "
+                    "The session was not saved. Retry recovery and close the browser window when done."
+                )
         finally:
             # context.close() sends a graceful CDP Browser.close and waits for
             # the underlying Chromium process to actually exit. On macOS that
