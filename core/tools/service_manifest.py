@@ -32,7 +32,8 @@ _yaml = YAML()
 _yaml.preserve_quotes = True
 _yaml.width = 4096  # don't hard-wrap long note lines
 
-_FIELD_ORDER = ["key", "label", "login_url", "notes", "input_type", "access", "parser", "status", "fetch"]
+_FIELD_ORDER = ["key", "label", "login_url", "notes", "input_type", "access", "parser", "status",
+                "default_transport", "fetch"]
 
 
 class FetchConfig(BaseModel):
@@ -70,6 +71,11 @@ class Service(BaseModel):
     access: str | None = None
     parser: str | None = None
     status: str = "planned"
+
+    # Which transport "Get latest" runs for this source (upload | scrape | email).
+    # See core/transports.py — a source can arrive by several routes; this pins
+    # the preferred one. Automation, when enabled, runs this same route.
+    default_transport: str | None = None
 
     # Present only on fetched sources (inboxes, etc.) — see FetchConfig.
     fetch: FetchConfig | None = None

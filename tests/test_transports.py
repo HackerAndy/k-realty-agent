@@ -1,0 +1,201 @@
+"""Sources versus transports.
+
+The modelling error this fixes: the inbox carrying the Epic statement was listed
+as a PEER of Epic, so the operator saw two sources where there is one source with
+two ways in. A source is a body of data; a transport is a route it takes.
+
+Also pins the distinction the operator drew: the DEFAULT is what "Get latest"
+runs and every working source has one, while AUTOMATION is a further step that
+runs the default unattended. A source can legitimately have a default and no
+possible automation.
+"""
+
+import pytest
+
+from core import transports
+from core.transports import EMAIL, SCRAPE, UPLOAD
+from core.tools.service_manifest import FetchConfig, Service
+
+
+def _epic(**kw):
+    return Service(key="epic", label="Epic", parser="buildium_owner_statement",
+                   status="implemented", **kw)
+
+
+def _inbox(delivers_to="epic", **fetch):
+    return Service(key="email", label="Email", input_type="email_trigger",
+                   fetch=FetchConfig(delivers_to=delivers_to, **fetch))
+
+
+def _routes(service, services=None, scraper=False, built=False):
+    return transports.transports_for(
+        service, services if services is not None else [service],
+        has_scraper=lambda k: scraper, parser_built=lambda k: built,
+    )
+
+
+def _by_id(routes):
+    return {r["id"]: r for r in routes}
+
+
+# --- deriving the routes -----------------------------------------------------
+
+def test_an_inbox_becomes_the_targets_email_transport():
+    epic = _epic()
+    routes = _by_id(_routes(epic, [epic, _inbox(from_address="mail@x.com")]))
+    assert routes[EMAIL]["available"] is True
+    assert routes[EMAIL]["carrier_key"] == "email"
+    assert "mail@x.com" in routes[EMAIL]["detail"]
+
+
+def test_no_email_route_when_no_inbox_delivers_here():
+    epic = _epic()
+    assert EMAIL not in _by_id(_routes(epic, [epic, _inbox(delivers_to="somewhere_else")]))
+
+
+def test_upload_depends_on_an_ACTIVE_parser_not_a_filename():
+    """Epic's parser is registered as `buildium_owner_statement`, so a filename
+    check reported Epic as unable to accept the very PDF it parses every month."""
+    routes = _by_id(_routes(_epic(), built=False))
+    assert routes[UPLOAD]["available"] is True
+
+
+def test_a_built_but_unapproved_parser_is_its_own_state():
+    """Not the same as 'no parser' — the fix is one click, not a build."""
+    no_parser = Service(key="dfcu", label="DFCU", status="needs_parser")
+    routes = _by_id(_routes(no_parser, built=True))
+    assert routes[UPLOAD]["available"] is False
+    assert "not approved yet" in routes[UPLOAD]["reason"]
+
+
+def test_an_unavailable_route_still_says_why():
+    """'DFCU has no scraper yet' is what tells the operator to build one; hiding
+    it makes the source look less capable than it could be."""
+    routes = _by_id(_routes(Service(key="dfcu", label="DFCU", parser="dfcu")))
+    assert routes[SCRAPE]["available"] is False
+    assert "agent can write one" in routes[SCRAPE]["reason"]
+
+
+def test_only_upload_needs_a_human():
+    epic = _epic()
+    routes = _by_id(_routes(epic, [epic, _inbox()], scraper=True))
+    assert routes[UPLOAD]["unattended"] is False
+    assert routes[SCRAPE]["unattended"] is True
+    assert routes[EMAIL]["unattended"] is True
+
+
+# --- the default -------------------------------------------------------------
+
+def test_the_operators_pinned_choice_wins():
+    epic = _epic(default_transport=SCRAPE)
+    routes = _routes(epic, [epic, _inbox()], scraper=True)
+    assert transports.default_transport(epic, routes) == SCRAPE
+
+
+def test_a_pinned_route_that_stopped_working_falls_back_instead_of_lying():
+    """A scraper can be deleted. Offering a dead button is worse than moving on."""
+    epic = _epic(default_transport=SCRAPE)
+    routes = _routes(epic, [epic, _inbox()], scraper=False)
+    assert transports.default_transport(epic, routes) == EMAIL
+
+
+def test_unpinned_prefers_the_route_needing_least_from_the_operator():
+    epic = _epic()
+    routes = _routes(epic, [epic, _inbox()], scraper=True)
+    assert transports.default_transport(epic, routes) == EMAIL
+
+
+def test_every_source_with_a_working_route_gets_a_default():
+    """The operator's rule: zero automation is fine, zero default is not."""
+    upload_only = Service(key="dfcu", label="DFCU", parser="dfcu")
+    routes = _routes(upload_only)
+    assert transports.default_transport(upload_only, routes) == UPLOAD
+
+
+def test_no_default_when_nothing_works_at_all():
+    nothing = Service(key="new", label="New")
+    assert transports.default_transport(nothing, _routes(nothing)) is None
+
+
+# --- default is not automation ----------------------------------------------
+
+def test_upload_can_be_the_default_but_never_automated():
+    """The operator's correction: 'Get latest' on an upload source means 'hand me
+    the file'. That is a fine default; it just cannot run unattended."""
+    upload_only = Service(key="dfcu", label="DFCU", parser="dfcu")
+    routes = _routes(upload_only)
+    default = transports.default_transport(upload_only, routes)
+
+    assert default == UPLOAD
+    assert transports.can_automate(routes, default) is False
+
+
+def test_an_unattended_default_can_be_automated():
+    epic = _epic()
+    routes = _routes(epic, [epic, _inbox()])
+    assert transports.can_automate(routes, transports.default_transport(epic, routes)) is True
+
+
+def test_nothing_working_cannot_be_automated():
+    nothing = Service(key="new", label="New")
+    assert transports.can_automate(_routes(nothing), None) is False
+
+
+# --- the tool surface --------------------------------------------------------
+
+@pytest.fixture
+def two_sources(monkeypatch):
+    from interfaces import mcp_tools
+    epic = _epic()
+    dfcu = Service(key="dfcu", label="DFCU", parser="dfcu", status="implemented")
+    services = [_inbox(), epic, dfcu]
+    monkeypatch.setattr(mcp_tools, "_load_services", lambda: services)
+    monkeypatch.setattr(mcp_tools, "has_scraper", lambda k: k == "epic")
+    monkeypatch.setattr(mcp_tools.source_status, "parser_built", lambda k: False)
+    return mcp_tools
+
+
+def test_list_sources_hides_the_inbox_because_it_is_not_a_source(two_sources):
+    keys = [s["key"] for s in two_sources.list_sources()]
+    assert keys == ["epic", "dfcu"], "the carrier must not appear as a peer source"
+
+
+def test_carriers_are_still_reachable_when_asked_for(two_sources):
+    """Setup screens need the inbox itself."""
+    keys = [s["key"] for s in two_sources.list_sources(include_carriers=True)]
+    assert "email" in keys
+
+
+def test_list_sources_reports_routes_and_the_default(two_sources):
+    epic = next(s for s in two_sources.list_sources() if s["key"] == "epic")
+    assert {r["id"] for r in epic["transports"]} == {UPLOAD, SCRAPE, EMAIL}
+    assert epic["default_transport"] == EMAIL and epic["can_automate"] is True
+
+    dfcu = next(s for s in two_sources.list_sources() if s["key"] == "dfcu")
+    assert dfcu["default_transport"] == UPLOAD and dfcu["can_automate"] is False
+
+
+def test_setting_a_default_to_an_unusable_route_is_refused(two_sources):
+    with pytest.raises(two_sources.ToolError, match="isn't usable"):
+        two_sources.set_default_transport("dfcu", SCRAPE)
+
+
+def test_get_latest_on_an_upload_source_asks_for_the_file(two_sources):
+    """There is nothing to fetch — say so instead of failing obscurely."""
+    with pytest.raises(two_sources.ToolError, match="choose a document"):
+        two_sources.get_latest("dfcu")
+
+
+def test_get_latest_routes_email_through_its_carrier(two_sources, monkeypatch):
+    seen = {}
+
+    def fake_fetch(key):
+        seen["key"] = key
+        return {"ingested": []}
+
+    monkeypatch.setattr(two_sources, "fetch_source", fake_fetch)
+
+    result = two_sources.get_latest("epic")
+
+    assert result["transport"] == EMAIL
+    assert seen["key"] == "email", "must fetch via the CARRIER, not the source"

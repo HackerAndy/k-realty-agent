@@ -18,7 +18,8 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from core import hot_reload, progress, reconcile, source_status
+from core import hot_reload, progress, reconcile, source_status, transports
+from core.transports import EMAIL, SCRAPE
 from core.observability import get_logger
 from core.fetch_ingest import fetch_and_ingest, persist_scraped
 from core.ingest import (
@@ -89,10 +90,23 @@ def _rows(txns: list[Transaction], limit: int) -> list[dict]:
 
 # --- read tools -------------------------------------------------------------
 
-def list_sources() -> list[dict]:
-    """List every financial source and its state (parser/scraper built, status)."""
-    return [
-        {
+def list_sources(include_carriers: bool = False) -> list[dict]:
+    """Every financial SOURCE, with the transports its data can arrive by.
+
+    An inbox is not a source — it is some source's email transport — so carriers
+    are folded into their target's transports and left out of this list. Pass
+    include_carriers=True to see them as their own rows (setup screens need that).
+    """
+    services = _load_services()
+    out = []
+    for s in services:
+        if source_status.is_trigger(s) and not include_carriers:
+            continue
+        routes = transports.transports_for(
+            s, services, has_scraper=has_scraper, parser_built=source_status.parser_built
+        )
+        default_id = transports.default_transport(s, routes)
+        out.append({
             "key": s.key,
             "label": s.label,
             "status": s.status,
@@ -102,9 +116,62 @@ def list_sources() -> list[dict]:
             "is_trigger": source_status.is_trigger(s),
             "parser_built": source_status.parser_built(s.key),
             "has_scraper": has_scraper(s.key),
-        }
-        for s in _load_services()
-    ]
+            "transports": routes,
+            "default_transport": default_id,
+            "can_automate": transports.can_automate(routes, default_id),
+        })
+    return out
+
+
+def set_default_transport(source_key: str, transport: str) -> dict:
+    """Pin which route "Get latest" runs for a source."""
+    services = _load_services()
+    service = next((s for s in services if s.key == source_key), None)
+    if service is None:
+        raise ToolError(f"Unknown source '{source_key}'.")
+
+    routes = transports.transports_for(
+        service, services, has_scraper=has_scraper, parser_built=source_status.parser_built
+    )
+    route = next((r for r in routes if r["id"] == transport), None)
+    if route is None:
+        raise ToolError(f"'{transport}' is not a route for '{source_key}'. "
+                        f"Options: {[r['id'] for r in routes]}")
+    if not route["available"]:
+        raise ToolError(f"{route['label']} isn't usable for '{source_key}' yet — {route['reason']}.")
+
+    ServiceManifest().update(source_key, default_transport=transport)
+    return {"source_key": source_key, "default_transport": transport,
+            "can_automate": route["unattended"]}
+
+
+def get_latest(source_key: str) -> dict:
+    """Run whichever route is this source's default — the one-button 'get me the
+    newest data', without the operator having to remember how it arrives."""
+    services = _load_services()
+    service = next((s for s in services if s.key == source_key), None)
+    if service is None:
+        raise ToolError(f"Unknown source '{source_key}'.")
+
+    routes = transports.transports_for(
+        service, services, has_scraper=has_scraper, parser_built=source_status.parser_built
+    )
+    default_id = transports.default_transport(service, routes)
+    if default_id is None:
+        raise ToolError(
+            f"'{service.label}' has no working route yet. Build a parser or a scraper for it first."
+        )
+    if default_id == SCRAPE:
+        return {"transport": SCRAPE, **run_scraper(source_key)}
+    if default_id == EMAIL:
+        carrier = next(r for r in routes if r["id"] == EMAIL)["carrier_key"]
+        return {"transport": EMAIL, **fetch_source(carrier)}
+    # Upload can be a default — "get latest" means "hand me the file" — but the
+    # file itself has to come from the operator, so the caller opens the picker.
+    raise ToolError(
+        f"'{service.label}' arrives by file upload, so there's nothing to fetch — "
+        "choose a document to bring in the latest data."
+    )
 
 
 def latest_transactions(limit: int = 200) -> dict:
@@ -837,5 +904,7 @@ ACTION_TOOLS = [
     set_llm_provider,
     start_build,
     build_status,
+    set_default_transport,
+    get_latest,
 ]
 ALL_TOOLS = READ_TOOLS + ACTION_TOOLS
