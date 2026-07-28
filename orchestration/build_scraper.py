@@ -40,7 +40,7 @@ def build_scraper_for_source(
     fix doesn't force you to demonstrate again."""
     if demo_path is None:
         on_event(f"Recording your demonstration for {source_label or source_key} — a browser "
-                 "will open; log in, set filters, click Generate, then press Enter.")
+                 "will open; log in, set filters, click Generate, then close the window.")
         demo_path = demo_recorder.record(source_key, portal_url)
         on_event(f"Demonstration captured → {demo_path}. The agent will now write the scraper.\n")
     else:

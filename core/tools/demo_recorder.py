@@ -59,14 +59,48 @@ _STATIC_SUFFIXES = (".js", ".css", ".png", ".jpg", ".jpeg", ".gif", ".svg",
 _MAX_BODY = 12000  # per response body kept for the agent
 
 
-def record(service_key: str, url: str, out_dir: Path = DEMO_DIR) -> Path:
-    """Open a headed browser at `url`; the operator logs in, sets filters, and
-    clicks Generate/Search so the data renders, then presses Enter. Returns the
-    path to a demonstration JSON artifact for the scraper-builder agent."""
+def record(service_key: str, url: str = "", out_dir: Path = DEMO_DIR,
+           max_wait_s: float = 20 * 60) -> Path:
+    """Open a headed browser; the operator logs in, sets filters, and clicks
+    Generate/Search so the data renders, then CLOSES THE WINDOW. Returns the path
+    to a demonstration JSON artifact for the scraper-builder agent.
+
+    Closing the window is the finish signal — this used to block on input() at a
+    terminal, which no GUI can answer, and the GUI is the only front-end now.
+
+    `url` is optional: with none, the browser opens blank and the operator
+    navigates to the portal themselves. The harness then LEARNS the URL from the
+    demonstration rather than asking for it up front — one less thing to type,
+    and what they actually visited beats what they meant to type.
+
+    Because the page can't be read once it's closed, the state the agent needs
+    (recorded actions, the rendered table) is snapshotted on every poll while the
+    window is still open; the last good snapshot is what gets written.
+    """
+    from core.tools.browser_session import wait_until_window_closed
+
     out_dir.mkdir(parents=True, exist_ok=True)
     profile = PROFILE_ROOT / service_key
     profile.mkdir(parents=True, exist_ok=True)
     har_path = out_dir / f"{service_key}-demo.har"
+
+    latest: dict = {"actions": [], "structure": {}, "final_url": url, "urls": []}
+
+    def snapshot(page) -> None:
+        actions = page.evaluate("() => window.__demo_actions || []")
+        structure = _page_structure(page)
+        current = page.url
+        # Keep the LONGEST action list seen: an SPA can reset window.__demo_actions
+        # on a hard navigation, and losing the operator's clicks would leave the
+        # agent with only the network trace.
+        if len(actions) >= len(latest["actions"]):
+            latest["actions"] = actions
+        if structure:
+            latest["structure"] = structure
+        if current and current != "about:blank":
+            latest["final_url"] = current
+            if current not in latest["urls"]:
+                latest["urls"].append(current)
 
     with sync_playwright() as pw:
         context = pw.chromium.launch_persistent_context(
@@ -77,26 +111,28 @@ def record(service_key: str, url: str, out_dir: Path = DEMO_DIR) -> Path:
         )
         context.add_init_script(_ACTION_LOGGER)
         page = context.pages[0] if context.pages else context.new_page()
-        page.goto(url, wait_until="domcontentloaded")
-        input(
-            "\nA browser is open. Log in if needed, set your filters/dropdowns, and click "
-            "Generate/Search so YOUR data is on screen. Then press Enter here to finish "
-            "recording... "
-        )
-        try:
-            actions = page.evaluate("() => window.__demo_actions || []")
-        except Exception:
-            actions = []
-        structure = _page_structure(page)
-        final_url = page.url
+        if url:
+            page.goto(url, wait_until="domcontentloaded")
+        reason = wait_until_window_closed(page, profile, max_wait_s, on_poll=snapshot)
+        print(f"[demo_recorder] demonstration for '{service_key}' finished: {reason}", flush=True)
         context.close()  # flushes the HAR to disk
 
+    if reason == "deadline":
+        raise RuntimeError(
+            f"Gave up waiting for the '{service_key}' demonstration after "
+            f"{int(max_wait_s / 60)} minutes. Nothing was captured — start it again and "
+            "close the browser window once your data is on screen."
+        )
+
+    structure = latest["structure"]
     demo = {
         "service_key": service_key,
-        "start_url": url,
-        "final_url": final_url,
+        # What they actually visited, not what they meant to type.
+        "start_url": url or (latest["urls"][0] if latest["urls"] else ""),
+        "final_url": latest["final_url"],
+        "visited_urls": latest["urls"],
         "title": structure.get("title", ""),
-        "recorded_actions": actions,
+        "recorded_actions": latest["actions"],
         "candidate_requests": _extract_requests(har_path),
         "final_page": structure,
         "har_file": str(har_path),

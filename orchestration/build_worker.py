@@ -72,8 +72,11 @@ def run(kind: str, mode: str, source_key: str, run_file: Path,
                 result = revise_parser_for_source(source_key, sample, feedback, source_label, on_event=on_event)
         else:
             if mode == "build":
-                if not portal_url:
-                    raise ValueError("a portal URL is required to build a scraper")
+                # A captured demonstration already carries where the operator
+                # went; only a build that still has to record one needs a URL.
+                if not portal_url and not demo_path:
+                    raise ValueError("a portal URL or a captured demonstration is required "
+                                     "to build a scraper")
                 result = build_scraper_for_source(
                     source_key, portal_url, source_label, on_event=on_event, demo_path=demo_path
                 )

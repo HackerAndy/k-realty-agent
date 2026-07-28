@@ -12,7 +12,7 @@ This module must stay framework-free (no langgraph/langchain imports).
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 import os
 from pathlib import Path
@@ -134,6 +134,52 @@ def bootstrap_login(
         )
 
 
+def wait_until_window_closed(
+    page: Page,
+    profile_dir: Path,
+    max_wait_s: float = 15 * 60,
+    on_poll: "Callable[[Page], None] | None" = None,
+) -> str:
+    """Block until the operator is done with a headed browser. Returns the reason.
+
+    "Done" has to be recognised three ways, because the obvious one isn't enough:
+
+    * `page.is_closed()` reads locally cached state that only updates when
+      Chromium delivers a CDP close event. Quit the browser abruptly (Cmd-Q,
+      crash, force quit) and that event never arrives — it stays False forever.
+    * So also consult OS truth: no Chromium process still holds this profile =>
+      the browser is gone, whatever CDP thinks. Two consecutive empty checks, so
+      a momentary pgrep miss during startup can't end the session early.
+    * Plus an absolute deadline, so this can never hang indefinitely.
+
+    `on_poll` runs on each tick WHILE the page is still alive — the hook a
+    recorder needs, since anything it wants off the page (actions, structure)
+    can no longer be read once the operator has closed the window.
+    """
+    deadline = time.monotonic() + max_wait_s
+    gone_checks = 0
+    while True:
+        try:
+            if page.is_closed():
+                return "page closed"
+        except Exception:
+            return "browser connection lost"
+        if not _find_pids(f"user-data-dir={profile_dir}"):
+            gone_checks += 1
+            if gone_checks >= 2:
+                return "no browser process left for this profile"
+        else:
+            gone_checks = 0
+        if on_poll is not None:
+            try:
+                on_poll(page)
+            except Exception:
+                pass   # a snapshot failing must never end the operator's session
+        if time.monotonic() > deadline:
+            return "deadline"
+        time.sleep(0.5)
+
+
 def bootstrap_login_until_window_closed(
     service_key: str,
     url: str,
@@ -203,29 +249,7 @@ def bootstrap_login_until_window_closed(
             # So also consult OS truth: no Chromium process is still holding this
             # profile => the browser is gone, whatever CDP thinks. Plus an absolute
             # deadline, so this can never hang indefinitely again.
-            deadline = time.monotonic() + max_wait_s
-            gone_checks = 0
-            reason = "deadline"
-            while True:
-                try:
-                    if page.is_closed():
-                        reason = "page closed"
-                        break
-                except Exception:
-                    reason = "browser connection lost"
-                    break
-                # Two consecutive empty checks, so a momentary pgrep miss during
-                # startup or a relaunch can't end the session early.
-                if not _find_pids(f"user-data-dir={profile_dir}"):
-                    gone_checks += 1
-                    if gone_checks >= 2:
-                        reason = "no browser process left for this profile"
-                        break
-                else:
-                    gone_checks = 0
-                if time.monotonic() > deadline:
-                    break
-                time.sleep(0.5)
+            reason = wait_until_window_closed(page, profile_dir, max_wait_s)
             # Written to the worker's log file, so a future hang is diagnosable
             # instead of leaving a 0-byte log behind.
             print(f"[browser_session] recovery for '{service_key}' finished: {reason}", flush=True)
