@@ -147,8 +147,10 @@ def test_run_scraper_reports_a_clean_reconciliation(monkeypatch):
     assert next(s for s in result["steps"] if s["key"] == "reconcile")["status"] == "success"
 
 
-def test_run_scraper_says_plainly_when_there_was_nothing_to_check(monkeypatch):
-    """A scraper that records no totals must not look reconciled."""
+def test_run_scraper_blames_the_scraper_not_the_source_when_nothing_was_checked(monkeypatch):
+    """A scraper that records no totals must not look reconciled — and the label
+    must not claim the SOURCE publishes none, which the harness cannot know.
+    Saying so misreads as "nothing to check here", i.e. a pass."""
     _fake_scrape(monkeypatch, lambda: None)
 
     result = mcp_tools.run_scraper("epic")
@@ -156,4 +158,5 @@ def test_run_scraper_says_plainly_when_there_was_nothing_to_check(monkeypatch):
     assert result["reconciliation"]["ok"] is None
     step = next(s for s in result["steps"] if s["key"] == "reconcile")
     assert step["status"] == "pending"
-    assert "none published" in step["label"]
+    assert "this scraper records no control totals" in step["label"]
+    assert "published" not in step["label"], "don't assert anything about the source"

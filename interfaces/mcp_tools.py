@@ -254,10 +254,17 @@ def run_scraper(source_key: str, save: bool = True, limit: int = 200) -> dict:
                          "failed": len(short), "labels": [d["label"] for d in short[:10]]},
             )
     else:
+        # Say what is actually known. The harness cannot tell whether the SOURCE
+        # publishes totals — only that this scraper recorded none. Claiming the
+        # former reads as "nothing to check here", which is how a missing check
+        # gets mistaken for a passing one.
         steps.append({
             "key": "reconcile",
-            "label": "Reconcile against the source's own totals — none published to check",
+            "label": "Not reconciled — this scraper records no control totals",
             "status": "pending",
+            "details": {"hint": "If the source publishes totals (a per-account Total, a balance "
+                                "line, a row count), have the agent record them so the harness can "
+                                "verify every transaction was pulled."},
         })
 
     result = {"source_key": source_key, **_summary(txns),
