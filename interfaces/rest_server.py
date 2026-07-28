@@ -57,6 +57,41 @@ def call_tool(name: str, args: dict = Body(default={})):
         raise HTTPException(status_code=400, detail=f"Bad arguments for '{name}': {exc}") from exc
 
 
+def _worth_retrying(exc: Exception) -> bool:
+    """Would reading this document with the model plausibly help?
+
+    Deliberately broad: a declared ParseError, a source with no parser yet, and
+    a parser that simply crashed all mean the same thing to the operator — the
+    harness couldn't read their document. Withholding the escape hatch because
+    the failure arrived as an IndexError rather than a ParseError would be the
+    worse mistake. The one exclusion is a source key that doesn't exist: there
+    is nothing to attach the document to, and keeping it would just leave a
+    financial document on disk for no reason.
+    """
+    from core.ingest import IngestError
+
+    return not (isinstance(exc, IngestError) and "unknown source" in str(exc).lower())
+
+
+def _retain_unparsed(source_key: str, tmp_path: Path, filename: str | None) -> Path | None:
+    """Keep a document the parser choked on, so it can be re-read with the model.
+
+    Only for failures where a retry makes sense — a bad source key isn't one, and
+    shouldn't leave a stray financial document behind. Lands in data/samples/
+    (gitignored) alongside build samples."""
+    safe_key = "".join(c for c in source_key if c.isalnum() or c in "_-")
+    if not safe_key or not tmp_path.exists():
+        return None
+    samples_dir = REPO_ROOT / "data" / "samples"
+    samples_dir.mkdir(parents=True, exist_ok=True)
+    dest = samples_dir / f"{safe_key}-unparsed{Path(filename or tmp_path.name).suffix}"
+    try:
+        dest.write_bytes(tmp_path.read_bytes())
+    except OSError:
+        return None
+    return dest
+
+
 @app.post("/api/upload_ingest/{source_key}")
 async def upload_ingest(source_key: str, file: UploadFile = File(...)):
     """Upload a source document and ingest it for the given source key."""
@@ -100,15 +135,6 @@ async def upload_ingest(source_key: str, file: UploadFile = File(...)):
                 "duration_ms": int((time.perf_counter() - ingest_started) * 1000),
                 "details": {"count": result.get("count")},
             })
-        except mcp_tools.ToolError as exc:
-            steps.append({
-                "key": "ingest_document",
-                "label": "Parse and persist",
-                "status": "failed",
-                "duration_ms": int((time.perf_counter() - ingest_started) * 1000),
-                "error": str(exc),
-            })
-            error = HTTPException(status_code=400, detail={"message": str(exc), "steps": steps})
         except Exception as exc:
             steps.append({
                 "key": "ingest_document",
@@ -117,7 +143,18 @@ async def upload_ingest(source_key: str, file: UploadFile = File(...)):
                 "duration_ms": int((time.perf_counter() - ingest_started) * 1000),
                 "error": str(exc),
             })
-            error = HTTPException(status_code=500, detail={"message": str(exc), "steps": steps})
+            # The parse failed, so the temp file is about to be deleted with the
+            # operator's document still unread. Keep a copy: the answer to "the
+            # parser can't read this layout" is usually "then read it with the
+            # model", and that offer needs a file to point at.
+            detail = {"message": str(exc), "steps": steps}
+            if _worth_retrying(exc):
+                retained = _retain_unparsed(source_key, tmp_path, file.filename)
+                if retained:
+                    detail["retry_path"] = str(retained)
+                    detail["filename"] = file.filename
+            status = 400 if isinstance(exc, mcp_tools.ToolError) else 500
+            error = HTTPException(status_code=status, detail=detail)
 
     cleanup_started = time.perf_counter()
     try:

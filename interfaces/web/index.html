@@ -375,6 +375,12 @@
         { key: 'done', label: 'Complete', status: 'pending' },
       ];
     }
+    if (tool === 'extract_now' || tool === 'ingest_document') {
+      return [
+        { key: 'extract', label: 'Read the document with the model', status: 'pending' },
+        { key: 'done', label: 'Complete', status: 'pending' },
+      ];
+    }
     if (tool === 'activate_parser') {
       return [
         { key: 'activate_parser', label: 'Activate parser', status: 'pending' },
@@ -448,9 +454,14 @@
     setTheme(currentTheme === 'dark' ? 'light' : 'dark');
   }
 
+  // Which model, and WHERE its server is — the consent wording for sending a
+  // document's text depends on the answer, so it can't be assumed.
+  let llmInfo = null;
+
   async function loadStatus() {
     try {
       const s = await callTool('status');
+      llmInfo = s.llm;
       el('llm').textContent = 'LLM: ' + llmHost(s.llm.base_url) + (s.llm.model ? ' · ' + s.llm.model : '');
       const p = s.pending_approvals || [];
       const pe = el('pending');
@@ -730,6 +741,58 @@
     }
   }
 
+  // ── Reading a document with the model instead of a parser ──
+  // Two ways to end up here: the source has no parser yet, or its parser choked
+  // on this layout. Either way the harness isn't blocked — but the model is
+  // unverified, so it's offered, never silently substituted.
+  const llmOffer = {};   // source_key -> { mode:'extract'|'fallback', path, filename }
+
+  function offerExtract(key, mode, path, filename) {
+    llmOffer[key] = { mode, path, filename };
+    renderIngest();
+  }
+
+  function dismissOffer(key) { delete llmOffer[key]; renderIngest(); }
+
+  function offerHTML(s) {
+    const offer = llmOffer[s.key];
+    if (!offer) return '';
+    const model = (llmInfo && llmInfo.model) ? llmInfo.model : 'the configured model';
+    // Say where the text actually goes. Claiming "this leaves your machine" for
+    // a model running on the LAN would be a lie, so the server computes it.
+    const where = llmInfo && llmInfo.offsite === false
+      ? 'Its text goes to <b>' + esc(llmInfo.destination || 'your model server') + '</b> — on your own network, ' +
+        'not off this machine.'
+      : 'Its text goes to <b>' + esc((llmInfo && llmInfo.destination) || 'the Anthropic API') + '</b>. ' +
+        'This is the one step where a financial document leaves this machine.';
+    const why = offer.mode === 'fallback'
+      ? 'The built-in parser couldn’t read <b>' + esc(offer.filename || 'that document') + '</b>.'
+      : 'This source has no parser yet.';
+
+    return '<div class="build"><div class="build-h"><span class="caret open">&#8250;</span>' +
+      'Read it with the model instead?</div><div class="build-b">' +
+      '<p class="note" style="margin:0 0 10px">' + why + ' ' + model + ' can read it now and give you ' +
+      'transactions today. ' + where + '</p>' +
+      '<p class="note" style="margin:0 0 12px">The result is <b>unverified</b> — no test, no reproducible ' +
+      'code — so treat it as lower-confidence than a parser’s, and have the agent build a parser so the ' +
+      'next run doesn’t need this.</p>' +
+      '<div class="row"><button class="btn primary" onclick="runExtract(\'' + s.key + '\')">' +
+      'Send the text and extract</button>' +
+      '<button class="btn" onclick="dismissOffer(\'' + s.key + '\')">No thanks</button></div>' +
+      '</div></div>';
+  }
+
+  async function runExtract(key) {
+    const offer = llmOffer[key];
+    if (!offer) return;
+    delete llmOffer[key];
+    if (offer.mode === 'fallback') {
+      await act('ingest_document', { source_key: key, path: offer.path, allow_llm_fallback: true });
+    } else {
+      await act('extract_now', { source_key: key, path: offer.path });
+    }
+  }
+
   function sourceBodyHTML(s, isPending) {
     const actions = funnelHTML(s) + verdictHTML(s, isPending) + sourceUploadStepsRow(s.key);
     // The build/fix panel sits directly under the action + step timeline, BEFORE
@@ -737,7 +800,10 @@
     // not below a table the operator has to scroll past to find it.
     // Options sit between "how it arrives" and "fix the code": adjusting a date
     // range is the ordinary thing to do, rewriting the scraper is the rare one.
-    const head = actions + optionsHTML(s) + buildHTML(s);
+    // The model offer sits ahead of the build panel: "read it now" is the answer
+    // when you need the numbers today; "build a parser" is the answer for every
+    // month after that.
+    const head = actions + offerHTML(s) + optionsHTML(s) + buildHTML(s);
     const data = sourceTxnCache[s.key];
     if (!data) return head + '<div class="empty">Loading transactions…</div>';
     if (data.error) return head + '<div class="notbuilt">Couldn’t load transactions: ' + esc(data.error) + '</div>';
@@ -846,6 +912,12 @@
         (st.sample
           ? '<button class="btn primary" onclick="startBuild(\'' + s.key + '\')">' +
             (s.parser_built ? 'Rebuild' : 'Build') + ' the parser</button>'
+          : '') +
+        // Building takes minutes; sometimes you just need this month's numbers.
+        (st.sample && !s.parser_built
+          ? '<button class="btn" onclick="offerExtract(\'' + s.key + '\',\'extract\',' +
+            esc(JSON.stringify(st.sample.sample_path)) + ',' + esc(JSON.stringify(st.sample.filename)) + ')">' +
+            'Read it now with the model</button>'
           : '') +
         '</div>';
     }
@@ -1084,6 +1156,18 @@
       '<div class="k"><div class="l">Net</div><div class="v ' + (net < 0 ? 'neg' : 'pos') + '">' + money(net) + '</div></div>' +
       '<div class="k"><div class="l">Rows</div><div class="v">' + (data.count || 0) + '</div></div></div>';
 
+    // Model-read data must not look identical to parsed data. Nothing verified
+    // it, and the fix (build a parser) is one panel below.
+    const byModel = data.extraction_method === 'llm_extract' || data.extraction_method === 'llm_fallback';
+    const provenance = byModel
+      ? '<div class="notbuilt" style="margin-bottom:12px"><b>Read by the model, not by a parser.</b> ' +
+        (data.extraction_method === 'llm_fallback'
+          ? 'The committed parser couldn’t read that layout, so the model read it instead. '
+          : 'This source has no parser yet, so the model read it. ') +
+        'Nothing tested this — check the rows below, and have the agent build a parser so next month ' +
+        'is deterministic.</div>'
+      : '';
+
     const groupSafe = cols.includes(view.group) ? view.group : 'None';
     const opts = ['None'].concat(cols).map(o =>
       '<option value="' + esc(o) + '"' + (o === groupSafe ? ' selected' : '') + '>' + (o === 'None' ? 'None (flat ledger)' : esc(o)) + '</option>').join('');
@@ -1115,7 +1199,7 @@
           '<div class="rollup-body">' + txnTableHTML(g[gk]) + '</div></div>';
       }).join('') : '<div class="empty">No rows match.</div>') + '</div>';
     }
-    return strip + controls + bodyHTML;
+    return provenance + strip + controls + bodyHTML;
   }
 
   function toggleRollup(key, i) { const r = el('ru_' + sourceDomId(key) + '_' + i); if (r) r.classList.toggle('open'); }
@@ -1245,6 +1329,13 @@
           toast('upload_ingest failed: ' + detailMessage, false);
           if (progressWrap) progressWrap.style.display = 'none';
           setSourceButtonsDisabled(false);
+          // The server kept the document precisely because a retry is possible:
+          // offer the model rather than leaving the operator at a dead end.
+          if (detail && detail.retry_path) {
+            llmOffer[sourceKey] = { mode: 'fallback', path: detail.retry_path,
+                                    filename: detail.filename || file.name };
+            if (current === 'ingest') await renderIngest();
+          }
           reject(new Error(detailMessage));
         }
       };

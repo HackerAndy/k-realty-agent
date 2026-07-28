@@ -136,7 +136,8 @@ def ingest_source(
 
 
 def ingest_via_llm(
-    source_key: str, input_path: Path, manifest: ServiceManifest | None = None
+    source_key: str, input_path: Path, manifest: ServiceManifest | None = None,
+    transport: str = "upload",
 ) -> dict:
     """Extract a source's document with the LLM directly (no deterministic
     parser required). This is the "handle it now" path for a source the harness
@@ -147,7 +148,7 @@ def ingest_via_llm(
 
     text = read_document_text(input_path)
     transactions = extract_transactions(text, source_key, source.label)
-    return _persist(source_key, transactions, input_path, "llm_extract", None)
+    return _persist(source_key, transactions, input_path, "llm_extract", None, transport)
 
 
 def load_latest_parsed() -> dict | None:

@@ -445,6 +445,9 @@ def source_transactions(source_key: str, limit: int = 500) -> dict:
             "parsed_at": run.get("parsed_at"), "run_path": run.get("run_path"),
             # Which route actually delivered this data — the funnel draws it solid.
             "last_transport": run.get("transport"),
+            # HOW it was read: a verified parser, or the model. Model-read data is
+            # unverified, and the screen has to say so rather than look identical.
+            "extraction_method": run.get("extraction_method"),
             **_summary(txns), "transactions": _rows(txns, limit)}
 
 
@@ -477,7 +480,41 @@ def llm_status() -> dict:
     cfg = llm_provider.current_config() or {}
     return {"configured": llm_provider.is_configured(),
             "provider": cfg.get("provider"), "model": cfg.get("model"), "base_url": cfg.get("base_url"),
-            "api_key_set": bool(cfg.get("api_key"))}
+            "api_key_set": bool(cfg.get("api_key")),
+            # Where a document's text would actually GO. Asking "may I send this
+            # off your machine?" when the model runs on the LAN would be a lie,
+            # and the answer differs per provider, so it's computed, not assumed.
+            "destination": _llm_destination(cfg),
+            "offsite": _llm_is_offsite(cfg)}
+
+
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+
+
+def _llm_is_offsite(cfg: dict) -> bool:
+    """True if document text would leave this machine's own network."""
+    if cfg.get("provider") != "openai_compatible":
+        return True     # the Claude API, or nothing configured yet
+    from urllib.parse import urlparse
+
+    host = (urlparse(cfg.get("base_url") or "").hostname or "").lower()
+    if not host:
+        return True
+    if host in _LOCAL_HOSTS or host.endswith(".local"):
+        return False
+    # Private ranges — a model on the LAN, e.g. another machine in the house.
+    return not re.match(r"^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)", host)
+
+
+def _llm_destination(cfg: dict) -> str:
+    if not cfg:
+        return "no LLM is set up yet"
+    if cfg.get("provider") != "openai_compatible":
+        return "the Anthropic API"
+    from urllib.parse import urlparse
+
+    host = urlparse(cfg.get("base_url") or "").hostname or cfg.get("base_url") or "an unknown server"
+    return f"the model server at {host}"
 
 
 def status() -> dict:
@@ -498,13 +535,50 @@ def status() -> dict:
 
 # --- action tools -----------------------------------------------------------
 
-def ingest_document(source_key: str, path: str) -> dict:
-    """Parse a document you already have (PDF/CSV) for a source into transactions."""
+def ingest_document(source_key: str, path: str, allow_llm_fallback: bool = False) -> dict:
+    """Parse a document you already have (PDF/CSV) for a source into transactions.
+
+    allow_llm_fallback: if the source's committed parser can't read the layout,
+    read it with the model instead. Only ever pass True on an explicit operator
+    decision — it's the step where the document's text leaves the parser and goes
+    to whatever LLM is configured."""
     doc = Path(path).expanduser()
     if not doc.exists():
         raise ToolError(f"No file at {doc}")
-    run = ingest_source(source_key, doc)
-    return {"source_key": source_key, "run_path": run["run_path"], **_summary(transactions_from_run(run))}
+    if allow_llm_fallback:
+        _require_llm()
+    run = ingest_source(source_key, doc, allow_llm_fallback=allow_llm_fallback)
+    return {"source_key": source_key, "run_path": run["run_path"],
+            "extraction_method": run["extraction_method"],
+            **_summary(transactions_from_run(run))}
+
+
+def extract_now(source_key: str, path: str) -> dict:
+    """Read a document with the model, for a source that has no parser yet.
+
+    The "don't be blocked" path: it produces transactions today, from a source
+    the harness has never seen, without waiting on an agent build. Treat the
+    result as lower-confidence than a parser's — nothing verified it — and build
+    a parser so later runs are deterministic and free."""
+    doc = Path(path).expanduser()
+    if not doc.exists():
+        raise ToolError(f"No file at {doc}")
+    if not any(s.key == source_key for s in _load_services()):
+        raise ToolError(f"Unknown source '{source_key}'.")
+    _require_llm()
+
+    from core.ingest import ingest_via_llm
+
+    run = ingest_via_llm(source_key, doc)
+    return {"source_key": source_key, "run_path": run["run_path"],
+            "extraction_method": run["extraction_method"],
+            **_summary(transactions_from_run(run))}
+
+
+def _require_llm() -> None:
+    """Fail before the document is read, not after — reading it is the slow part."""
+    if not llm_provider.is_configured():
+        raise ToolError("No LLM provider is set up. Choose one under Settings first.")
 
 
 def run_scraper(source_key: str, save: bool = True, limit: int = 200) -> dict:
@@ -1146,6 +1220,7 @@ READ_TOOLS = [list_sources, latest_transactions, source_transactions, action_pro
               pending_approvals, llm_status, status]
 ACTION_TOOLS = [
     ingest_document,
+    extract_now,
     run_scraper,
     fetch_source,
     activate_parser,
