@@ -5,9 +5,10 @@ Pulls general-ledger transactions from the Buildium API endpoint
 
 1. Open a persistent browser session (cookies survive across runs).
 2. Log in via the shared Buildium login helper.
-3. Fetch the list of GL account IDs.
-4. POST the GL account IDs + date range to the transactions endpoint.
-5. Parse the JSON response into ``Transaction`` objects.
+3. Extract the XSRF token from cookies (required for all API calls).
+4. Fetch the list of GL account IDs.
+5. POST the GL account IDs + date range to the transactions endpoint.
+6. Parse the JSON response into ``Transaction`` objects.
 
 This module must stay framework-free (no langgraph/langchain imports).
 """
@@ -33,9 +34,32 @@ SERVICE_KEY = "epic_property_management"
 # ── helpers ──────────────────────────────────────────────────────────
 
 
-def _fetch_json(page: Page, url: str) -> Any:
+def _extract_xsrf_token(page: Page) -> str:
+    """Extract the XSRF-TOKEN cookie value from the browser session."""
+    cookies = page.context.cookies()
+    for cookie in cookies:
+        if cookie["name"] == "XSRF-TOKEN":
+            return cookie["value"]
+    raise ScrapeError(
+        log.failure(
+            operation="extract_xsrf_token",
+            code="XSRF_TOKEN_MISSING",
+            message="XSRF-TOKEN cookie not found after login.",
+            remediation="Re-run bootstrap_login to refresh the session.",
+            context={"service_key": SERVICE_KEY},
+        )
+    )
+
+
+def _fetch_json(page: Page, url: str, xsrf_token: str) -> Any:
     """GET a JSON endpoint and return the parsed body."""
-    resp = page.request.get(url)
+    resp = page.request.get(
+        url,
+        headers={
+            "X-XSRF-TOKEN": xsrf_token,
+            "Content-Type": "application/json",
+        },
+    )
     if resp.status != 200:
         raise ScrapeError(
             log.failure(
@@ -49,11 +73,14 @@ def _fetch_json(page: Page, url: str) -> Any:
     return resp.json()
 
 
-def _post_json(page: Page, url: str, body: dict) -> Any:
+def _post_json(page: Page, url: str, body: dict, xsrf_token: str) -> Any:
     """POST JSON to an endpoint and return the parsed response body."""
     http_resp = page.request.post(
         url,
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "X-XSRF-TOKEN": xsrf_token,
+        },
         data=json.dumps(body),
     )
     if http_resp.status != 200:
@@ -69,14 +96,14 @@ def _post_json(page: Page, url: str, body: dict) -> Any:
     return http_resp.json()
 
 
-def _get_gl_account_ids(page: Page) -> list[str]:
+def _get_gl_account_ids(page: Page, xsrf_token: str) -> list[str]:
     """Fetch all GL account IDs from the Buildium API."""
     url = (
         f"{BASE_URL}/manager/api/glAccounts"
         "?types=5&types=4&types=3&types=2&types=1"
         "&excludeBankAccounts=true&excludeCreditCardAccounts=true"
     )
-    accounts = _fetch_json(page, url)
+    accounts = _fetch_json(page, url, xsrf_token)
     return [str(a["Id"]) for a in accounts]
 
 
@@ -178,10 +205,29 @@ def retrieve() -> list[Transaction]:
                 )
             ) from exc
 
+        # ── extract XSRF token (required for all API calls) ──
+        progress.step("xsrf_token", "Extract XSRF token from cookies")
+        try:
+            xsrf_token = _extract_xsrf_token(page)
+            progress.done("xsrf_token")
+        except ScrapeError:
+            raise
+        except Exception as exc:
+            raise ScrapeError(
+                log.failure(
+                    operation="extract_xsrf_token",
+                    code="XSRF_TOKEN_FAILED",
+                    message="Could not extract XSRF token from cookies.",
+                    remediation="Re-run bootstrap_login to refresh the session.",
+                    context={"service_key": SERVICE_KEY},
+                    exc=exc,
+                )
+            ) from exc
+
         # ── fetch GL account IDs ──
         progress.step("gl_accounts", "Fetch the chart of accounts")
         try:
-            gl_account_ids = _get_gl_account_ids(page)
+            gl_account_ids = _get_gl_account_ids(page, xsrf_token)
             progress.done("gl_accounts", details={"accounts": len(gl_account_ids)})
         except ScrapeError:
             raise
@@ -211,10 +257,14 @@ def retrieve() -> list[Transaction]:
             "UnitIds": None,
         }
 
-        progress.step("gl_transactions",
-                      f"Fetch general-ledger transactions ({start_date} to {end_date})")
+        progress.step(
+            "gl_transactions",
+            f"Fetch general-ledger transactions ({start_date} to {end_date})",
+        )
         try:
-            raw = _post_json(page, f"{BASE_URL}/manager/api/generalLedger/transactions", body)
+            raw = _post_json(
+                page, f"{BASE_URL}/manager/api/generalLedger/transactions", body, xsrf_token
+            )
             progress.done("gl_transactions", details={"rows": len(raw) if raw else 0})
         except ScrapeError:
             raise
