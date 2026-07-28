@@ -123,6 +123,100 @@ def list_sources(include_carriers: bool = False) -> list[dict]:
     return out
 
 
+def credential_status() -> list[dict]:
+    """Which sign-ins the harness holds — NEVER the values.
+
+    Reports presence only (`has_username` / `has_password`), because a screen that
+    can display a stored password is a screen that can leak one. The operator can
+    replace a credential; nothing can read one back out.
+    """
+    from core.tools.credential_store import CredentialStore, CredentialStoreError
+
+    store = CredentialStore()
+    try:
+        stored = set(store.list_services())
+    except CredentialStoreError:
+        stored = set()
+
+    out = []
+    for s in _load_services():
+        # Only things you actually sign in to: a portal, or an inbox.
+        if not s.login_url and not source_status.is_trigger(s):
+            continue
+        fields = {}
+        if s.key in stored:
+            try:
+                fields = store.get(s.key)
+            except CredentialStoreError:
+                fields = {}
+        out.append({
+            "key": s.key,
+            "label": s.label,
+            "login_url": s.login_url,
+            "kind": "inbox" if source_status.is_trigger(s) else "portal",
+            "has_username": bool(fields.get("username")),
+            "has_password": bool(fields.get("password")),
+            "username": fields.get("username") or "",   # not a secret; shown so you know WHICH account
+        })
+    return out
+
+
+def set_credentials(source_key: str, username: str | None = None,
+                    password: str | None = None) -> dict:
+    """Store a sign-in for a source, encrypted in .secrets/.
+
+    A blank password KEEPS the stored one — CredentialStore.set() replaces the
+    whole record, so omitting it would silently wipe the password while the
+    operator thought they were only correcting a username.
+    """
+    from core.tools.credential_store import CredentialStore, CredentialStoreError
+
+    service = next((s for s in _load_services() if s.key == source_key), None)
+    if service is None:
+        raise ToolError(f"Unknown source '{source_key}'.")
+
+    username = (username or "").strip()
+    password = password or ""      # not stripped: spaces can be part of a password
+
+    store = CredentialStore()
+    try:
+        existing = dict(store.get(source_key))
+    except CredentialStoreError:
+        existing = {}
+
+    if not password:
+        password = existing.get("password", "")
+    if not username:
+        username = existing.get("username", "")
+    if not username or not password:
+        raise ToolError("Both a username and a password are needed to sign in.")
+
+    store.set(source_key, **{**existing, "username": username, "password": password})
+    log.event(
+        operation="set_credentials",
+        code="CREDENTIALS_SAVED",
+        message=f"Stored a sign-in for '{source_key}'.",
+        context={"source_key": source_key},   # never the values
+    )
+    return {"source_key": source_key, "has_username": True, "has_password": True,
+            "username": username}
+
+
+def forget_credentials(source_key: str) -> dict:
+    """Remove a stored sign-in."""
+    from core.tools.credential_store import CredentialStore, CredentialStoreError
+
+    store = CredentialStore()
+    try:
+        data = store._load()
+    except CredentialStoreError as exc:
+        raise ToolError(str(exc)) from exc
+    if source_key in data:
+        data.pop(source_key)
+        store._save(data)
+    return {"source_key": source_key, "has_username": False, "has_password": False, "username": ""}
+
+
 def source_settings(source_key: str) -> dict:
     """The options this source lets you adjust, and their current values.
 
@@ -924,7 +1018,7 @@ def activate_parser(source_key: str) -> dict:
 
 # The tools the MCP server registers, in one place.
 READ_TOOLS = [list_sources, latest_transactions, source_transactions, action_progress,
-              source_settings,
+              source_settings, credential_status,
               pending_approvals, llm_status, status]
 ACTION_TOOLS = [
     ingest_document,
@@ -942,5 +1036,7 @@ ACTION_TOOLS = [
     get_latest,
     save_source_settings,
     reset_source_settings,
+    set_credentials,
+    forget_credentials,
 ]
 ALL_TOOLS = READ_TOOLS + ACTION_TOOLS

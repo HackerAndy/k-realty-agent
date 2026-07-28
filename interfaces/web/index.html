@@ -81,6 +81,10 @@
   .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .kv { font-size: 12.5px; color: var(--muted); margin-bottom: 14px; }
   .kv b { color: var(--text); font-weight: 600; }
+  .cred { border: 1px solid var(--border); border-radius: 10px; padding: 13px 14px; margin-bottom: 10px; background: color-mix(in oklab, var(--muted) 4%, var(--card)); }
+  .cred-h { display: flex; align-items: center; gap: 9px; font-size: 13.5px; margin-bottom: 10px; }
+  .cred .field { margin-bottom: 10px; max-width: 400px; }
+  .cred .hint { font-size: 11.5px; color: var(--faint); }
   .view {
     opacity: 1;
     transform: translateY(0);
@@ -1263,6 +1267,7 @@
     el('panel').innerHTML = '<div class="empty">Loading settings…</div>';
     let cfg = {};
     try { cfg = await callTool('llm_status'); } catch (e) { cfg = { error: e.message }; }
+    if (!credCache) await loadCredentials();
     if (llmForm.provider === null) llmForm.provider = cfg.provider || 'anthropic';
 
     const currently = cfg.configured
@@ -1318,10 +1323,80 @@
       '<p class="note">Which model the harness uses to build parsers/scrapers and extract data.</p>' +
       '<div class="kv">' + currently + '</div>' + seg + form +
       '<div class="row"><button class="btn" onclick="saveLlmProvider()">Save provider</button></div></div>' +
-      '<div class="setting"><h2>Credentials &amp; services</h2>' +
-      '<p class="note">Portal logins and the source manifest are managed from a separate local script, ' +
-      'so secrets are typed straight into your terminal:</p>' +
-      '<div class="kv"><b>poetry run python scripts/manage_secrets.py</b></div></div>';
+      credentialsHTML();
+  }
+
+  // ── Sign-ins. Everything the harness authenticates with, in one place. ──
+  // Presence only: a screen that can show a stored password is a screen that can
+  // leak one. You can replace a credential; nothing reads one back out.
+  let credCache = null;
+
+  function credentialsHTML() {
+    if (!credCache) return '<div class="setting"><h2>Sign-ins</h2><p class="note">Loading…</p></div>';
+    const rows = credCache.map(c => {
+      const sid = sourceDomId(c.key);
+      const stored = c.has_username && c.has_password;
+      const badge = stored
+        ? '<span class="verdict pass" style="font-size:11.5px;padding:2px 9px">saved</span>'
+        : '<span class="tag">not set up</span>';
+      if (c.kind === 'inbox') {
+        return '<div class="cred"><div class="cred-h"><b>' + esc(c.label) + '</b>' + badge + '</div>' +
+          '<p class="note" style="margin:4px 0 0">An inbox signs in with Google, not a password. ' +
+          'Connecting it is still a terminal step for now.</p></div>';
+      }
+      return '<div class="cred"><div class="cred-h"><b>' + esc(c.label) + '</b>' + badge +
+        (c.login_url ? '<span class="hint" style="margin-left:auto">' + esc(c.login_url) + '</span>' : '') +
+        '</div>' +
+        '<div class="field"><label for="cu-' + sid + '">Username or email</label>' +
+        '<input type="text" id="cu-' + sid + '" value="' + esc(c.username) + '" autocomplete="off"></div>' +
+        '<div class="field"><label for="cp-' + sid + '">Password</label>' +
+        '<input type="password" id="cp-' + sid + '" autocomplete="off" placeholder="' +
+          (c.has_password ? '•••••••••••• saved' : 'not set') + '">' +
+        (c.has_password ? '<span class="sub">Leave blank to keep the saved one.</span>' : '') + '</div>' +
+        '<div class="row"><button class="btn" onclick="saveCredentials(\'' + c.key + '\')">' +
+          (stored ? 'Update' : 'Save') + '</button>' +
+        (stored ? '<button class="btn" onclick="forgetCredentials(\'' + c.key + '\')">Forget</button>' : '') +
+        '</div></div>';
+    }).join('');
+
+    return '<div class="setting"><h2>Sign-ins</h2>' +
+      '<p class="note">What the harness signs in with. Stored encrypted in <b>.secrets/</b>, ' +
+      'never written into the repo and never shown back to you — you can replace one, but nothing ' +
+      'can read one out.</p>' + rows + '</div>';
+  }
+
+  async function loadCredentials() {
+    try { credCache = await callTool('credential_status'); }
+    catch (e) { credCache = []; }
+  }
+
+  async function saveCredentials(key) {
+    const sid = sourceDomId(key);
+    clearToast();
+    try {
+      await callTool('set_credentials', {
+        source_key: key,
+        username: el('cu-' + sid).value,
+        password: el('cp-' + sid).value,
+      });
+      toast('Sign-in saved for ' + key + '.', true);
+      await loadCredentials();
+      await renderSettings();
+    } catch (e) {
+      toast('Couldn’t save: ' + e.message, false);
+    }
+  }
+
+  async function forgetCredentials(key) {
+    clearToast();
+    try {
+      await callTool('forget_credentials', { source_key: key });
+      toast('Sign-in removed.', true);
+      await loadCredentials();
+      await renderSettings();
+    } catch (e) {
+      toast('Couldn’t remove: ' + e.message, false);
+    }
   }
 
   function pickProvider(p) { llmForm.provider = p; llmForm.models = []; renderSettings(); }
