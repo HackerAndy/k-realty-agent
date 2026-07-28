@@ -1,0 +1,215 @@
+<title>K-Realty · adding a data source</title>
+<!-- THROWAWAY PROTOTYPE — variant A (chosen), revised. FAKE data.
+     Changes from the first pass:
+       - the agent SUGGESTS the name, so naming moves to the end
+       - no URL field: the demonstration already records where you went -->
+<style>
+  :root{
+    --bg:#f6f5f1; --card:#fff; --card-2:#fbfaf7; --border:#e5e3da; --border-strong:#d5d2c6;
+    --text:#1b1c19; --muted:#6d6f66; --faint:#9a9c92;
+    --accent:#356534; --accent-soft:#e8f0e6; --accent-line:#bcd4b8;
+    --warn:#9a6a12; --shadow:0 1px 2px rgba(30,32,26,.05),0 6px 20px rgba(30,32,26,.06);
+  }
+  @media (prefers-color-scheme:dark){:root{
+    --bg:#151713; --card:#1e211c; --card-2:#242822; --border:#333831; --border-strong:#414740;
+    --text:#e9ece5; --muted:#a3a99d; --faint:#767c70;
+    --accent:#8fca87; --accent-soft:#243026; --accent-line:#3c5138; --warn:#d7ab5c;
+    --shadow:0 1px 2px rgba(0,0,0,.3),0 8px 24px rgba(0,0,0,.35);
+  }}
+  :root[data-theme="dark"]{
+    --bg:#151713; --card:#1e211c; --card-2:#242822; --border:#333831; --border-strong:#414740;
+    --text:#e9ece5; --muted:#a3a99d; --faint:#767c70;
+    --accent:#8fca87; --accent-soft:#243026; --accent-line:#3c5138; --warn:#d7ab5c;
+  }
+  :root[data-theme="light"]{
+    --bg:#f6f5f1; --card:#fff; --card-2:#fbfaf7; --border:#e5e3da; --border-strong:#d5d2c6;
+    --text:#1b1c19; --muted:#6d6f66; --faint:#9a9c92;
+    --accent:#356534; --accent-soft:#e8f0e6; --accent-line:#bcd4b8; --warn:#9a6a12;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);line-height:1.5;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,sans-serif;-webkit-font-smoothing:antialiased}
+  .app{max-width:980px;margin:0 auto;padding:20px 22px 120px}
+
+  .top{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap}
+  .brand{display:flex;align-items:center;gap:10px}
+  .brand .mark{width:28px;height:28px;border-radius:8px;background:var(--accent);color:#fff;display:grid;place-items:center;font-weight:700;font-size:15px}
+  @media (prefers-color-scheme:dark){.brand .mark{color:#12160f}}
+  .brand b{font-size:15px;font-weight:650}
+  .pillars{display:flex;gap:4px;background:var(--card);border:1px solid var(--border);border-radius:999px;padding:4px;box-shadow:var(--shadow)}
+  .pillars button{font:inherit;font-size:13px;border:none;background:transparent;color:var(--muted);padding:7px 15px;border-radius:999px;display:inline-flex;gap:7px;align-items:center}
+  .pillars button .step{font-size:10px;font-weight:700;color:var(--faint)}
+  .pillars button.on{background:var(--accent-soft);color:var(--accent);font-weight:600}
+  .pagehead{margin:18px 2px}
+  .pagehead h1{font-size:20px;font-weight:650;letter-spacing:-.015em;margin:0}
+  .pagehead p{margin:3px 0 0;color:var(--muted);font-size:13.5px}
+
+  .card{background:var(--card);border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow)}
+  .existing{display:flex;flex-direction:column;gap:10px;margin-bottom:14px;opacity:.6}
+  .srchead{display:flex;align-items:center;gap:12px;padding:14px 16px}
+  .srchead .ico{width:34px;height:34px;border-radius:8px;background:var(--card-2);border:1px solid var(--border);display:grid;place-items:center;font-size:16px}
+  .srchead .nm{font-weight:640;font-size:14.5px}
+  .srchead .sub{color:var(--muted);font-size:12.5px;margin-top:1px}
+  .srchead .rt{margin-left:auto;color:var(--faint);font-size:12px}
+
+  .add{border:1px dashed var(--border-strong);border-radius:12px}
+  .add-h{display:flex;align-items:center;gap:10px;padding:14px 16px;font-weight:600;font-size:14px}
+  .add-h .plus{width:24px;height:24px;border-radius:7px;border:1px solid var(--border-strong);display:grid;place-items:center;color:var(--muted);font-size:15px}
+  .add-b{padding:0 16px 18px}
+
+  .steps{display:flex;align-items:center;margin-bottom:18px;flex-wrap:wrap}
+  .stepdot{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--faint)}
+  .stepdot .n{width:21px;height:21px;border-radius:999px;border:1px solid var(--border-strong);display:grid;place-items:center;font-size:11px;font-weight:700}
+  .stepdot.on{color:var(--text);font-weight:600}
+  .stepdot.on .n{background:var(--accent);border-color:var(--accent);color:#fff}
+  @media (prefers-color-scheme:dark){.stepdot.on .n{color:#12160f}}
+  .stepdot.done .n{border-color:var(--accent-line);color:var(--accent);background:var(--accent-soft)}
+  .steparrow{color:var(--faint);margin:0 12px}
+
+  .list{display:flex;flex-direction:column;gap:8px}
+  .opt{display:flex;align-items:center;gap:11px;border:1px solid var(--border);border-radius:10px;padding:12px 13px;background:var(--card-2);cursor:pointer}
+  .opt:hover{border-color:var(--accent-line)}
+  .opt.on{border-color:var(--accent);background:var(--accent-soft)}
+  .opt .radio{width:15px;height:15px;border-radius:999px;border:1.5px solid var(--border-strong);flex:none}
+  .opt.on .radio{border-color:var(--accent);background:var(--accent);box-shadow:inset 0 0 0 3px var(--card)}
+  .opt .t{font-weight:600;font-size:13px}
+  .opt .d{color:var(--muted);font-size:12px}
+  .opt .w{margin-left:auto;color:var(--faint);font-size:11.5px;text-align:right;white-space:nowrap}
+
+  .field{display:flex;flex-direction:column;gap:5px;max-width:470px;margin-bottom:12px}
+  .field label{font-size:12.5px;color:var(--muted)}
+  input[type=text]{font:inherit;font-size:13px;padding:9px 11px;border-radius:8px;border:1px solid var(--border);background:var(--card);color:var(--text)}
+  .sub{font-size:11.5px;color:var(--faint)}
+  .lbl{font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);margin:16px 0 8px}
+  .btn{font:inherit;font-size:13px;font-weight:550;padding:9px 14px;border-radius:9px;cursor:pointer;
+    border:1px solid var(--border-strong);background:var(--card);color:var(--text);display:inline-flex;gap:7px;align-items:center}
+  .btn:hover{border-color:var(--accent-line)}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  @media (prefers-color-scheme:dark){.btn.primary{color:#12160f}}
+  .btn[disabled]{opacity:.45;cursor:default}
+  .row{display:flex;gap:9px;align-items:center;flex-wrap:wrap;margin-top:16px}
+
+  .found{background:var(--card-2);border:1px solid var(--border);border-radius:10px;padding:12px 14px;margin-bottom:14px}
+  .found .k{color:var(--faint);font-size:11.5px}
+  .found .v{font-size:13px;font-weight:600}
+  .found .line{display:flex;justify-content:space-between;gap:14px;padding:5px 0}
+  .flag{background:color-mix(in oklab,var(--warn) 13%,transparent);border:1px solid color-mix(in oklab,var(--warn) 32%,var(--border));
+    border-radius:9px;padding:10px 12px;font-size:12.5px;margin-top:12px}
+  .flag b{color:var(--warn)}
+  .doing{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:13px}
+  .spin{width:13px;height:13px;border-radius:999px;border:2px solid color-mix(in oklab,var(--accent) 30%,transparent);border-top-color:var(--accent);animation:sp .7s linear infinite}
+  @keyframes sp{to{transform:rotate(360deg)}}
+  .note{margin:18px 2px 0;color:var(--faint);font-size:12.5px;max-width:74ch}
+</style>
+
+<div class="app">
+  <div class="top">
+    <div class="brand"><span class="mark">K</span><b>K-Realty</b></div>
+    <div class="pillars">
+      <button class="on"><span class="step">1</span>Ingest</button>
+      <button><span class="step">2</span>Process</button>
+      <button><span class="step">3</span>Report</button>
+    </div>
+  </div>
+  <div class="pagehead"><h1>Data sources</h1><p>Acquire and validate each source before processing.</p></div>
+
+  <div class="existing">
+    <div class="card"><div class="srchead"><div class="ico">&#127970;</div>
+      <div><div class="nm">Epic Property Management</div><div class="sub">implemented · 3 ways in</div></div>
+      <div class="rt">13 rows</div></div></div>
+    <div class="card"><div class="srchead"><div class="ico">&#127974;</div>
+      <div><div class="nm">DFCU Financial bank</div><div class="sub">implemented · 1 way in</div></div>
+      <div class="rt">6 rows</div></div></div>
+  </div>
+
+  <div id="view"></div>
+  <p class="note">Variant A, revised: the agent suggests the name once it has seen the source, so naming
+    moved to the end — and the URL field is gone, because the demonstration already records where you went.
+    Step 2 here is faked: “Open the browser” jumps straight to what the agent would have found.</p>
+</div>
+
+<script>
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+const METHODS = [
+  { id:'scrape', icon:'&#8635;', title:'A website behind a login',
+    desc:'The harness signs in and pulls the data itself.', gives:'Runs unattended',
+    act:'Open the browser',
+    doing:'A browser is open. Sign in, set your filters, and bring up the data you want — then close it.',
+    // what the agent would report back after watching
+    found:{ name:'Shellpoint Mortgage', where:'myaccount.shellpointmtg.com/loans/activity',
+            detail:'Found the request behind “Search” · 42 rows · columns: Date, Description, Principal, Interest, Escrow, Amount' } },
+  { id:'upload', icon:'&#8593;', title:'A file you already have',
+    desc:'A PDF or CSV — a statement, an export.', gives:'You hand it the file',
+    act:'Choose a document',
+    doing:'Reading your document and writing a parser for it.',
+    found:{ name:'Shellpoint mortgage statement', where:'shellpoint-jul-2026.pdf',
+            detail:'Parsed 18 rows · columns: Date, Description, Amount, Balance' } },
+  { id:'email', icon:'&#9993;', title:'An attachment that arrives by email',
+    desc:'The harness watches an inbox and takes the document off the message.', gives:'Runs unattended',
+    act:'Connect Gmail',
+    doing:'Finding messages that carry a document.',
+    caveat:'Email delivers a document — something still has to READ it. The agent will use the first attachment it finds as its sample and write the parser from that, so this is really two things: a delivery route and a parser.',
+    found:{ name:'Shellpoint mortgage statement', where:'from statements@shellpointmtg.com · .pdf',
+            detail:'Found 3 matching messages · newest 12 Jul · parsed 18 rows from it' } },
+];
+
+const S = { step:1, method:null, name:'', learned:false };
+const M = () => METHODS.find(m => m.id === S.method);
+
+function stepper(){
+  const labels = [[1,'How it arrives'],[2,'Let the agent learn it'],[3,'Name it and save']];
+  return '<div class="steps">' + labels.map(([n,t],i) =>
+    '<span class="stepdot' + (S.step===n?' on':(S.step>n?' done':'')) + '">' +
+    '<span class="n">' + (S.step>n?'&#10003;':n) + '</span>' + t + '</span>' +
+    (i<2 ? '<span class="steparrow">&#8250;</span>' : '')).join('') + '</div>';
+}
+
+function step1(){
+  return '<div class="list">' + METHODS.map(m =>
+    '<div class="opt' + (S.method===m.id?' on':'') + '" onclick="pick(\'' + m.id + '\')">' +
+      '<span class="radio"></span><span>' + m.icon + '</span>' +
+      '<span><div class="t">' + esc(m.title) + '</div><div class="d">' + esc(m.desc) + '</div></span>' +
+      '<span class="w">' + esc(m.gives) + '</span></div>').join('') + '</div>' +
+    (M() && M().caveat ? '<div class="flag"><b>Heads up.</b> ' + M().caveat + '</div>' : '') +
+    '<div class="row"><button class="btn primary" ' + (S.method?'':'disabled') +
+      ' onclick="S.step=2;paint()">Next</button></div>';
+}
+
+function step2(){
+  const m = M();
+  if (!S.learned) {
+    return '<p style="color:var(--muted);font-size:13px;margin:0">' + esc(m.doing) + '</p>' +
+      '<div class="row"><button class="btn" onclick="S.step=1;paint()">Back</button>' +
+      '<button class="btn primary" onclick="learn()">' + esc(m.act) + '</button></div>';
+  }
+  return '<div class="doing"><span class="spin"></span>The agent is writing and testing the code…</div>' +
+    '<div class="row"><button class="btn primary" onclick="S.step=3;paint()">See what it found</button></div>';
+}
+
+function step3(){
+  const f = M().found;
+  return '<div class="lbl">What the agent found</div>' +
+    '<div class="found">' +
+      '<div class="line"><span class="k">Where it came from</span><span class="v">' + esc(f.where) + '</span></div>' +
+      '<div class="line"><span class="k">What it read</span><span class="v" style="font-weight:400;color:var(--muted);text-align:right">' + esc(f.detail) + '</span></div>' +
+    '</div>' +
+    '<div class="field"><label for="nm">Call it</label>' +
+      '<input type="text" id="nm" value="' + esc(S.name) + '" oninput="S.name=this.value;save()">' +
+      '<span class="sub">Suggested from what it saw — change it to whatever you would call it.</span></div>' +
+    '<div class="row"><button class="btn" onclick="S.step=2;paint()">Back</button>' +
+      '<button class="btn primary" ' + (S.name.trim()?'':'disabled') + '>Save this source</button></div>';
+}
+
+function pick(id){ S.method=id; S.learned=false; paint(); }
+function learn(){ S.learned = true; S.name = M().found.name; paint(); }
+function save(){ /* keeps the input value in state without a re-render */ }
+
+function paint(){
+  const body = S.step===1 ? step1() : S.step===2 ? step2() : step3();
+  document.getElementById('view').innerHTML =
+    '<div class="add"><div class="add-h"><span class="plus">+</span>Add a data source</div>' +
+    '<div class="add-b">' + stepper() + body + '</div></div>';
+}
+paint();
+</script>
