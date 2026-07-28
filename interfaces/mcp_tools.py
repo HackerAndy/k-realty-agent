@@ -18,7 +18,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from core import progress, source_status
+from core import progress, reconcile, source_status
 from core.observability import get_logger
 from core.fetch_ingest import fetch_and_ingest, persist_scraped
 from core.ingest import (
@@ -203,7 +203,10 @@ def run_scraper(source_key: str, save: bool = True, limit: int = 200) -> dict:
         # launch, sign-in, each API call) are visible while it runs — poll them
         # with action_progress(). Without this the operator sees one "Run scraper"
         # step for 30-60s, indistinguishable from a hang.
-        with progress.channel(source_key):
+        # The reconciliation channel runs alongside progress: if the scraper
+        # records the source's own control totals, we can answer "did we pull
+        # EVERYTHING", which neither a passing test nor a successful run can.
+        with progress.channel(source_key), reconcile.channel(source_key):
             txns = get_scraper(source_key)()
         steps.append({
             "key": "run_scraper",
@@ -222,7 +225,43 @@ def run_scraper(source_key: str, save: bool = True, limit: int = 200) -> dict:
         })
         raise ToolError({"message": str(exc), "steps": steps}) from exc
 
-    result = {"source_key": source_key, **_summary(txns), "transactions": _rows(txns, limit)}
+    # Did we get EVERYTHING? Reported as its own step so a silent shortfall can't
+    # hide behind a green "Run scraper". `ok is None` means the source published
+    # nothing to check against — deliberately NOT rendered as a pass.
+    balance = reconcile.summary(source_key)
+    if balance["checked"]:
+        short = balance["discrepancies"]
+        steps.append({
+            "key": "reconcile",
+            "label": f"Reconcile against the source's own totals ({balance['checked']} checked)",
+            "status": "success" if balance["ok"] else "failed",
+            "details": {"checked": balance["checked"]},
+            **({} if balance["ok"] else {
+                "error": "; ".join(
+                    f"{d['label']}: source says {d['expected']}, we extracted {d['actual']} "
+                    f"(off by {d['difference']})" for d in short[:5]
+                )
+            }),
+        })
+        if not balance["ok"]:
+            log.failure(
+                operation="run_scraper",
+                code="RECONCILIATION_FAILED",
+                message=f"{len(short)} of {balance['checked']} control totals did not balance for '{source_key}'.",
+                remediation="The scrape ran but the data is INCOMPLETE or wrong — check the date "
+                            "window, pagination, and whether every account was included.",
+                context={"source_key": source_key, "checked": balance["checked"],
+                         "failed": len(short), "labels": [d["label"] for d in short[:10]]},
+            )
+    else:
+        steps.append({
+            "key": "reconcile",
+            "label": "Reconcile against the source's own totals — none published to check",
+            "status": "pending",
+        })
+
+    result = {"source_key": source_key, **_summary(txns),
+              "reconciliation": balance, "transactions": _rows(txns, limit)}
 
     persist_started = time.perf_counter()
     try:

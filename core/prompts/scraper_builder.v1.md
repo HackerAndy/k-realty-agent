@@ -64,10 +64,29 @@ Prefer the **API** path, fall back to **replaying clicks**:
    `fields` — invent nothing, drop nothing. Skip section headers / subtotals /
    balance rows; extract only real transactions.
 
-4. **Register it.** Edit `core/scrapers/__init__.py` to import your `retrieve`
+4. **Record the source's own control totals — do this whenever the source
+   publishes any.** Most financial sources state their own arithmetic: a
+   per-account `Total`, a balance line, a row count, an ending balance. Compare
+   your extraction against it and record the check:
+
+   ```python
+   from core import reconcile
+   ...
+   reconcile.record(account_name, expected=account["Total"], actual=sum_of_extracted_rows)
+   ```
+
+   This is the ONLY signal that answers "did we pull everything". A passing test
+   says the parsing logic is unchanged; a successful run says the portal
+   answered. Neither notices that a date window clipped rows, an account was
+   skipped, or pagination stopped early — the run still looks green while the
+   numbers are quietly wrong. Recording is a no-op outside a run, so it never
+   breaks your test. If the source publishes NO totals, say so in your report
+   rather than inventing a check.
+
+5. **Register it.** Edit `core/scrapers/__init__.py` to import your `retrieve`
    and add it to `REGISTRY` under the exact source key.
 
-5. **Write a self-contained test — this is REQUIRED, not optional.** Create the
+6. **Write a self-contained test — this is REQUIRED, not optional.** Create the
    test file named in your task (`tests/test_scraper_<source_key>.py`) with pytest
    tests of your pure `_extract` against a SMALL, REPRESENTATIVE payload **embedded
    inline in the test** — shaped like the real response you saw in the

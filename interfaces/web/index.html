@@ -1381,7 +1381,18 @@
         beginLoginRecoveryPolling(sourceKey, runId);
       }
 
-      toast(tool + ' done' + (r.count != null ? ' — ' + r.count + ' transactions' : '') + '.', true);
+      // A shortfall against the source's own totals means the run "succeeded"
+      // with incomplete data — the operator must hear that, not a green toast.
+      const bal = r && r.reconciliation;
+      if (bal && bal.ok === false) {
+        const worst = (bal.discrepancies || []).slice(0, 3)
+          .map(d => d.label + ': source ' + money(d.expected) + ' vs ours ' + money(d.actual)).join('; ');
+        toast('⚠ ' + tool + ' ran, but ' + bal.discrepancies.length + ' of ' + bal.checked +
+              ' totals did NOT balance — the data is incomplete. ' + worst, false);
+      } else {
+        toast(tool + ' done' + (r.count != null ? ' — ' + r.count + ' transactions' : '') +
+              (bal && bal.ok === true ? ', reconciled against ' + bal.checked + ' source totals' : '') + '.', true);
+      }
       await loadStatus();
       if (sourceKey) delete sourceTxnCache[sourceKey];
       if (current === 'ingest') await renderIngest();
