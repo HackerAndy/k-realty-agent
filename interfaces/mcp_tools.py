@@ -53,6 +53,10 @@ _BUILD_META: dict[str, dict[str, str]] = {}
 _CONSENT_PROCS: dict[str, subprocess.Popen] = {}
 _CONSENT_META: dict[str, dict[str, str]] = {}
 
+# So does a portal demonstration — it waits for a human to finish clicking.
+_DEMO_PROCS: dict[str, subprocess.Popen] = {}
+_DEMO_META: dict[str, dict[str, str]] = {}
+
 
 def _tail_text(path: Path, max_lines: int = 25) -> str:
     try:
@@ -94,6 +98,16 @@ def _rows(txns: list[Transaction], limit: int) -> list[dict]:
 
 # --- read tools -------------------------------------------------------------
 
+def _inbox_connected(carrier_key: str) -> bool:
+    """Whether an inbox can actually be read — i.e. consent was granted."""
+    try:
+        from core.tools import email_oauth
+
+        return email_oauth.is_configured(carrier_key)
+    except Exception:
+        return False
+
+
 def list_sources(include_carriers: bool = False) -> list[dict]:
     """Every financial SOURCE, with the transports its data can arrive by.
 
@@ -107,7 +121,8 @@ def list_sources(include_carriers: bool = False) -> list[dict]:
         if source_status.is_trigger(s) and not include_carriers:
             continue
         routes = transports.transports_for(
-            s, services, has_scraper=has_scraper, parser_built=source_status.parser_built
+            s, services, has_scraper=has_scraper, parser_built=source_status.parser_built,
+            carrier_ready=_inbox_connected,
         )
         default_id = transports.default_transport(s, routes)
         out.append({
@@ -283,6 +298,197 @@ def save_email_fetch(source_key: str, delivers_to: str, from_address: str = "",
         newer_than_days=int(newer_than_days) if newer_than_days else None,
     ))
     return email_status(source_key)
+
+
+# How the operator describes a new source, and what that means in the manifest.
+# The wizard offers exactly these three because they're the three the harness can
+# actually handle end-to-end; anything else would be a dead end on screen.
+NEW_SOURCE_METHODS = {
+    "document": {
+        "label": "A document you upload",
+        "detail": "a statement or export you already have — PDF or CSV",
+        "input_type": "document", "access": "download",
+        "next": "The agent writes a parser from one real sample, and tests it.",
+    },
+    "website": {
+        "label": "A website behind a login",
+        "detail": "you show the harness how to get the data, once",
+        "input_type": "html_scrape", "access": "portal_login",
+        "next": "You demonstrate it in a browser; the agent writes a scraper from that.",
+    },
+    "email": {
+        "label": "An email that delivers it",
+        "detail": "an inbox receives the document as an attachment",
+        "input_type": "email_trigger", "access": "email_attachment",
+        "next": "Connect the inbox with Google, then say which source it delivers to.",
+    },
+}
+
+
+def source_methods() -> list[dict]:
+    """The ways a new source's data can arrive — the wizard's first question."""
+    return [{"id": key, **{k: v for k, v in spec.items() if k != "input_type" and k != "access"}}
+            for key, spec in NEW_SOURCE_METHODS.items()]
+
+
+def _slug(label: str) -> str:
+    """A manifest key from a human label: lowercase, underscores, no punctuation."""
+    slug = re.sub(r"[^a-z0-9]+", "_", (label or "").strip().lower()).strip("_")
+    return slug[:48]
+
+
+def suggest_source_name(sample_path: str = "", filename: str = "") -> dict:
+    """Propose a name for a new source by reading the top of its document.
+
+    Never fails: with no model, no readable text, or a model that can't tell, it
+    falls back to a title derived from the filename. `source` says which, so the
+    screen doesn't imply the model saw something it didn't."""
+    from orchestration.naming import label_from_filename, suggest_label
+
+    doc = Path(sample_path).expanduser() if sample_path else None
+    name = filename or (doc.name if doc else "")
+    if doc is None or not doc.exists():
+        return {"label": label_from_filename(name), "source": "filename", "key": _slug(label_from_filename(name))}
+
+    try:
+        from core.tools.llm_extractor import read_document_text
+
+        text = read_document_text(doc)
+    except Exception:
+        text = ""
+    suggestion = suggest_label(text, name)
+    return {**suggestion, "key": _slug(suggestion["label"])}
+
+
+def add_source(label: str, method: str, delivers_to: str = "") -> dict:
+    """Add a new data source to the registry.
+
+    Nothing is built here — this creates the entry the rest of the harness hangs
+    off (the agent's parser/scraper, its credentials, its transports). It starts
+    `planned`, with no parser and no default route, which is exactly what the
+    Ingest screen should show until the agent has written something that works.
+    """
+    from core.tools.service_manifest import Service, ServiceManifestError
+
+    spec = NEW_SOURCE_METHODS.get(method)
+    if spec is None:
+        raise ToolError(f"Unknown method '{method}'. Use one of: {', '.join(NEW_SOURCE_METHODS)}.")
+
+    label = (label or "").strip()
+    if not label:
+        raise ToolError("Give the source a name — it's how you'll recognise it on this screen.")
+    key = _slug(label)
+    if not key:
+        raise ToolError(f"'{label}' has no letters or digits to make a key from — try another name.")
+
+    services = _load_services()
+    if any(s.key == key for s in services):
+        raise ToolError(f"'{label}' is already here (key '{key}'). Pick a different name.")
+
+    # An inbox is a route to a source that parses what it delivers, so it needs
+    # to know its destination up front — otherwise it fetches into a dead end.
+    if method == "email":
+        target = next((s for s in services if s.key == delivers_to), None)
+        if target is None:
+            raise ToolError("Say which source this inbox delivers to.")
+        if not target.parser:
+            raise ToolError(
+                f"'{target.label}' has no parser yet, so it can't read what this inbox delivers. "
+                "Build a parser for it first."
+            )
+
+    service = Service(key=key, label=label, input_type=spec["input_type"],
+                      access=spec["access"], status="planned")
+    try:
+        ServiceManifest().add(service)
+    except ServiceManifestError as exc:
+        raise ToolError(str(exc)) from exc
+
+    if method == "email":
+        save_email_fetch(key, delivers_to=delivers_to)
+
+    log.event(
+        operation="add_source",
+        code="SOURCE_ADDED",
+        message=f"Added source '{label}' ({method}).",
+        context={"source_key": key, "method": method, "delivers_to": delivers_to or None},
+    )
+    return {"source_key": key, "label": label, "method": method,
+            "next": spec["next"], **_source_row(key)}
+
+
+def _source_row(source_key: str) -> dict:
+    """The list_sources row for one source — so a caller that just changed
+    something sees the same shape the screen renders from."""
+    row = next((s for s in list_sources(include_carriers=True) if s["key"] == source_key), None)
+    return row or {}
+
+
+def start_demo(source_key: str, url: str = "") -> dict:
+    """Open a browser so the operator can DEMONSTRATE how to reach a portal's data.
+
+    Runs in its own process: it waits for a human to sign in, set filters, and get
+    their data on screen, which no web request can wait for. Poll demo_status().
+    The demonstration is what the agent writes the scraper from."""
+    service = next((s for s in _load_services() if s.key == source_key), None)
+    if service is None:
+        raise ToolError(f"Unknown source '{source_key}'.")
+
+    existing = _DEMO_PROCS.get(source_key)
+    if existing and existing.poll() is None:
+        return {"source_key": source_key, "status": "running", "pid": existing.pid}
+
+    status_path = Path("data/demos") / f"{source_key}.status.json"
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_path.unlink(missing_ok=True)
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "core.tools.demo_worker",
+         source_key, (url or service.login_url or "-"), str(status_path)],
+        start_new_session=True,
+    )
+    _DEMO_PROCS[source_key] = proc
+    _DEMO_META[source_key] = {"status_path": str(status_path)}
+    return {"source_key": source_key, "status": "running", "pid": proc.pid,
+            "message": "A browser is opening — get your data on screen, then close the window."}
+
+
+def demo_status(source_key: str) -> dict:
+    """Progress of a demonstration: idle | running | completed | failed.
+
+    On success the source's login_url is set from where the operator actually
+    ended up — the harness learns the URL instead of asking for it."""
+    proc = _DEMO_PROCS.get(source_key)
+    meta = _DEMO_META.get(source_key, {})
+    if proc is None:
+        return {"source_key": source_key, "status": "idle"}
+
+    payload = {}
+    status_path = Path(meta.get("status_path", ""))
+    if status_path.exists():
+        try:
+            payload = json.loads(status_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+
+    if proc.poll() is None:
+        return {"source_key": source_key, "status": "running",
+                "message": payload.get("message", "Waiting for your demonstration…")}
+
+    _DEMO_PROCS.pop(source_key, None)
+    if payload.get("status") != "completed":
+        return {"source_key": source_key, "status": "failed",
+                "message": payload.get("error") or "The demonstration wasn't captured.",
+                "remediation": "Start it again, and close the browser window once your data is on screen."}
+
+    landed = payload.get("final_url") or payload.get("start_url") or ""
+    if landed:
+        ServiceManifest().update(source_key, login_url=landed)
+    return {"source_key": source_key, "status": "completed",
+            "demo_path": payload.get("demo_path"),
+            "login_url": landed,
+            "captured_requests": payload.get("captured_requests", 0),
+            "recorded_actions": payload.get("recorded_actions", 0),
+            "message": "Demonstration captured — the agent can write the scraper now."}
 
 
 def set_credentials(source_key: str, username: str | None = None,
@@ -1032,6 +1238,7 @@ def start_build(
     sample_path: str | None = None,
     feedback: str = "",
     portal_url: str = "",
+    demo_path: str = "",
 ) -> dict:
     """Start the embedded agent building (or revising) a parser/scraper for a
     source, in the background. An agent build takes minutes, so this returns
@@ -1058,8 +1265,17 @@ def start_build(
         sample_path = str(sample)
     else:
         portal_url = (portal_url or service.login_url or "").strip()
-        if mode == "build" and not portal_url:
-            raise ToolError(f"Source '{source_key}' has no portal URL to demonstrate against.")
+        demo_path = (demo_path or "").strip()
+        if demo_path and not Path(demo_path).expanduser().exists():
+            raise ToolError(f"No demonstration at {demo_path} — record one first.")
+        # A captured demonstration is a URL and then some: it already contains
+        # where the operator went and what they clicked. Only demand a URL when
+        # there's no demonstration yet, so the build has *something* to open.
+        if mode == "build" and not portal_url and not demo_path:
+            raise ToolError(
+                f"Source '{source_key}' has no portal URL and no demonstration yet. "
+                "Show the harness how to reach the data first."
+            )
     if mode == "revise" and not (feedback or "").strip() and kind == "parser":
         raise ToolError("Say what needs changing — revise needs feedback.")
 
@@ -1089,6 +1305,8 @@ def start_build(
         cmd += ["--feedback", feedback]
     if portal_url:
         cmd += ["--portal-url", portal_url]
+    if demo_path:
+        cmd += ["--demo-path", demo_path]
 
     log_path = run_file.with_suffix(".log")
     with log_path.open("w", encoding="utf-8") as log_fh:
@@ -1215,10 +1433,14 @@ def activate_parser(source_key: str) -> dict:
 
 
 # The tools the MCP server registers, in one place.
-READ_TOOLS = [list_sources, latest_transactions, source_transactions, action_progress,
-              source_settings, credential_status, email_status,
+READ_TOOLS = [list_sources, source_methods, latest_transactions, source_transactions,
+              action_progress, source_settings, credential_status, email_status,
               pending_approvals, llm_status, status]
 ACTION_TOOLS = [
+    add_source,
+    suggest_source_name,
+    start_demo,
+    demo_status,
     ingest_document,
     extract_now,
     run_scraper,

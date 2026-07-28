@@ -54,6 +54,7 @@ def transports_for(
     services: list[Any],
     has_scraper: Any,
     parser_built: Any,
+    carrier_ready: Any = None,
 ) -> list[dict]:
     """Every route this source's data could take, whether or not it works today.
 
@@ -97,10 +98,15 @@ def transports_for(
         None,
     )
     if carrier is not None:
+        # Routing an inbox to this source is not the same as being able to READ
+        # that inbox: a carrier added but not yet signed in to would otherwise
+        # show as a working route, and "Get latest" would pick it and fail.
+        connected = True if carrier_ready is None else bool(carrier_ready(carrier.key))
         routes.append(_route(
             EMAIL,
-            available=True,
+            available=connected,
             unattended=True,
+            reason=None if connected else f"{carrier.label} isn't signed in yet — connect it in Settings",
             detail=f"via {carrier.label}"
                    + (f" · from {carrier.fetch.from_address}" if carrier.fetch.from_address else ""),
             carrier_key=carrier.key,

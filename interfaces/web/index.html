@@ -492,6 +492,10 @@
     }
 
     const sources = sourcesRes.value || [];
+    // The ways a source can arrive are declared by the harness, not listed twice.
+    if (!methodsCache) {
+      try { methodsCache = await callTool('source_methods'); } catch (e) { methodsCache = []; }
+    }
     const pending = pendingRes.status === 'fulfilled' ? (pendingRes.value || []) : [];
     if (pendingRes.status !== 'fulfilled') {
       const pendingErr = (pendingRes.reason && pendingRes.reason.message) ? pendingRes.reason.message : 'unknown error';
@@ -535,12 +539,197 @@
       '</div>';
     }
     html += '</div>';
+    html += addSourceHTML(sources);
     el('panel').innerHTML = html;
 
     // Rehydrate the open source's action step timeline + wire its file input.
     if (openKey) {
       const prior = actionStepHistory[openKey];
       if (prior && prior.length) renderUploadSteps(openKey, prior);
+    }
+  }
+
+  // ── Add a data source ──────────────────────────────────────────────────────
+  // At most three questions: how the data arrives, what to call it, and — for an
+  // inbox — which source it feeds. Everything past that is the agent's job, and
+  // happens in the new source's own panel, so there is one place where code gets
+  // built rather than two.
+  let methodsCache = null;
+  const wiz = { open: false, method: null, label: '', suggested: null,
+                deliversTo: '', sample: null, busy: false };
+
+  function openWizard() { wiz.open = true; renderIngest(); }
+
+  function closeWizard() {
+    Object.assign(wiz, { open: false, method: null, label: '', suggested: null,
+                         deliversTo: '', sample: null, busy: false });
+    renderIngest();
+  }
+
+  function pickMethod(id) { wiz.method = id; wiz.label = ''; wiz.suggested = null; renderIngest(); }
+
+  function addSourceHTML(sources) {
+    if (!wiz.open) {
+      return '<div class="row" style="margin-top:18px">' +
+        '<button class="btn" onclick="openWizard()">+ Add a data source</button></div>';
+    }
+    const methods = methodsCache || [];
+    const chosen = methods.find(m => m.id === wiz.method);
+
+    let inner;
+    if (!chosen) {
+      inner = '<p class="note" style="margin:0 0 12px">How does this source’s data reach you? ' +
+        'The harness can handle these three today.</p>' +
+        methods.map(m =>
+          '<div class="cred" style="cursor:pointer" onclick="pickMethod(\'' + m.id + '\')">' +
+          '<div class="cred-h"><b>' + esc(m.label) + '</b>' +
+          '<span class="hint" style="margin-left:auto">' + esc(m.detail) + '</span></div>' +
+          '<p class="sub" style="margin:4px 0 0">' + esc(m.next) + '</p></div>').join('');
+    } else if (wiz.method === 'email') {
+      inner = emailRouteHTML(sources, chosen);
+    } else {
+      inner = newSourceHTML(chosen);
+    }
+
+    return '<div class="build" style="margin-top:18px"><div class="build-h">' +
+      '<span class="caret open">&#8250;</span>Add a data source' +
+      (chosen ? '<span class="hint" style="margin-left:auto;font-weight:400">' + esc(chosen.label) + '</span>' : '') +
+      '</div><div class="build-b">' + inner +
+      '<div class="row" style="margin-top:12px">' +
+      (chosen ? '<button class="btn" onclick="pickMethod(null)">← Back</button>' : '') +
+      '<button class="btn" onclick="closeWizard()">Cancel</button></div>' +
+      '</div></div>';
+  }
+
+  /** A brand-new source: name it, then the agent takes over in its own panel. */
+  function newSourceHTML(method) {
+    const isDoc = method.id === 'document';
+    const suggestedFrom = wiz.suggested && wiz.suggested.source === 'model'
+      ? '<span class="sub">Suggested by the model from your sample — change it if it’s off.</span>'
+      : (wiz.suggested ? '<span class="sub">Suggested from the file name — change it if it’s off.</span>' : '');
+
+    // A sample first, so the name can be suggested rather than typed.
+    const sampleRow = isDoc
+      ? '<div class="row" style="margin-bottom:12px">' +
+        '<button class="btn" onclick="chooseWizardSample()">' +
+        (wiz.sample ? 'Choose a different sample' : 'Choose a sample document') + '</button>' +
+        '<input id="wiz-sample" type="file" style="display:none" accept=".pdf,.csv,text/csv,application/pdf" ' +
+        'onchange="handleWizardSample(event)">' +
+        (wiz.sample ? '<span class="hint">' + esc(wiz.sample.filename) + '</span>' : '') +
+        '</div>'
+      : '';
+
+    const creds = method.id === 'website'
+      ? '<div class="field"><label for="wiz-user">Username or email <span class="sub">(optional now)</span></label>' +
+        '<input type="text" id="wiz-user" autocomplete="off"></div>' +
+        '<div class="field"><label for="wiz-pass">Password</label>' +
+        '<input type="password" id="wiz-pass" autocomplete="off">' +
+        '<span class="sub">Stored encrypted in .secrets/, never shown back to you. ' +
+        'You can add it later in Settings instead.</span></div>'
+      : '';
+
+    const ready = isDoc ? !!wiz.sample : true;
+    return '<p class="note" style="margin:0 0 12px">' + esc(method.next) + '</p>' + sampleRow +
+      (isDoc && !wiz.sample ? '' :
+        '<div class="field"><label for="wiz-label">What should this be called?</label>' +
+        '<input type="text" id="wiz-label" value="' + esc(wiz.label) + '" ' +
+        'placeholder="e.g. Chase Business Checking" autocomplete="off" oninput="wiz.label = this.value">' +
+        suggestedFrom + '</div>' + creds +
+        '<div class="row"><button class="btn primary"' + (wiz.busy || !ready ? ' disabled' : '') +
+        ' onclick="createSource()">' + (wiz.busy ? 'Adding…' : 'Add this source') + '</button></div>');
+  }
+
+  /** An inbox isn't a source — it's another way an existing source arrives. */
+  function emailRouteHTML(sources, method) {
+    const targets = sources.filter(s => !s.is_trigger && s.parser);
+    if (!targets.length) {
+      return '<p class="note" style="margin:0">An inbox delivers a document to a source that can ' +
+        'read it, and nothing here has a parser yet. Add the source itself first — as a document ' +
+        'or a website — then come back and add its email route.</p>';
+    }
+    const target = targets.find(t => t.key === wiz.deliversTo) || targets[0];
+    const defaultLabel = target.label + ' inbox';
+    return '<p class="note" style="margin:0 0 12px">' + esc(method.next) + ' ' +
+      'The inbox finds the document and hands it to that source’s parser.</p>' +
+      '<div class="field"><label for="wiz-delivers">Which source does it deliver?</label>' +
+      '<select id="wiz-delivers" onchange="wiz.deliversTo = this.value; renderIngest()">' +
+      targets.map(t => '<option value="' + esc(t.key) + '"' + (t.key === target.key ? ' selected' : '') +
+        '>' + esc(t.label) + '</option>').join('') + '</select></div>' +
+      '<div class="field"><label for="wiz-label">What should this inbox be called?</label>' +
+      '<input type="text" id="wiz-label" value="' + esc(wiz.label || defaultLabel) + '" ' +
+      'autocomplete="off" oninput="wiz.label = this.value"></div>' +
+      '<div class="row"><button class="btn primary"' + (wiz.busy ? ' disabled' : '') +
+      ' onclick="createSource()">' + (wiz.busy ? 'Adding…' : 'Add this route') + '</button></div>';
+  }
+
+  function chooseWizardSample() { const i = el('wiz-sample'); if (i) i.click(); }
+
+  async function handleWizardSample(event) {
+    const input = event && event.target;
+    const file = input && input.files && input.files[0];
+    if (!file) return;
+    clearToast();
+    toast('Saving ' + file.name + '…', true);
+    const form = new FormData();
+    form.append('file', file);
+    try {
+      // Staged under a placeholder key: the source doesn't exist yet, and the
+      // whole point of the sample is to work out what to call it.
+      const res = await fetch('/api/upload_sample/_new', { method: 'POST', body: form });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error((data.detail && data.detail.message) || data.detail || 'upload failed');
+      wiz.sample = { ...data, filename: file.name };
+      toast('Reading it to suggest a name…', true);
+      await renderIngest();
+      try {
+        wiz.suggested = await callTool('suggest_source_name',
+          { sample_path: data.sample_path, filename: file.name });
+        if (!wiz.label) wiz.label = wiz.suggested.label;
+        clearToast();
+      } catch (e) { /* a suggestion is a convenience — never a gate */ }
+      await renderIngest();
+    } catch (e) {
+      toast('Couldn’t save the sample: ' + e.message, false);
+    } finally {
+      if (input) input.value = '';
+    }
+  }
+
+  async function createSource() {
+    const labelEl = el('wiz-label');
+    const label = (labelEl ? labelEl.value : wiz.label).trim();
+    if (!label) { toast('Give it a name first.', false); return; }
+    const deliversEl = el('wiz-delivers');
+    wiz.busy = true;
+    clearToast();
+    await renderIngest();
+    try {
+      const created = await callTool('add_source', {
+        label,
+        method: wiz.method,
+        delivers_to: deliversEl ? deliversEl.value : '',
+      });
+      const key = created.source_key;
+
+      // Credentials are typed by the operator and go straight to the vault.
+      const userEl = el('wiz-user'), passEl = el('wiz-pass');
+      if (userEl && passEl && (userEl.value || passEl.value)) {
+        try { await callTool('set_credentials', { source_key: key, username: userEl.value, password: passEl.value }); }
+        catch (e) { toast('Source added, but the sign-in didn’t save: ' + e.message, false); }
+      }
+      const sample = wiz.sample;
+      closeWizard();
+      // Hand the sample to the new source's build panel — the same panel every
+      // other source builds from, so there's one way to build code, not two.
+      ingestOpen.key = key;               // open the new source, where the work continues
+      if (sample) bs(key).sample = sample;
+      bs(key).expanded = true;
+      await renderIngest();
+      toast('Added ' + label + '. ' + created.next, true);
+    } catch (e) {
+      wiz.busy = false;
+      await renderIngest();
+      toast('Couldn’t add it: ' + e.message, false);
     }
   }
 
@@ -826,7 +1015,11 @@
 
   /** A source that pulls from a portal is maintained as a SCRAPER; anything else
    *  is maintained as a parser. That's the code the operator would fix. */
-  function buildKindFor(s) { return s.has_scraper ? 'scraper' : 'parser'; }
+  function buildKindFor(s) {
+    // Before a scraper exists, only the source itself says it's a portal — so
+    // a newly added website is offered a demonstration, not a sample document.
+    return (s.has_scraper || s.input_type === 'html_scrape') ? 'scraper' : 'parser';
+  }
 
   /** Did the last action on this source end in failure? */
   function lastActionFailed(key) {
@@ -860,7 +1053,7 @@
     const expanded = buildExpanded(s);
     st._expandedNow = expanded;
     const title = kind === 'scraper'
-      ? 'Fix this source’s scraper'
+      ? (s.has_scraper ? 'Fix this source’s scraper' : 'Teach the harness this website')
       : (s.parser_built ? 'Rebuild' : 'Build') + ' this source’s parser';
 
     if (!expanded) {
@@ -883,6 +1076,8 @@
         'You can leave this page open; progress keeps streaming.</span></div>';
     } else if (st.status === 'completed' || st.status === 'failed') {
       inner = buildResultHTML(s, st);
+    } else if (kind === 'scraper' && !s.has_scraper) {
+      inner = demonstrateHTML(s);
     } else if (kind === 'scraper') {
       // Revise needs no demonstration — the agent reads the harness's own
       // failure logs, so a broken scrape is fixable straight from here.
@@ -929,6 +1124,80 @@
       (running ? '<span class="spin"></span>' : '<span class="caret open">&#8250;</span>') +
       (running ? 'Agent is working on the ' + kind + '…' : title) +
       '</div><div class="build-b" id="build-' + sid + '">' + inner + '</div></div>';
+  }
+
+  // ── Demonstrating a portal ─────────────────────────────────────────────────
+  // The scraper equivalent of "here's a sample document": the operator does it
+  // once, by hand, and the harness records what happened for its agent to read.
+  // Finishing is closing the window — there is no terminal to press Enter at.
+  const demoState = {};   // source_key -> { status, message, demo_path, login_url, ... }
+
+  function demonstrateHTML(s) {
+    const d = demoState[s.key] || {};
+    if (d.status === 'running') {
+      return '<div class="stream">' + esc(d.message || 'A browser is open…') + '</div>' +
+        '<p class="note" style="margin:12px 0 0">Sign in, choose the dates or filters you want, ' +
+        'and click Generate/Search so <b>your</b> data is on screen. Then <b>close the browser ' +
+        'window</b> — that’s how you tell the harness you’re done.</p>';
+    }
+
+    const failed = d.status === 'failed'
+      ? '<div class="verdict fail">' + esc(d.message || 'The demonstration wasn’t captured') + '</div>' : '';
+
+    if (d.status === 'completed') {
+      return failed +
+        '<div class="verdict pass">Demonstration captured — ' + (d.captured_requests || 0) +
+        ' requests, ' + (d.recorded_actions || 0) + ' clicks</div>' +
+        (d.login_url ? '<div class="kv">Signed in at <b>' + esc(d.login_url) + '</b> — saved, so the ' +
+          'harness knows where to go next time.</div>' : '') +
+        '<p class="note" style="margin:10px 0 12px">The agent will read that demonstration, write ' +
+        '<code>core/scrapers/' + esc(s.key) + '.py</code> <b>and a test</b>, and the harness re-runs ' +
+        'that test independently before anything is used.</p>' +
+        '<div class="row"><button class="btn primary" onclick="startBuild(\'' + s.key + '\')">' +
+        'Have the agent write the scraper</button>' +
+        '<button class="btn" onclick="startDemo(\'' + s.key + '\')">Demonstrate again</button></div>';
+    }
+
+    return failed +
+      '<p class="note" style="margin:0 0 12px">Show the harness how to get this data, once. ' +
+      'A browser opens — sign in, set your filters, and click Generate/Search until your data is on ' +
+      'screen, then close the window. The harness records the network traffic and your clicks, and ' +
+      'its agent writes the scraper from that. No URL needed: it learns where you went.</p>' +
+      '<div class="row"><button class="btn primary" onclick="startDemo(\'' + s.key + '\')">' +
+      'Open a browser and show it</button></div>';
+  }
+
+  async function startDemo(key) {
+    clearToast();
+    try {
+      await callTool('start_demo', { source_key: key });
+      demoState[key] = { status: 'running', message: 'A browser is opening…' };
+      await renderIngest();
+      pollDemo(key);
+    } catch (e) {
+      demoState[key] = { status: 'failed', message: e.message };
+      await renderIngest();
+    }
+  }
+
+  function pollDemo(key) {
+    const tick = async () => {
+      let d;
+      try { d = await callTool('demo_status', { source_key: key }); }
+      catch (e) { demoState[key] = { status: 'failed', message: 'Lost contact with the demonstration: ' + e.message }; await renderIngest(); return; }
+      if (d.status === 'running') {
+        // Don't re-render while they're working in the browser.
+        demoState[key] = d;
+        setTimeout(tick, 2000);
+        return;
+      }
+      demoState[key] = d;
+      // The demo taught the harness the portal's URL, so the source changed.
+      await renderIngest();
+      toast(d.status === 'completed' ? d.message : ('Demonstration failed: ' + d.message),
+            d.status === 'completed');
+    };
+    setTimeout(tick, 2000);
   }
 
   function buildResultHTML(s, st) {
@@ -1040,6 +1309,9 @@
     const args = { kind, source_key: key, mode: mode || 'build' };
     if (kind === 'parser') args.sample_path = st.sample.sample_path;
     if (mode === 'revise') args.feedback = st.feedback || '';
+    // Reuse the demonstration just captured rather than asking for another one.
+    const demo = demoState[key];
+    if (kind === 'scraper' && demo && demo.demo_path) args.demo_path = demo.demo_path;
     try {
       await callTool('start_build', args);
       st.status = 'running'; st.events = []; st.result = null; st.passed = false; st.message = null;
