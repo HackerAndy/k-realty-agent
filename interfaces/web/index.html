@@ -160,6 +160,29 @@
   .accbody { padding: 16px; }
   .accbody .actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
 
+  /* ── Funnel: several ways in, one body of data ── */
+  .funnel { display: grid; grid-template-columns: minmax(0,1fr) auto minmax(0,1fr); align-items: center; gap: 0; margin-bottom: 12px; }
+  .doors { display: flex; flex-direction: column; gap: 8px; }
+  .door { display: flex; align-items: center; gap: 9px; font-size: 12.5px; border: 1px solid var(--border);
+    border-radius: 10px; padding: 9px 12px; background: color-mix(in oklab, var(--muted) 5%, var(--card)); }
+  .door.on { border-color: color-mix(in oklab, var(--accent) 45%, var(--border)); background: color-mix(in oklab, var(--accent) 10%, var(--card)); }
+  .door.off { opacity: .55; }
+  .door .t { font-weight: 600; }
+  .door .w { color: var(--muted); font-size: 11.5px; margin-left: auto; text-align: right; }
+  .door .star { font-size: 13px; width: 15px; flex: none; color: var(--accent); }
+  .door .star.set { color: var(--border); cursor: pointer; }
+  .door .star.set:hover { color: var(--accent); }
+  .pipe { width: 58px; display: grid; place-items: center; color: var(--muted); opacity: .6; }
+  .catch { padding-left: 10px; }
+  .catch .big { font-size: 24px; font-weight: 700; letter-spacing: -.02em; line-height: 1.1; }
+  .catch .cap { color: var(--muted); font-size: 12px; }
+  .verdict-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
+  .verdict-txt { font-size: 12.5px; font-weight: 600; }
+  .verdict-txt.self { color: var(--success); }
+  .verdict-txt.manual { color: #9a6a12; }
+  :root[data-theme="dark"] .verdict-txt.manual { color: #d7ab5c; }
+  @media (max-width: 620px) { .funnel { grid-template-columns: 1fr; } .pipe { display: none; } .catch { padding: 10px 0 0; } }
+
   .kstrip { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; margin-bottom: 14px; }
   .kstrip .k { background: var(--card); padding: 11px 13px; }
   .kstrip .k .l { font-size: 11.5px; color: var(--muted); }
@@ -503,17 +526,93 @@
     renderIngest();
   }
 
-  function sourceActionHTML(s, isPending) {
+  const ROUTE_ICON = { email: '✉', scrape: '↻', upload: '⬆' };
+
+  /** One source, several ways in. The picture IS the model: doors on the left,
+   *  one body of data on the right. ★ is the default — what "Get latest" runs. */
+  function funnelHTML(s) {
+    const routes = s.transports || [];
+    if (!routes.length) return '';
+    const n = routes.length;
+    const h = Math.max(78, n * 44), mid = h / 2, top = 14, bot = h - 14;
+    let paths = '<path d="M2 ' + mid + ' H56" stroke="currentColor" stroke-width="1.5" fill="none"/>';
+    if (n > 1) {
+      paths = '<path d="M2 ' + top + ' C36 ' + top + ', 26 ' + mid + ', 56 ' + mid + '" stroke="currentColor" stroke-width="1.5" fill="none"/>' +
+              '<path d="M2 ' + bot + ' C36 ' + bot + ', 26 ' + mid + ', 56 ' + mid + '" stroke="currentColor" stroke-width="1.5" fill="none"/>' +
+              (n > 2 ? '<path d="M2 ' + mid + ' H56" stroke="currentColor" stroke-width="1.5" fill="none"/>' : '');
+    }
+
+    const doors = routes.map(r => {
+      const isDefault = r.id === s.default_transport;
+      // Only a working route can be promoted; an unavailable one shows why instead.
+      const star = isDefault
+        ? '<span class="star" title="default — this is what Get latest runs">★</span>'
+        : (r.available
+            ? '<span class="star set" title="make this the default" onclick="pinDefault(\'' + s.key + '\',\'' + r.id + '\')">☆</span>'
+            : '<span class="star"></span>');
+      const right = r.available
+        ? (r.unattended ? 'can run unattended' : 'needs you')
+        : esc(r.reason || 'not available');
+      return '<div class="door' + (isDefault ? ' on' : '') + (r.available ? '' : ' off') + '" title="' + esc(r.detail) + '">' +
+        star + '<span>' + (ROUTE_ICON[r.id] || '•') + '</span>' +
+        '<span class="t">' + esc(r.label) + '</span>' +
+        '<span class="w">' + right + '</span></div>';
+    }).join('');
+
+    const data = sourceTxnCache[s.key];
+    const count = data && data.count ? data.count : 0;
+    return '<div class="funnel"><div class="doors">' + doors + '</div>' +
+      '<div class="pipe"><svg viewBox="0 0 58 ' + h + '" style="height:' + h + 'px;width:58px" aria-hidden="true">' +
+      paths + '<circle cx="56" cy="' + mid + '" r="3" fill="currentColor"/></svg></div>' +
+      '<div class="catch"><div class="big">' + count + '</div>' +
+      '<div class="cap">transactions</div>' +
+      '<div class="cap" style="opacity:.75">however they arrived</div></div></div>';
+  }
+
+  /** The month-to-month answer: does this source look after itself, or need you? */
+  function verdictHTML(s, isPending) {
+    const routes = s.transports || [];
+    const def = routes.find(r => r.id === s.default_transport);
+    let txt;
+    if (!def) {
+      txt = '<span class="verdict-txt manual">No working route yet — build a parser or a scraper below.</span>';
+    } else if (s.can_automate) {
+      txt = '<span class="verdict-txt self">★ Can run itself — ' + esc(def.label.toLowerCase()) + '</span>';
+    } else {
+      txt = '<span class="verdict-txt manual">Needs you — ' + esc(def.label.toLowerCase()) +
+            ' can’t run unattended</span>';
+    }
+
     let btns = '';
-    if (isPending) btns += '<button class="btn" onclick="act(\'activate_parser\',{source_key:\'' + s.key + '\'})">Activate parser</button>';
-    if (s.has_scraper) btns += '<button class="btn" onclick="act(\'run_scraper\',{source_key:\'' + s.key + '\'})">Run scraper</button>';
-    else if (s.is_trigger) btns += '<button class="btn" onclick="act(\'fetch_source\',{source_key:\'' + s.key + '\'})">Fetch now</button>';
-    else if (canUploadForInputType(s.input_type)) btns += sourceUploadAction(s.key);
-    return btns;
+    if (def) {
+      btns += def.id === 'upload'
+        ? '<button class="btn primary" onclick="chooseUpload(\'' + s.key + '\')">Get latest — choose a file</button>'
+        : '<button class="btn primary" onclick="act(\'get_latest\',{source_key:\'' + s.key + '\'})">Get latest</button>';
+    }
+    if (isPending) {
+      btns += '<button class="btn" onclick="act(\'activate_parser\',{source_key:\'' + s.key + '\'})">Approve the parser</button>';
+    }
+    // The picker must exist in the DOM whenever upload is usable — but skip its
+    // button when "Get latest" already opens the same dialog.
+    if (routes.some(r => r.id === 'upload' && r.available)) {
+      btns += sourceUploadAction(s.key, !(def && def.id === 'upload'));
+    }
+    return '<div class="verdict-row">' + txt + btns + '</div>';
+  }
+
+  async function pinDefault(key, transport) {
+    clearToast();
+    try {
+      const r = await callTool('set_default_transport', { source_key: key, transport });
+      toast('Default is now ' + transport + (r.can_automate ? ' — this route can run unattended.' : '.'), true);
+      await renderIngest();
+    } catch (e) {
+      toast('Couldn’t set the default: ' + e.message, false);
+    }
   }
 
   function sourceBodyHTML(s, isPending) {
-    const actions = '<div class="actions">' + sourceActionHTML(s, isPending) + '</div>' + sourceUploadStepsRow(s.key);
+    const actions = funnelHTML(s) + verdictHTML(s, isPending) + sourceUploadStepsRow(s.key);
     // The build/fix panel sits directly under the action + step timeline, BEFORE
     // the data: when a run fails, "what to do next" belongs next to the failure,
     // not below a table the operator has to scroll past to find it.
@@ -522,11 +621,11 @@
     if (!data) return head + '<div class="empty">Loading transactions…</div>';
     if (data.error) return head + '<div class="notbuilt">Couldn’t load transactions: ' + esc(data.error) + '</div>';
     if (!data.transactions || !data.transactions.length) {
-      const msg = s.is_trigger
-        ? 'This is a <b>delivery trigger</b>, not a ledger. Fetched documents are ingested under the source they’re routed to — nothing to validate here directly.'
-        : (s.parser_built
-            ? 'No transactions yet. Acquire data above to validate it here.'
-            : 'No parser for this source yet — build one above, then acquire data.');
+      // Carriers are no longer listed as sources, so the old "this is a delivery
+      // trigger, not a ledger" apology has nothing left to explain.
+      const msg = s.default_transport
+        ? 'No transactions yet — use <b>Get latest</b> above to bring some in.'
+        : 'No working route yet. Build a parser or a scraper below, then get the data.';
       return head + '<div class="notbuilt">' + msg + '</div>';
     }
     return head + '<div id="detail-' + sourceDomId(s.key) + '" class="__detail">' +
@@ -917,10 +1016,13 @@
     }
   }
 
-  function sourceUploadAction(sourceKey) {
+  /** `withButton: false` when "Get latest" already IS the upload action — the
+   *  file picker still has to exist in the DOM, but a second button that opens
+   *  the same dialog is just noise. */
+  function sourceUploadAction(sourceKey, withButton = true) {
     const sid = sourceDomId(sourceKey);
     return '<div class="src-actions">' +
-      '<button class="btn" onclick="chooseUpload(\'' + sourceKey + '\')">Upload file</button>' +
+      (withButton ? '<button class="btn" onclick="chooseUpload(\'' + sourceKey + '\')">Upload file</button>' : '') +
       '<input id="upload-input-' + sid + '" type="file" style="display:none" accept=".pdf,.csv,text/csv,application/pdf" onchange="handleUploadFile(\'' + sourceKey + '\', event)" />' +
       '<div class="upload-progress" id="upload-progress-' + sid + '" style="display:none">' +
       '<progress id="upload-bar-' + sid + '" max="100" value="0"></progress>' +
@@ -933,9 +1035,6 @@
     return '<div class="upload-steps-row" id="upload-steps-row-' + sid + '"><div class="upload-steps" id="upload-steps-' + sid + '"></div></div>';
   }
 
-  function canUploadForInputType(inputType) {
-    return inputType === 'pdf_statement' || inputType === 'csv_export' || inputType === 'html_scrape';
-  }
 
   function chooseUpload(sourceKey) {
     const input = el('upload-input-' + sourceDomId(sourceKey));

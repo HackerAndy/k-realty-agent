@@ -36,6 +36,7 @@ services:
   access: email_attachment
   parser: buildium_owner_statement
   status: implemented
+  default_transport: email
 - key: dfcu_financial_bank
   label: DFCU Financial bank
   login_url: https://dfcufinancial.com
