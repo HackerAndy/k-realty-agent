@@ -7,6 +7,7 @@ a response shaped like Buildium's /manager/api/generalLedger/transactions payloa
 agent-built scraper is covered like the hand-written parsers are.
 """
 
+from core import reconcile
 from core.scrapers.epic_property_management import SERVICE_KEY, _extract
 
 # Shaped like the real API: account wrappers, some with no activity.
@@ -54,3 +55,82 @@ def test_extract_skips_rows_with_unparseable_date():
     ]}]
     txns = _extract(raw)
     assert len(txns) == 1 and txns[0].description == "good"
+
+
+def test_extract_records_reconciliation_when_channel_open():
+    """Verify that _extract calls reconcile.record() for accounts with a Total."""
+    with reconcile.channel("test_recon"):
+        _extract(RAW)
+
+    checks = reconcile.read("test_recon")
+    # Capital One (Total=-11.62, one txn of -11.62) and Rent Income (Total=1421, one txn of 1421)
+    # Advertising has Total=0 but no transactions, so no record.
+    assert len(checks) == 2
+
+    by_label = {c["label"]: c for c in checks}
+    assert by_label["Capital One"]["expected"] == -11.62
+    assert by_label["Capital One"]["actual"] == -11.62
+    assert by_label["Capital One"]["balanced"] is True
+
+    assert by_label["Rent Income"]["expected"] == 1421.00
+    assert by_label["Rent Income"]["actual"] == 1421.00
+    assert by_label["Rent Income"]["balanced"] is True
+
+
+def test_extract_reconciliation_noop_without_channel():
+    """When no reconcile channel is open, record() is a no-op — tests still pass."""
+    txns = _extract(RAW)
+    assert len(txns) == 2  # unaffected by reconciliation logic
+
+
+def test_extract_multi_row_account_reconciliation():
+    """Multiple transactions in one account should sum to the Total."""
+    raw = [{
+        "Name": "Test Account", "Total": 100.0,
+        "Transactions": [
+            {"Id": 1, "Date": "2026-07-01", "Amount": 60.0, "Description": "A"},
+            {"Id": 2, "Date": "2026-07-02", "Amount": 40.0, "Description": "B"},
+        ],
+    }]
+    with reconcile.channel("test_multi"):
+        txns = _extract(raw)
+
+    assert len(txns) == 2
+    checks = reconcile.read("test_multi")
+    assert len(checks) == 1
+    assert checks[0]["expected"] == 100.0
+    assert checks[0]["actual"] == 100.0
+    assert checks[0]["balanced"] is True
+
+
+def test_extract_reconciliation_mismatch():
+    """If extracted sum differs from Total, reconciliation should flag it."""
+    raw = [{
+        "Name": "Mismatched", "Total": 200.0,
+        "Transactions": [
+            {"Id": 1, "Date": "2026-07-01", "Amount": 50.0, "Description": "A"},
+            {"Id": 2, "Date": "2026-07-02", "Amount": 50.0, "Description": "B"},
+        ],
+    }]
+    with reconcile.channel("test_mismatch"):
+        _extract(raw)
+
+    checks = reconcile.read("test_mismatch")
+    assert len(checks) == 1
+    assert checks[0]["expected"] == 200.0
+    assert checks[0]["actual"] == 100.0
+    assert checks[0]["balanced"] is False
+
+
+def test_extract_no_reconciliation_when_total_is_none():
+    """Accounts without a Total field should not produce a reconciliation record."""
+    raw = [{
+        "Name": "No Total", "Transactions": [
+            {"Id": 1, "Date": "2026-07-01", "Amount": 50.0, "Description": "A"},
+        ],
+    }]
+    with reconcile.channel("test_no_total"):
+        _extract(raw)
+
+    checks = reconcile.read("test_no_total")
+    assert len(checks) == 0

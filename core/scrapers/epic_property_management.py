@@ -21,7 +21,7 @@ from typing import Any
 
 from playwright.sync_api import Page
 
-from core import progress
+from core import progress, reconcile
 from core.models import Transaction
 from core.observability import get_logger
 from core.scrapers.base import ScrapeError
@@ -125,11 +125,17 @@ def _extract(raw: list[dict]) -> list[Transaction]:
         }
 
     We flatten across accounts, skipping accounts with no transactions.
+    For every account that has a ``Total`` control total, we record a
+    reconciliation check (no-op when no reconcile channel is open).
     """
     transactions: list[Transaction] = []
 
     for acct in raw:
         acct_name = acct.get("Name", "")
+        acct_total = acct.get("Total")  # may be None for some accounts
+
+        acct_amounts: list[float] = []
+
         for txn in acct.get("Transactions", []):
             # ── date ──
             date_str = txn.get("Date", "")
@@ -172,6 +178,16 @@ def _extract(raw: list[dict]) -> list[Transaction]:
                     fields=fields,
                     source_uri=f"{BASE_URL}/manager/app/accounting/generalLedger",
                 )
+            )
+
+            acct_amounts.append(amount)
+
+        # ── reconciliation: compare extracted sum against source's Total ──
+        if acct_total is not None and acct_amounts:
+            reconcile.record(
+                acct_name,
+                expected=float(acct_total),
+                actual=sum(acct_amounts),
             )
 
     return transactions
