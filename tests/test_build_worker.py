@@ -75,7 +75,11 @@ def test_worker_rejects_a_missing_sample(tmp_path):
 # --- start_build guards ------------------------------------------------------
 
 @pytest.fixture
-def one_source(monkeypatch):
+def one_source(monkeypatch, tmp_path):
+    # start_build touches its run file BEFORE spawning the worker, so without an
+    # isolated cwd these tests litter the operator's real data/logs/builds/ with
+    # empty run files on every suite run.
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(mcp_tools, "_load_services",
                         lambda: [Service(key="dfcu_financial_bank", label="DFCU")])
     monkeypatch.setattr(mcp_tools.llm_provider, "is_configured", lambda: True)
