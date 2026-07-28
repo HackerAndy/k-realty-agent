@@ -167,6 +167,10 @@
     border-radius: 10px; padding: 9px 12px; background: color-mix(in oklab, var(--muted) 5%, var(--card)); }
   .door.on { border-color: color-mix(in oklab, var(--accent) 45%, var(--border)); background: color-mix(in oklab, var(--accent) 10%, var(--card)); }
   .door.off { opacity: .55; }
+  /* The whole box runs the route; only the star is carved out for setting default. */
+  .door.go { cursor: pointer; }
+  .door.go:hover { border-color: color-mix(in oklab, var(--accent) 55%, var(--border)); background: color-mix(in oklab, var(--accent) 8%, var(--card)); }
+  .door.live .w { color: var(--text); font-weight: 600; }
   .door .t { font-weight: 600; }
   .door .w { color: var(--muted); font-size: 11.5px; margin-left: auto; text-align: right; }
   .door .star { font-size: 13px; width: 15px; flex: none; color: var(--accent); }
@@ -535,31 +539,48 @@
     if (!routes.length) return '';
     const n = routes.length;
     const h = Math.max(78, n * 44), mid = h / 2, top = 14, bot = h - 14;
-    let paths = '<path d="M2 ' + mid + ' H56" stroke="currentColor" stroke-width="1.5" fill="none"/>';
+    // Solid = the route the data on screen ACTUALLY came by; dashed = available
+    // but not used. So the drawing is history, not configuration — the ★ carries
+    // the config meaning. Falls back to the default before anything has run.
+    const data = sourceTxnCache[s.key];
+    const live = (data && data.last_transport) || s.default_transport;
+    const liveIndex = routes.findIndex(r => r.id === live);
+    const dash = i => (i === liveIndex ? '' : ' stroke-dasharray="3 3"');
+
+    let paths = '<path d="M2 ' + mid + ' H56" stroke="currentColor" stroke-width="1.5" fill="none"' + dash(0) + '/>';
     if (n > 1) {
-      paths = '<path d="M2 ' + top + ' C36 ' + top + ', 26 ' + mid + ', 56 ' + mid + '" stroke="currentColor" stroke-width="1.5" fill="none"/>' +
-              '<path d="M2 ' + bot + ' C36 ' + bot + ', 26 ' + mid + ', 56 ' + mid + '" stroke="currentColor" stroke-width="1.5" fill="none"/>' +
-              (n > 2 ? '<path d="M2 ' + mid + ' H56" stroke="currentColor" stroke-width="1.5" fill="none"/>' : '');
+      const ys = routes.map((_, i) => n === 1 ? mid : top + (bot - top) * (i / (n - 1)));
+      paths = ys.map((y, i) =>
+        (Math.abs(y - mid) < 1
+          ? '<path d="M2 ' + y + ' H56"'
+          : '<path d="M2 ' + y + ' C36 ' + y + ', 26 ' + mid + ', 56 ' + mid + '"') +
+        ' stroke="currentColor" stroke-width="1.5" fill="none"' + dash(i) + '/>').join('');
     }
 
     const doors = routes.map(r => {
       const isDefault = r.id === s.default_transport;
-      // Only a working route can be promoted; an unavailable one shows why instead.
+      // Two separate targets on purpose: the star sets the default, the rest of
+      // the box RUNS the route. One control doing both was the confusion.
       const star = isDefault
-        ? '<span class="star" title="default — this is what Get latest runs">★</span>'
+        ? '<span class="star" title="this is the default">★</span>'
         : (r.available
-            ? '<span class="star set" title="make this the default" onclick="pinDefault(\'' + s.key + '\',\'' + r.id + '\')">☆</span>'
+            ? '<span class="star set" title="make this the default" ' +
+              'onclick="event.stopPropagation();pinDefault(\'' + s.key + '\',\'' + r.id + '\')">☆</span>'
             : '<span class="star"></span>');
       const right = r.available
-        ? (r.unattended ? 'can run unattended' : 'needs you')
+        ? (r.id === live ? 'last used' : (r.unattended ? 'can run unattended' : 'needs you'))
         : esc(r.reason || 'not available');
-      return '<div class="door' + (isDefault ? ' on' : '') + (r.available ? '' : ' off') + '" title="' + esc(r.detail) + '">' +
+      const runnable = r.available;
+      return '<div class="door' + (isDefault ? ' on' : '') + (runnable ? ' go' : ' off') +
+        (r.id === live ? ' live' : '') + '"' +
+        (runnable ? ' onclick="runRoute(\'' + s.key + '\',\'' + r.id + '\')"' +
+                    ' title="run this now — ' + esc(r.detail) + '"'
+                  : ' title="' + esc(r.reason || r.detail) + '"') + '>' +
         star + '<span>' + (ROUTE_ICON[r.id] || '•') + '</span>' +
         '<span class="t">' + esc(r.label) + '</span>' +
         '<span class="w">' + right + '</span></div>';
     }).join('');
 
-    const data = sourceTxnCache[s.key];
     const count = data && data.count ? data.count : 0;
     return '<div class="funnel"><div class="doors">' + doors + '</div>' +
       '<div class="pipe"><svg viewBox="0 0 58 ' + h + '" style="height:' + h + 'px;width:58px" aria-hidden="true">' +
@@ -567,6 +588,14 @@
       '<div class="catch"><div class="big">' + count + '</div>' +
       '<div class="cap">transactions</div>' +
       '<div class="cap" style="opacity:.75">however they arrived</div></div></div>';
+  }
+
+  /** Click the box, run that route. Upload opens the picker; the rest just go. */
+  function runRoute(key, transport) {
+    if (transport === 'upload') return chooseUpload(key);
+    if (transport === 'scrape') return act('run_scraper', { source_key: key });
+    if (transport === 'email') return act('get_latest', { source_key: key });
+    return act('get_latest', { source_key: key });
   }
 
   /** The month-to-month answer: does this source look after itself, or need you? */
@@ -583,19 +612,15 @@
             ' can’t run unattended</span>';
     }
 
+    // No "Get latest" button: clicking a door runs that route, so a separate
+    // button would be a second control for the same act.
     let btns = '';
-    if (def) {
-      btns += def.id === 'upload'
-        ? '<button class="btn primary" onclick="chooseUpload(\'' + s.key + '\')">Get latest — choose a file</button>'
-        : '<button class="btn primary" onclick="act(\'get_latest\',{source_key:\'' + s.key + '\'})">Get latest</button>';
-    }
     if (isPending) {
       btns += '<button class="btn" onclick="act(\'activate_parser\',{source_key:\'' + s.key + '\'})">Approve the parser</button>';
     }
-    // The picker must exist in the DOM whenever upload is usable — but skip its
-    // button when "Get latest" already opens the same dialog.
+    // The file picker still has to exist in the DOM for the upload door to open.
     if (routes.some(r => r.id === 'upload' && r.available)) {
-      btns += sourceUploadAction(s.key, !(def && def.id === 'upload'));
+      btns += sourceUploadAction(s.key, false);
     }
     return '<div class="verdict-row">' + txt + btns + '</div>';
   }

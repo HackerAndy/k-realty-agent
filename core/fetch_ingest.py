@@ -33,7 +33,7 @@ def persist_scraped(transactions: list[Transaction], source_uri: str) -> dict:
     key the scraper stamped), so scraped runs sit beside emailed/parsed runs in
     data/parsed/ and are distinguishable by source."""
     key = transactions[0].source_key if transactions else "portal_scrape"
-    return _persist(key, transactions, source_uri, "portal_scrape", None)
+    return _persist(key, transactions, source_uri, "portal_scrape", None, transport="scrape")
 
 
 def fetch_and_ingest(
@@ -110,7 +110,7 @@ def fetch_and_ingest(
         _step("save_attachment", "Save attachment", filename=doc.filename, path=str(saved))
         on_event(f"Fetched '{doc.filename}' (received {doc.received or 'unknown date'}) "
                  f"→ ingesting via {target.label}'s parser.")
-        run = ingest_source(cfg.delivers_to, saved, manifest=manifest)
+        run = ingest_source(cfg.delivers_to, saved, manifest=manifest, transport="email")
         run["fetched_from"] = source_key
         run["fetched_message_id"] = doc.message_id
         runs.append(run)

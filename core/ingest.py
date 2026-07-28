@@ -46,7 +46,8 @@ def _dump_debug_text(source_key: str, extracted_text: str) -> Path:
     return dump_path
 
 
-def _persist(source_key: str, transactions: list[Transaction], input_path: Path, method: str, parser: str | None) -> dict:
+def _persist(source_key: str, transactions: list[Transaction], input_path: Path, method: str,
+             parser: str | None, transport: str | None = None) -> dict:
     month_key = f"{transactions[0].date:%Y-%m}" if transactions else "unknown"
     run = {
         "parsed_at": datetime.now(UTC).isoformat(),
@@ -54,6 +55,10 @@ def _persist(source_key: str, transactions: list[Transaction], input_path: Path,
         "source_input": str(input_path),
         "parser": parser,
         "extraction_method": method,
+        # WHICH ROUTE delivered this data (upload | scrape | email). The funnel
+        # draws the route the current data actually arrived by as a solid line,
+        # so this has to be recorded rather than guessed from the parser used.
+        "transport": transport,
         "month": month_key,
         "transaction_count": len(transactions),
         "transactions": [t.model_dump(mode="json") for t in transactions],
@@ -85,6 +90,7 @@ def ingest_source(
     input_path: Path,
     allow_llm_fallback: bool = False,
     manifest: ServiceManifest | None = None,
+    transport: str = "upload",
 ) -> dict:
     """Run a source's committed parser and persist the transactions.
 
@@ -124,9 +130,9 @@ def ingest_source(
         from core.tools.llm_extractor import extract_transactions
 
         transactions = extract_transactions(exc.extracted_text, source_key, source.label)
-        return _persist(source_key, transactions, input_path, "llm_fallback", source.parser)
+        return _persist(source_key, transactions, input_path, "llm_fallback", source.parser, transport)
 
-    return _persist(source_key, transactions, input_path, "deterministic_parser", source.parser)
+    return _persist(source_key, transactions, input_path, "deterministic_parser", source.parser, transport)
 
 
 def ingest_via_llm(

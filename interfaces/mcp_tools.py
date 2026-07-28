@@ -194,6 +194,8 @@ def source_transactions(source_key: str, limit: int = 500) -> dict:
     txns = transactions_from_run(run)
     return {"source_key": run.get("source_key"), "month": run.get("month"),
             "parsed_at": run.get("parsed_at"), "run_path": run.get("run_path"),
+            # Which route actually delivered this data — the funnel draws it solid.
+            "last_transport": run.get("transport"),
             **_summary(txns), "transactions": _rows(txns, limit)}
 
 

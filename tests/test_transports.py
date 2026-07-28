@@ -10,6 +10,8 @@ runs the default unattended. A source can legitimately have a default and no
 possible automation.
 """
 
+import pathlib
+
 import pytest
 
 from core import transports
@@ -199,3 +201,55 @@ def test_get_latest_routes_email_through_its_carrier(two_sources, monkeypatch):
 
     assert result["transport"] == EMAIL
     assert seen["key"] == "email", "must fetch via the CARRIER, not the source"
+
+
+# --- which route actually delivered the data ---------------------------------
+
+def test_a_run_records_the_route_that_delivered_it(tmp_path, monkeypatch):
+    """The funnel draws the route the CURRENT data arrived by as a solid line, so
+    it has to be recorded — it cannot be inferred from the parser used, since an
+    uploaded file and an emailed one run the very same parser."""
+    import core.ingest as ingest
+    from core.tools.service_manifest import ServiceManifest
+
+    monkeypatch.setattr(ingest, "DATA_DIR", tmp_path / "parsed")
+    manifest = ServiceManifest(tmp_path / "services.yaml")
+    manifest.add(Service(key="epic_property_management", label="Epic",
+                         parser="buildium_owner_statement", status="implemented"))
+    sample = pathlib.Path("tests/fixtures/sample_owner_statement.pdf")
+
+    uploaded = ingest.ingest_source("epic_property_management", sample, manifest=manifest)
+    assert uploaded["transport"] == "upload", "an upload defaults to the upload route"
+
+    emailed = ingest.ingest_source("epic_property_management", sample,
+                                   manifest=manifest, transport="email")
+    assert emailed["transport"] == "email", "the same parser, a different route"
+
+
+def test_a_scrape_records_itself_as_the_scrape_route(tmp_path, monkeypatch):
+    import core.ingest as ingest
+    from core.fetch_ingest import persist_scraped
+    from core.models import Transaction
+    from datetime import datetime
+
+    monkeypatch.setattr(ingest, "DATA_DIR", tmp_path / "parsed")
+    txn = Transaction(source_key="epic", date=datetime(2026, 7, 1), amount=1.0,
+                      description="x", fields={"Amount": "1.00"})
+
+    assert persist_scraped([txn], "https://example.com")["transport"] == "scrape"
+
+
+def test_source_transactions_reports_the_last_route_used(tmp_path, monkeypatch):
+    import core.ingest as ingest
+    from interfaces import mcp_tools
+    from core.tools.service_manifest import ServiceManifest
+
+    monkeypatch.setattr(ingest, "DATA_DIR", tmp_path / "parsed")
+    manifest = ServiceManifest(tmp_path / "services.yaml")
+    manifest.add(Service(key="epic_property_management", label="Epic",
+                         parser="buildium_owner_statement", status="implemented"))
+    ingest.ingest_source("epic_property_management",
+                         pathlib.Path("tests/fixtures/sample_owner_statement.pdf"),
+                         manifest=manifest, transport="email")
+
+    assert mcp_tools.source_transactions("epic_property_management")["last_transport"] == "email"
