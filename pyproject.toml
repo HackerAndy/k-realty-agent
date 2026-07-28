@@ -37,6 +37,7 @@ fastapi = "^0.139.2"
 pytest = ">=8.0"
 ruff = ">=0.5"
 reportlab = "^5.0.0"
+coverage = "^7.15.2"
 
 [tool.ruff]
 line-length = 100

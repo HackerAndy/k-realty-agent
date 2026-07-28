@@ -17,3 +17,6 @@ _googleEmail/
 # The earlier patterns were missing the ".", so they matched nothing.
 *.csv
 !tests/fixtures/*.csv
+
+# Coverage data written by the code-gen gate (orchestration/verify.py)
+.coverage*

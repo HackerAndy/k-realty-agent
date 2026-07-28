@@ -46,7 +46,7 @@ def build_parser_for_source(
     )
 
     result, verification = run_codegen_gated(
-        task, system, lambda: verify_parser(source_key, sample_path), on_event=on_event
+        task, system, lambda: verify_parser(source_key, sample_path), on_event=on_event, test_path=test_path_for("parser", source_key)
     )
     return {
         "source_key": source_key,
@@ -82,6 +82,7 @@ def revise_parser_for_source(
     result, verification = run_codegen_gated(
         task, system, lambda: verify_parser(source_key, sample_path),
         on_event=on_event, require_changes=True,
+        test_path=test_path_for("parser", source_key),
     )
     return {
         "source_key": source_key,

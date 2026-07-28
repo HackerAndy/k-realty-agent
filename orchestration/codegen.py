@@ -18,6 +18,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from orchestration.agent import AgentResult, run_agent
+from orchestration.verify import covers_changes
 
 # Prepended to EVERY code-gen system prompt — the rules that apply to ALL code the
 # embedded agent writes, regardless of the specific task.
@@ -91,6 +92,25 @@ def fold_untested(verification: dict, tool_calls: list[tuple[str, dict]]) -> dic
     return verification
 
 
+def fold_uncovered(verification: dict, tool_calls: list[tuple[str, dict]], test_path: str) -> dict:
+    """Require the test to EXERCISE what changed, not merely to exist.
+
+    "Was a test written?" and "does a test cover this?" look identical when the
+    agent leaves a stale test in place. Measured on this project's own history:
+    the XSRF fix changed 22 executable lines and its passing test executed 4 of
+    them — the other 18, including the whole token path, never ran.
+    """
+    code = [p for p in files_written(tool_calls) if _is_code_file(p)]
+    if not code:
+        return verification
+    result = covers_changes(test_path, code)
+    verification["coverage"] = result
+    if result.get("checked") and not result["ok"]:
+        verification["uncovered_changes"] = result.get("uncovered", {})
+        verification["ok"] = False
+    return verification
+
+
 def fold_noop(verification: dict, tool_calls: list[tuple[str, dict]]) -> dict:
     """A fix that changed NOTHING is not a success, however green the tests look.
 
@@ -112,6 +132,7 @@ def run_codegen_gated(
     on_event: Callable[[str], None] = print,
     *,
     require_changes: bool = False,
+    test_path: str | None = None,
     max_retries: int = 1,
     **kwargs,
 ) -> tuple[AgentResult, dict]:
@@ -130,10 +151,16 @@ def run_codegen_gated(
     A genuinely FAILING test is not retried here: that's a real engineering
     problem for the operator to see and direct, not a rule the agent forgot.
     """
+    def _assess(res):
+        v = fold_untested(verify(), res.tool_calls)
+        if test_path and not v.get("untested_code"):
+            v = fold_uncovered(v, res.tool_calls, test_path)
+        if require_changes:
+            v = fold_noop(v, res.tool_calls)
+        return v
+
     result = run_agent(task, CODE_STANDARDS + "\n\n" + system, on_event=on_event, **kwargs)
-    verification = fold_untested(verify(), result.tool_calls)
-    if require_changes:
-        verification = fold_noop(verification, result.tool_calls)
+    verification = _assess(result)
 
     for _ in range(max_retries):
         reasons = []
@@ -144,6 +171,14 @@ def run_codegen_gated(
                 "what you changed, and run it. If the change genuinely cannot be unit-tested "
                 "(pure wiring such as a header or URL), say so explicitly and say what a live "
                 "run would have to show instead — do not write a test that only restates the code."
+            )
+        if verification.get("uncovered_changes"):
+            detail = "; ".join(f"{p} lines {ls}" for p, ls in verification["uncovered_changes"].items())
+            reasons.append(
+                "Your test passes but never RUNS the code you changed — " + detail + ". A test that "
+                "leaves the change unexecuted proves nothing. Extend it so those lines actually run. "
+                "If they genuinely cannot be exercised in a unit test (pure wiring such as a header "
+                "or URL), say so explicitly and say what a live run would have to show instead."
             )
         if verification.get("no_changes"):
             reasons.append(
@@ -160,8 +195,6 @@ def run_codegen_gated(
             on_event=on_event,
             **kwargs,
         )
-        verification = fold_untested(verify(), result.tool_calls)
-        if require_changes:
-            verification = fold_noop(verification, result.tool_calls)
+        verification = _assess(result)
 
     return result, verification

@@ -61,7 +61,7 @@ def build_scraper_for_source(
     )
 
     result, verification = run_codegen_gated(
-        task, system, lambda: verify_scraper(source_key), on_event=on_event
+        task, system, lambda: verify_scraper(source_key), on_event=on_event, test_path=test_path_for("scraper", source_key)
     )
     return {
         "source_key": source_key,
@@ -97,6 +97,7 @@ def revise_scraper_for_source(
     result, verification = run_codegen_gated(
         task, system, lambda: verify_scraper(source_key),
         on_event=on_event, require_changes=True,
+        test_path=test_path_for("scraper", source_key),
     )
     return {
         "source_key": source_key,

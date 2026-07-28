@@ -168,3 +168,75 @@ def test_build_mode_does_not_require_changes(monkeypatch):
 ])
 def test_files_written(calls, expected):
     assert codegen.files_written(calls) == expected
+
+
+# --- coverage, not existence -------------------------------------------------
+
+def test_uncovered_changes_fail_the_gate_and_trigger_a_retry(monkeypatch):
+    """The hole that started all this: the Epic scraper's two tests passed for the
+    entire time it was 403-broken, because they only covered a pure helper the fix
+    never touched. Measured on that real commit: 22 changed executable lines, 4
+    covered, 18 not."""
+    seen = _runner(monkeypatch, [
+        _Result(_wrote("core/scrapers/epic.py", "tests/test_epic.py")),  # stale test
+        _Result(_wrote("core/scrapers/epic.py", "tests/test_epic.py")),  # extended
+    ])
+    coverage_results = iter([
+        {"ok": False, "checked": True, "uncovered": {"core/scrapers/epic.py": [39, 40, 41]}},
+        {"ok": True, "checked": True, "uncovered": {}},
+    ])
+    monkeypatch.setattr(codegen, "covers_changes", lambda t, c: dict(next(coverage_results)))
+
+    _, v = codegen.run_codegen_gated(
+        "fix it", "SYSTEM", lambda: {"ok": True},
+        on_event=lambda m: None, test_path="tests/test_epic.py",
+    )
+
+    assert len(seen["tasks"]) == 2, "uncovered changes must earn a retry"
+    assert "never RUNS the code you changed" in seen["tasks"][1]
+    assert "lines [39, 40, 41]" in seen["tasks"][1], "name the lines, not just the file"
+    assert v["ok"] is True
+
+
+def test_covered_changes_pass_cleanly(monkeypatch):
+    seen = _runner(monkeypatch, [_Result(_wrote("core/parsers/x.py", "tests/test_x.py"))])
+    monkeypatch.setattr(codegen, "covers_changes",
+                        lambda t, c: {"ok": True, "checked": True, "uncovered": {}})
+
+    _, v = codegen.run_codegen_gated(
+        "build", "SYSTEM", lambda: {"ok": True},
+        on_event=lambda m: None, test_path="tests/test_x.py",
+    )
+
+    assert len(seen["tasks"]) == 1 and v["ok"] is True
+
+
+def test_coverage_is_not_second_guessed_when_no_test_was_written_at_all(monkeypatch):
+    """Missing test is the clearer complaint; don't stack a confusing second one."""
+    _runner(monkeypatch, [_Result(_wrote("core/parsers/x.py"))] * 2)
+    called = []
+    monkeypatch.setattr(codegen, "covers_changes",
+                        lambda t, c: called.append(1) or {"ok": False, "checked": True, "uncovered": {}})
+
+    _, v = codegen.run_codegen_gated(
+        "build", "SYSTEM", lambda: {"ok": True},
+        on_event=lambda m: None, test_path="tests/test_x.py",
+    )
+
+    assert not called, "no point measuring coverage of a test that doesn't exist"
+    assert v["untested_code"] == ["core/parsers/x.py"]
+
+
+def test_an_unmeasurable_coverage_run_does_not_block(monkeypatch):
+    """If coverage can't run, fail open — the existence + pass checks still hold.
+    A tooling problem must not strand the operator."""
+    _runner(monkeypatch, [_Result(_wrote("core/parsers/x.py", "tests/test_x.py"))])
+    monkeypatch.setattr(codegen, "covers_changes",
+                        lambda t, c: {"ok": True, "checked": False, "detail": "Coverage unavailable"})
+
+    _, v = codegen.run_codegen_gated(
+        "build", "SYSTEM", lambda: {"ok": True},
+        on_event=lambda m: None, test_path="tests/test_x.py",
+    )
+
+    assert v["ok"] is True and "uncovered_changes" not in v
