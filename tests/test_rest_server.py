@@ -15,6 +15,17 @@ from interfaces.rest_server import app
 client = TestClient(app)
 
 
+@pytest.fixture(autouse=True)
+def repo_root_is_disposable(tmp_path, monkeypatch):
+    """Nothing a test uploads may land in the operator's real data/ directory.
+
+    A failed upload now RETAINS the document (so the model can be offered on it),
+    which quietly wrote test fixtures into the live repo until this existed.
+    Individual tests still re-point REPO_ROOT when they assert on the location.
+    """
+    monkeypatch.setattr("interfaces.rest_server.REPO_ROOT", tmp_path)
+
+
 def test_read_tool_returns_json():
     r = client.post("/api/tool/list_sources", json={})
     assert r.status_code == 200 and isinstance(r.json(), list) and r.json()
