@@ -18,7 +18,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from core import hot_reload, progress, reconcile, source_status, transports
+from core import hot_reload, progress, reconcile, settings, source_status, transports
 from core.transports import EMAIL, SCRAPE
 from core.observability import get_logger
 from core.fetch_ingest import fetch_and_ingest, persist_scraped
@@ -121,6 +121,37 @@ def list_sources(include_carriers: bool = False) -> list[dict]:
             "can_automate": transports.can_automate(routes, default_id),
         })
     return out
+
+
+def source_settings(source_key: str) -> dict:
+    """The options this source lets you adjust, and their current values.
+
+    `schema` is declared by the source's own module, so the caller can render a
+    form without knowing anything about the portal. Empty schema = no options.
+    """
+    schema = settings.schema_for(source_key)
+    return {
+        "source_key": source_key,
+        "schema": schema,
+        "values": settings.values_for(source_key),
+        "overridden": sorted(settings.stored_for(source_key)),
+    }
+
+
+def save_source_settings(source_key: str, values: dict) -> dict:
+    """Store adjusted options for a source. They take effect on the next run —
+    no code change, no rebuild."""
+    try:
+        effective = settings.save_for(source_key, values or {})
+    except settings.SettingsError as exc:
+        raise ToolError(str(exc)) from exc
+    return {"source_key": source_key, "values": effective,
+            "overridden": sorted(settings.stored_for(source_key))}
+
+
+def reset_source_settings(source_key: str) -> dict:
+    """Drop the operator's overrides, back to what the source declares."""
+    return {"source_key": source_key, "values": settings.reset_for(source_key), "overridden": []}
 
 
 def set_default_transport(source_key: str, transport: str) -> dict:
@@ -893,6 +924,7 @@ def activate_parser(source_key: str) -> dict:
 
 # The tools the MCP server registers, in one place.
 READ_TOOLS = [list_sources, latest_transactions, source_transactions, action_progress,
+              source_settings,
               pending_approvals, llm_status, status]
 ACTION_TOOLS = [
     ingest_document,
@@ -908,5 +940,7 @@ ACTION_TOOLS = [
     build_status,
     set_default_transport,
     get_latest,
+    save_source_settings,
+    reset_source_settings,
 ]
 ALL_TOOLS = READ_TOOLS + ACTION_TOOLS

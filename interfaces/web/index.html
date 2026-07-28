@@ -293,6 +293,7 @@
   const ingestOpen = { key: null };
   const sourceView = {};      // source_key -> { group, query }
   const sourceTxnCache = {};  // source_key -> source_transactions() result
+  const sourceSettingsCache = {};  // source_key -> source_settings() result
   const svState = k => sourceView[k] || (sourceView[k] = { group: 'None', query: '' });
 
   function llmHost(baseUrl) {
@@ -491,6 +492,11 @@
       try { sourceTxnCache[openKey] = await callTool('source_transactions', { source_key: openKey }); }
       catch (e) { sourceTxnCache[openKey] = { error: e.message, transactions: [], count: 0, money_in: 0, money_out: 0 }; }
     }
+    if (openKey && sources.some(s => s.key === openKey) && !sourceSettingsCache[openKey]) {
+      // Best-effort: a source with no declared options simply has no panel.
+      try { sourceSettingsCache[openKey] = await callTool('source_settings', { source_key: openKey }); }
+      catch (e) { sourceSettingsCache[openKey] = { schema: [], values: {}, overridden: [] }; }
+    }
 
     let html = '<div class="acc">';
     for (const s of sources) {
@@ -590,6 +596,90 @@
       '<div class="cap" style="opacity:.75">however they arrived</div></div></div>';
   }
 
+  // ── Per-source options, rendered from what the SOURCE declares ──
+  // Nothing here names a portal's fields; the schema arrives from the source's
+  // own module, so a new source with different knobs needs no UI change.
+  const optsOpen = {};
+
+  function optionsHTML(s) {
+    const cfg = sourceSettingsCache[s.key];
+    if (!cfg || !cfg.schema || !cfg.schema.length) return '';   // nothing to adjust
+    const sid = sourceDomId(s.key);
+    const changed = (cfg.overridden || []).length;
+    const open = !!optsOpen[s.key];
+
+    const head = '<div class="build-h" onclick="toggleOptions(\'' + s.key + '\')">' +
+      '<span class="caret' + (open ? ' open' : '') + '">&#8250;</span>Options for this pull' +
+      '<span class="hint" style="margin-left:auto;font-weight:400">' +
+      (changed ? changed + ' changed from default' : 'using defaults') + '</span></div>';
+    if (!open) return '<div class="build collapsed">' + head + '</div>';
+
+    const fields = cfg.schema.map(f => {
+      const v = cfg.values[f.key];
+      const id = 'opt-' + sid + '-' + f.key;
+      let input;
+      if (f.type === 'boolean') {
+        input = '<input type="checkbox" id="' + id + '"' + (v ? ' checked' : '') + '>';
+      } else if (f.type === 'choice') {
+        input = '<select id="' + id + '">' + (f.options || []).map(o =>
+          '<option value="' + esc(o.value) + '"' + (o.value === v ? ' selected' : '') + '>' +
+          esc(o.label || o.value) + '</option>').join('') + '</select>';
+      } else {
+        const kind = f.type === 'number' ? 'number' : (f.type === 'date' ? 'date' : 'text');
+        input = '<input type="' + kind + '" id="' + id + '" value="' + esc(v == null ? '' : v) + '"' +
+          (f.min != null ? ' min="' + f.min + '"' : '') + (f.max != null ? ' max="' + f.max + '"' : '') + '>';
+      }
+      return '<div class="field"><label for="' + id + '">' + esc(f.label || f.key) +
+        ((cfg.overridden || []).includes(f.key) ? ' <span class="hint">· changed</span>' : '') +
+        '</label>' + input +
+        (f.help ? '<span class="sub">' + esc(f.help) + '</span>' : '') + '</div>';
+    }).join('');
+
+    return '<div class="build"><div class="build-b">' +
+      '<p class="note" style="margin:0 0 12px">These are the choices the portal asks for before it ' +
+      'hands over data. They apply to the next pull — no code change needed.</p>' + fields +
+      '<div class="row"><button class="btn primary" onclick="saveOptions(\'' + s.key + '\')">Save options</button>' +
+      (changed ? '<button class="btn" onclick="resetOptions(\'' + s.key + '\')">Back to defaults</button>' : '') +
+      '</div></div></div>';
+  }
+
+  function toggleOptions(key) { optsOpen[key] = !optsOpen[key]; renderIngest(); }
+
+  function readOptions(key) {
+    const cfg = sourceSettingsCache[key];
+    const sid = sourceDomId(key);
+    const out = {};
+    (cfg.schema || []).forEach(f => {
+      const node = el('opt-' + sid + '-' + f.key);
+      if (!node) return;
+      out[f.key] = f.type === 'boolean' ? node.checked : node.value;
+    });
+    return out;
+  }
+
+  async function saveOptions(key) {
+    clearToast();
+    try {
+      sourceSettingsCache[key] = await callTool('save_source_settings',
+        { source_key: key, values: readOptions(key) });
+      toast('Options saved — they apply to the next pull.', true);
+      await renderIngest();
+    } catch (e) {
+      toast('Couldn’t save: ' + e.message, false);
+    }
+  }
+
+  async function resetOptions(key) {
+    clearToast();
+    try {
+      sourceSettingsCache[key] = await callTool('reset_source_settings', { source_key: key });
+      toast('Back to the source’s own defaults.', true);
+      await renderIngest();
+    } catch (e) {
+      toast('Couldn’t reset: ' + e.message, false);
+    }
+  }
+
   /** Click the box, run that route. Upload opens the picker; the rest just go. */
   function runRoute(key, transport) {
     if (transport === 'upload') return chooseUpload(key);
@@ -641,7 +731,9 @@
     // The build/fix panel sits directly under the action + step timeline, BEFORE
     // the data: when a run fails, "what to do next" belongs next to the failure,
     // not below a table the operator has to scroll past to find it.
-    const head = actions + buildHTML(s);
+    // Options sit between "how it arrives" and "fix the code": adjusting a date
+    // range is the ordinary thing to do, rewriting the scraper is the rare one.
+    const head = actions + optionsHTML(s) + buildHTML(s);
     const data = sourceTxnCache[s.key];
     if (!data) return head + '<div class="empty">Loading transactions…</div>';
     if (data.error) return head + '<div class="notbuilt">Couldn’t load transactions: ' + esc(data.error) + '</div>';

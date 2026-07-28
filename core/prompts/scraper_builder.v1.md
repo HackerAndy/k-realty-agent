@@ -64,7 +64,39 @@ Prefer the **API** path, fall back to **replaying clicks**:
    `fields` — invent nothing, drop nothing. Skip section headers / subtotals /
    balance rows; extract only real transactions.
 
-4. **Record the source's own control totals — do this whenever the source
+4. **Declare the choices the portal asked for as adjustable SETTINGS — do NOT
+   hard-code them.** The demonstration captured ONE set of the operator's
+   choices (a date range, which properties, an accounting basis, which
+   accounts). Baking those in means the next change needs a code edit, a test
+   run and an approval. Instead declare them and read them at run time:
+
+   ```python
+   from core import settings
+
+   SETTINGS = [
+       {"key": "lookback_days", "label": "How far back to pull", "type": "number",
+        "default": 30, "min": 1, "max": 365, "help": "Days before today."},
+       {"key": "accounting_basis", "label": "Accounting basis", "type": "choice",
+        "default": "accrual",
+        "options": [{"value": "accrual", "label": "Accrual"},
+                    {"value": "cash", "label": "Cash"}]},
+   ]
+
+   def retrieve() -> list[Transaction]:
+       opts = settings.values_for(SERVICE_KEY)
+       start_date = date.today() - timedelta(days=opts["lookback_days"])
+   ```
+
+   Types: `number` (with optional min/max), `choice` (with `options`),
+   `boolean`, `text`, `date`. Use the values you saw in the demonstration as the
+   DEFAULTS, so the first run reproduces what the operator demonstrated.
+
+   The harness renders these as a form automatically — it knows nothing about
+   this portal's fields, so anything you don't declare is not adjustable. Only
+   declare what the operator would plausibly change; leave genuinely fixed
+   protocol details (endpoint paths, header names) as code.
+
+5. **Record the source's own control totals — do this whenever the source
    publishes any.** Most financial sources state their own arithmetic: a
    per-account `Total`, a balance line, a row count, an ending balance. Compare
    your extraction against it and record the check:
@@ -83,10 +115,10 @@ Prefer the **API** path, fall back to **replaying clicks**:
    breaks your test. If the source publishes NO totals, say so in your report
    rather than inventing a check.
 
-5. **Register it.** Edit `core/scrapers/__init__.py` to import your `retrieve`
+6. **Register it.** Edit `core/scrapers/__init__.py` to import your `retrieve`
    and add it to `REGISTRY` under the exact source key.
 
-6. **Write a self-contained test — this is REQUIRED, not optional.** Create the
+7. **Write a self-contained test — this is REQUIRED, not optional.** Create the
    test file named in your task (`tests/test_scraper_<source_key>.py`) with pytest
    tests of your pure `_extract` against a SMALL, REPRESENTATIVE payload **embedded
    inline in the test** — shaped like the real response you saw in the
