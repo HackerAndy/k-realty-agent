@@ -95,6 +95,49 @@ def test_start_build_requires_a_sample_for_a_parser(one_source):
         mcp_tools.start_build("parser", "dfcu_financial_bank")
 
 
+def test_scraper_revise_needs_no_sample_or_feedback(one_source, monkeypatch):
+    """Revise reads the harness's own failure logs, so a broken scrape is fixable
+    without re-demonstrating and without the operator diagnosing it first."""
+    launched = {}
+
+    class Running:
+        pid = 7
+        def poll(self):
+            return None
+
+    def capture(cmd, **kwargs):
+        launched["cmd"] = cmd
+        return Running()
+
+    monkeypatch.setattr(mcp_tools.subprocess, "Popen", capture)
+    started = mcp_tools.start_build("scraper", "dfcu_financial_bank", mode="revise")
+
+    assert started["status"] == "running" and started["kind"] == "scraper"
+    assert "--sample-path" not in launched["cmd"]
+    assert "--mode" in launched["cmd"] and "revise" in launched["cmd"]
+
+
+def test_worker_dispatches_a_scraper_revise_to_the_right_workflow(tmp_path, monkeypatch):
+    run_file = tmp_path / "run.jsonl"
+    seen = {}
+
+    def fake_revise(source_key, feedback="", on_event=print):
+        seen["source_key"] = source_key
+        seen["feedback"] = feedback
+        on_event("read_logs: HTTP_ERROR 403 on the transactions POST")
+        return {"source_key": source_key, "verification": {"ok": True, "registered": True}}
+
+    monkeypatch.setattr("orchestration.build_scraper.revise_scraper_for_source", fake_revise)
+
+    rc = build_worker.run("scraper", "revise", "epic_property_management", run_file,
+                          feedback="the transactions POST returns 403")
+
+    assert rc == 0
+    assert seen["source_key"] == "epic_property_management"
+    assert "403" in seen["feedback"]
+    assert _lines(run_file)[-1]["result"]["verification"]["ok"] is True
+
+
 def test_start_build_requires_a_configured_llm(one_source, tmp_path, monkeypatch):
     monkeypatch.setattr(mcp_tools.llm_provider, "is_configured", lambda: False)
     sample = tmp_path / "s.pdf"

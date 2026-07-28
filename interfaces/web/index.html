@@ -188,6 +188,14 @@
   /* ── Agent build panel (writes a parser, then must pass its own test) ── */
   .build { border: 1px solid var(--border); border-radius: 10px; margin-top: 14px; overflow: hidden; }
   .build-h { display: flex; align-items: center; gap: 10px; padding: 11px 14px; background: color-mix(in oklab, var(--muted) 6%, var(--card)); border-bottom: 1px solid var(--border); font-size: 13px; font-weight: 600; }
+  .build-h[onclick] { cursor: pointer; }
+  .build-h[onclick]:hover { background: color-mix(in oklab, var(--muted) 12%, var(--card)); }
+  .build-h .caret { color: var(--muted); font-size: 16px; display: inline-block; transition: transform .12s; }
+  .build-h .caret.open { transform: rotate(90deg); }
+  /* Collapsed: a quiet one-liner, no body, no border to divide. */
+  .build.collapsed { background: transparent; }
+  .build.collapsed .build-h { background: transparent; border-bottom: none; color: var(--muted); font-weight: 500; }
+  .build.collapsed .build-h:hover { color: var(--text); }
   .build-h .spin { width: 12px; height: 12px; border-radius: 999px; border: 2px solid color-mix(in oklab, var(--accent) 35%, transparent); border-top-color: var(--accent); animation: spin .7s linear infinite; flex: none; }
   @keyframes spin { to { transform: rotate(360deg); } }
   @media (prefers-reduced-motion: reduce) { .build-h .spin { animation: none; } }
@@ -506,20 +514,23 @@
 
   function sourceBodyHTML(s, isPending) {
     const actions = '<div class="actions">' + sourceActionHTML(s, isPending) + '</div>' + sourceUploadStepsRow(s.key);
-    const build = buildHTML(s);
+    // The build/fix panel sits directly under the action + step timeline, BEFORE
+    // the data: when a run fails, "what to do next" belongs next to the failure,
+    // not below a table the operator has to scroll past to find it.
+    const head = actions + buildHTML(s);
     const data = sourceTxnCache[s.key];
-    if (!data) return actions + '<div class="empty">Loading transactions…</div>' + build;
-    if (data.error) return actions + '<div class="notbuilt">Couldn’t load transactions: ' + esc(data.error) + '</div>' + build;
+    if (!data) return head + '<div class="empty">Loading transactions…</div>';
+    if (data.error) return head + '<div class="notbuilt">Couldn’t load transactions: ' + esc(data.error) + '</div>';
     if (!data.transactions || !data.transactions.length) {
       const msg = s.is_trigger
         ? 'This is a <b>delivery trigger</b>, not a ledger. Fetched documents are ingested under the source they’re routed to — nothing to validate here directly.'
         : (s.parser_built
             ? 'No transactions yet. Acquire data above to validate it here.'
-            : 'No parser for this source yet — build one below, then acquire data.');
-      return actions + '<div class="notbuilt">' + msg + '</div>' + build;
+            : 'No parser for this source yet — build one above, then acquire data.');
+      return head + '<div class="notbuilt">' + msg + '</div>';
     }
-    return actions + '<div id="detail-' + sourceDomId(s.key) + '" class="__detail">' +
-      validationHTML(s.key, data) + '</div>' + build;
+    return head + '<div id="detail-' + sourceDomId(s.key) + '" class="__detail">' +
+      validationHTML(s.key, data) + '</div>';
   }
 
   // ── Agent build: sample -> agent writes parser + test -> operator approves ──
@@ -527,11 +538,53 @@
   const buildState = {};   // source_key -> { sample, events, status, result, passed, feedback, token }
   const bs = k => buildState[k] || (buildState[k] = { sample: null, events: [], status: 'idle', feedback: '' });
 
+  /** A source that pulls from a portal is maintained as a SCRAPER; anything else
+   *  is maintained as a parser. That's the code the operator would fix. */
+  function buildKindFor(s) { return s.has_scraper ? 'scraper' : 'parser'; }
+
+  /** Did the last action on this source end in failure? */
+  function lastActionFailed(key) {
+    const steps = actionStepHistory[key];
+    return !!(steps && steps.some(s => s.status === 'failed'));
+  }
+
+  /** Only take up room when there's a reason to: an actual failure, work in
+   *  flight, a result to review, or a source with no code built yet (where
+   *  building IS the main action). Otherwise collapse to its header. */
+  function buildExpanded(s) {
+    const st = bs(s.key);
+    if (st.expanded !== undefined) return st.expanded;   // operator overrode it
+    if (st.status && st.status !== 'idle') return true;
+    if (lastActionFailed(s.key)) return true;
+    return !s.has_scraper && !s.parser_built;
+  }
+
+  function toggleBuildPanel(key) {
+    const st = bs(key);
+    st.expanded = !st._expandedNow;   // flip whatever is on screen right now
+    renderIngest();
+  }
+
   function buildHTML(s) {
-    if (s.is_trigger) return '';   // a trigger has no parser of its own to build
+    if (s.is_trigger) return '';   // a trigger has no code of its own to build
     const st = bs(s.key);
     const sid = sourceDomId(s.key);
-    const verb = s.parser_built ? 'Rebuild' : 'Build';
+    const kind = buildKindFor(s);
+    st.kind = kind;
+    const expanded = buildExpanded(s);
+    st._expandedNow = expanded;
+    const title = kind === 'scraper'
+      ? 'Fix this source’s scraper'
+      : (s.parser_built ? 'Rebuild' : 'Build') + ' this source’s parser';
+
+    if (!expanded) {
+      // Collapsed: one quiet line, still one click away.
+      return '<div class="build collapsed"><div class="build-h" onclick="toggleBuildPanel(\'' + s.key + '\')">' +
+        '<span class="caret">&#8250;</span>' + title +
+        '<span class="hint" style="margin-left:auto;font-weight:400">' +
+        (kind === 'scraper' ? 'the agent can fix it' : 'the agent can rebuild it') + '</span>' +
+        '</div></div>';
+    }
 
     let inner;
     if (st.status === 'running') {
@@ -544,12 +597,24 @@
         'You can leave this page open; progress keeps streaming.</span></div>';
     } else if (st.status === 'completed' || st.status === 'failed') {
       inner = buildResultHTML(s, st);
+    } else if (kind === 'scraper') {
+      // Revise needs no demonstration — the agent reads the harness's own
+      // failure logs, so a broken scrape is fixable straight from here.
+      inner =
+        '<p class="note" style="margin:0 0 12px">When a scrape fails, the harness fixes its own code: ' +
+        'its agent reads the failure logs, edits <code>core/scrapers/' + esc(s.key) + '.py</code>, updates the ' +
+        'test, and the harness re-runs that test independently before anything is used.</p>' +
+        '<div class="label">Anything to add? (optional — it reads the logs either way)</div>' +
+        '<textarea id="feedback-' + sid + '" placeholder="e.g. the transactions POST returns 403">' +
+          esc(st.feedback || '') + '</textarea>' +
+        '<div class="row" style="margin-top:10px">' +
+        '<button class="btn primary" onclick="reviseBuild(\'' + s.key + '\')">Have the agent fix the scraper</button>' +
+        '</div>';
     } else {
       inner =
-        '<p class="note" style="margin:0 0 12px">The harness writes the ' +
-        (s.input_type === 'html_scrape' ? 'parser' : 'parser') +
-        ' itself: give it one real sample document, and its own agent writes the code <b>and a test</b>, ' +
-        'then re-runs that test independently. Nothing activates until you approve it.</p>' +
+        '<p class="note" style="margin:0 0 12px">The harness writes the parser itself: give it one real ' +
+        'sample document, and its own agent writes the code <b>and a test</b>, then re-runs that test ' +
+        'independently. Nothing activates until you approve it.</p>' +
         (st.sample
           ? '<div class="kv">Sample: <b>' + esc(st.sample.filename) + '</b> (' + st.sample.bytes.toLocaleString() + ' bytes)</div>'
           : '') +
@@ -559,26 +624,34 @@
         '<input id="sample-input-' + sid + '" type="file" style="display:none" accept=".pdf,.csv,text/csv,application/pdf" ' +
           'onchange="handleSampleFile(\'' + s.key + '\', event)" />' +
         (st.sample
-          ? '<button class="btn primary" onclick="startBuild(\'' + s.key + '\')">' + verb + ' the parser</button>'
+          ? '<button class="btn primary" onclick="startBuild(\'' + s.key + '\')">' +
+            (s.parser_built ? 'Rebuild' : 'Build') + ' the parser</button>'
           : '') +
         '</div>';
     }
 
-    return '<div class="build"><div class="build-h">' +
-      (st.status === 'running' ? '<span class="spin"></span>' : '') +
-      (st.status === 'running' ? 'Agent is writing the parser…' : verb + ' this source’s parser') +
+    const running = st.status === 'running';
+    return '<div class="build"><div class="build-h"' +
+      // Don't let it be collapsed mid-run — the stream is the only progress signal.
+      (running ? '' : ' onclick="toggleBuildPanel(\'' + s.key + '\')"') + '>' +
+      (running ? '<span class="spin"></span>' : '<span class="caret open">&#8250;</span>') +
+      (running ? 'Agent is working on the ' + kind + '…' : title) +
       '</div><div class="build-b" id="build-' + sid + '">' + inner + '</div></div>';
   }
 
   function buildResultHTML(s, st) {
     const sid = sourceDomId(s.key);
+    const kind = st.kind || 'parser';
     if (st.status === 'failed') {
-      return '<div class="verdict fail">Build failed</div>' +
+      return '<div class="verdict fail">The agent run failed</div>' +
         '<div class="label">What went wrong</div>' +
-        '<div class="stream">' + esc(st.message || 'The build failed.') + '</div>' +
+        '<div class="stream">' + esc(st.message || 'The run failed.') + '</div>' +
         '<div class="row" style="margin-top:12px">' +
         '<button class="btn" onclick="resetBuild(\'' + s.key + '\')">Start over</button>' +
-        (st.sample ? '<button class="btn primary" onclick="startBuild(\'' + s.key + '\')">Try again</button>' : '') +
+        (kind === 'scraper' || st.sample
+          ? '<button class="btn primary" onclick="' +
+            (kind === 'scraper' ? 'reviseBuild' : 'startBuild') + '(\'' + s.key + '\')">Try again</button>'
+          : '') +
         '</div>';
     }
 
@@ -586,9 +659,16 @@
     const v = r.verification || {};
     const test = v.test || {};
     const txns = v.transactions || [];
-    const verdict = st.passed
-      ? '<div class="verdict pass">Test passed — ' + txns.length + ' transactions parsed</div>'
-      : '<div class="verdict fail">Not approvable — the test did not pass</div>';
+    let verdict;
+    if (!st.passed) {
+      verdict = '<div class="verdict fail">Not usable yet — the test did not pass</div>';
+    } else if (kind === 'scraper') {
+      // A scraper self-registers; the proof is its test, and then a real run.
+      verdict = '<div class="verdict pass">Test passed' +
+        (v.registered ? ' — scraper registered' : '') + '</div>';
+    } else {
+      verdict = '<div class="verdict pass">Test passed — ' + txns.length + ' transactions parsed</div>';
+    }
 
     let body = verdict;
     if (r.agent_summary) body += '<div class="label">What the agent did</div><div class="stream">' + esc(r.agent_summary) + '</div>';
@@ -605,17 +685,33 @@
       body += '<div class="label">Parsed from your sample — check these are right</div>' +
         txnTableHTML(txns.slice(0, 25).map(t => ({ amount: t.amount, fields: t.fields })));
     }
+    if (kind === 'scraper' && st.passed) {
+      body += '<div class="label">Next</div><p class="note" style="margin:0">A passing test means the code is ' +
+        'sound, not that the portal accepted it. Run the scraper to confirm against the live site.</p>';
+    }
 
     body += '<div class="label">Not right? Tell the agent what to change</div>' +
-      '<textarea id="feedback-' + sid + '" placeholder="e.g. the Amount column is losing negatives on refunds">' + esc(st.feedback || '') + '</textarea>' +
+      '<textarea id="feedback-' + sid + '" placeholder="' +
+        (kind === 'scraper' ? 'e.g. the transactions POST still returns 403'
+                            : 'e.g. the Amount column is losing negatives on refunds') + '">' +
+      esc(st.feedback || '') + '</textarea>' +
       '<div class="row" style="margin-top:10px">' +
       (st.passed
-        ? '<button class="btn primary" onclick="approveBuild(\'' + s.key + '\')">Approve &amp; activate</button>'
+        ? (kind === 'scraper'
+            // Scrapers self-register — there is no activation step to approve.
+            ? '<button class="btn primary" onclick="runScraperAfterFix(\'' + s.key + '\')">Run the scraper now</button>'
+            : '<button class="btn primary" onclick="approveBuild(\'' + s.key + '\')">Approve &amp; activate</button>')
         : '') +
-      '<button class="btn" onclick="reviseBuild(\'' + s.key + '\')">Revise with the agent</button>' +
+      '<button class="btn" onclick="reviseBuild(\'' + s.key + '\')">' +
+        (kind === 'scraper' ? 'Fix it again' : 'Revise with the agent') + '</button>' +
       '<button class="btn" onclick="resetBuild(\'' + s.key + '\')">Dismiss</button>' +
       '</div>';
     return body;
+  }
+
+  async function runScraperAfterFix(key) {
+    resetBuild(key);
+    await act('run_scraper', { source_key: key });
   }
 
   function chooseSample(key) { const i = el('sample-input-' + sourceDomId(key)); if (i) i.click(); }
@@ -644,9 +740,13 @@
 
   async function startBuild(key, mode) {
     const st = bs(key);
-    if (!st.sample) { toast('Choose a sample document first.', false); return; }
+    const kind = st.kind || 'parser';
+    // Only a parser is built FROM a document; a scraper revise works from the
+    // harness's own failure logs, so it needs no sample.
+    if (kind === 'parser' && !st.sample) { toast('Choose a sample document first.', false); return; }
     clearToast();
-    const args = { kind: 'parser', source_key: key, mode: mode || 'build', sample_path: st.sample.sample_path };
+    const args = { kind, source_key: key, mode: mode || 'build' };
+    if (kind === 'parser') args.sample_path = st.sample.sample_path;
     if (mode === 'revise') args.feedback = st.feedback || '';
     try {
       await callTool('start_build', args);
@@ -712,9 +812,15 @@
   }
 
   async function reviseBuild(key) {
+    const st = bs(key);
     const fb = readFeedback(key);
-    if (!fb) { toast('Say what needs changing first.', false); return; }
-    bs(key).feedback = fb;
+    // A scraper revise reads the failure logs, so feedback is optional there;
+    // a parser revise has nothing to go on but what the operator says.
+    if (!fb && (st.kind || 'parser') === 'parser') {
+      toast('Say what needs changing first.', false);
+      return;
+    }
+    st.feedback = fb;
     await startBuild(key, 'revise');
   }
 
@@ -727,6 +833,7 @@
   function resetBuild(key) {
     const st = bs(key);
     st.status = 'idle'; st.events = []; st.result = null; st.passed = false; st.message = null;
+    st.expanded = undefined;          // back to "only show me when I'm needed"
     st.token = (st.token || 0) + 1;   // orphan any in-flight poller
     renderIngest();
   }
