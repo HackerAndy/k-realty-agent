@@ -371,22 +371,22 @@ function stepper() {
 }
 
 function bStep1() {
+  // CHOSEN: the box IS the button. A radio plus a Next is two clicks to say one
+  // thing, and there's nothing on this step to review before committing.
   return METHODS.map(m =>
-    '<div class="opt' + (S.method === m.id ? ' on' : '') + '" onclick="S.method=\'' + m.id + '\';S.learned=false;paint()">' +
-      '<span class="radio"></span><span class="ico">' + m.ico + '</span>' +
+    '<div class="opt" onclick="S.method=\'' + m.id + '\';S.learned=false;S.step=2;paint()">' +
+      '<span class="ico">' + m.ico + '</span>' +
       '<span><div class="t">' + esc(m.t) + '</div><div class="d">' + esc(m.d) + '</div></span>' +
-      '<span class="w">' + esc(m.w) + '</span></div>').join('') +
-    (S.method === 'email'
-      ? '<div class="flag"><b>Worth knowing.</b> An inbox delivers a document — something still has to ' +
-        'read it. It will use the newest attachment it finds as its sample.</div>' : '') +
-    '<div class="row"><button class="btn primary" ' + (S.method ? '' : 'disabled') +
-      ' onclick="S.step=2;paint()">Next</button></div>';
+      '<span class="w">' + esc(m.w) + ' &#8250;</span></div>').join('');
 }
 
 function bStep2() {
   const m = M(S.method);
   if (!S.learned) {
     return '<p class="note" style="margin:0">' + esc(m.doing) + '</p>' +
+      (S.method === 'email'
+        ? '<div class="flag"><b>Worth knowing.</b> An inbox delivers a document — something still has to ' +
+          'read it. It will use the newest attachment it finds as its sample.</div>' : '') +
       (S.method === 'website'
         ? '<p class="sub" style="margin:8px 0 0">No address to type: closing the window is how you say you’re done, ' +
           'and it keeps whatever you actually visited.</p>' : '') +
