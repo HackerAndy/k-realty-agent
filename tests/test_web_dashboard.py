@@ -33,11 +33,12 @@ def test_the_dashboard_script_parses():
     assert proc.returncode == 0, f"index.html script does not parse:\n{proc.stderr}"
 
 
-def test_every_onclick_names_a_function_that_exists():
-    """A typo'd handler is invisible until someone clicks it."""
+def test_every_inline_handler_names_a_function_that_exists():
+    """A typo'd handler is invisible until someone clicks (or picks a file)."""
     html = DASHBOARD.read_text()
     script = _script()
-    called = {m.group(1) for m in re.finditer(r"onclick=[\"'](?:event\.\w+\(\);)?(\w+)\(", html)}
+    called = {m.group(1)
+              for m in re.finditer(r"on(?:click|change)=[\"'](?:event\.\w+\(\);)?(\w+)\(", html)}
     defined = set()
     for pattern in (
         r"(?:async\s+)?function\s+(\w+)\s*\(",     # function foo(...)

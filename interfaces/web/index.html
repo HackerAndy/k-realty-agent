@@ -1339,11 +1339,7 @@
       const badge = stored
         ? '<span class="verdict pass" style="font-size:11.5px;padding:2px 9px">saved</span>'
         : '<span class="tag">not set up</span>';
-      if (c.kind === 'inbox') {
-        return '<div class="cred"><div class="cred-h"><b>' + esc(c.label) + '</b>' + badge + '</div>' +
-          '<p class="note" style="margin:4px 0 0">An inbox signs in with Google, not a password. ' +
-          'Connecting it is still a terminal step for now.</p></div>';
-      }
+      if (c.kind === 'inbox') return inboxHTML(c);
       return '<div class="cred"><div class="cred-h"><b>' + esc(c.label) + '</b>' + badge +
         (c.login_url ? '<span class="hint" style="margin-left:auto">' + esc(c.login_url) + '</span>' : '') +
         '</div>' +
@@ -1365,9 +1361,166 @@
       'can read one out.</p>' + rows + '</div>';
   }
 
+  // ── An inbox signs in with Google, so there is no password to store: the
+  // harness gets a refresh token through a consent screen. Upload the OAuth
+  // client JSON → click Allow in the browser Google opens → say what to fetch.
+  const emailCache = {};      // source_key -> email_status
+  const consentState = {};    // source_key -> { status, message }
+
+  function inboxHTML(c) {
+    const sid = sourceDomId(c.key);
+    const st = emailCache[c.key];
+    const consent = consentState[c.key] || {};
+    if (!st) {
+      return '<div class="cred"><div class="cred-h"><b>' + esc(c.label) + '</b>' +
+        '<span class="tag">loading…</span></div></div>';
+    }
+
+    const badge = st.connected
+      ? '<span class="verdict pass" style="font-size:11.5px;padding:2px 9px">connected</span>'
+      : '<span class="tag">not connected</span>';
+    const head = '<div class="cred-h"><b>' + esc(c.label) + '</b>' + badge +
+      (st.account_email ? '<span class="hint" style="margin-left:auto">' + esc(st.account_email) + '</span>' : '') +
+      '</div>';
+    const picker = '<input type="file" accept=".json,application/json" style="display:none" ' +
+      'id="oauth-input-' + sid + '" onchange="handleOauthClientFile(\'' + c.key + '\', event)">';
+
+    if (consent.status === 'running') {
+      return '<div class="cred">' + head +
+        '<p class="note" style="margin:4px 0 0">' + esc(consent.message || 'Waiting for you to approve access…') + '</p>' +
+        '<p class="sub">Google opened a browser window — pick the account this inbox belongs to and click <b>Allow</b>.</p>' +
+        picker + '</div>';
+    }
+
+    const failed = consent.status === 'failed'
+      ? '<p class="note" style="color:var(--danger)">' + esc(consent.message) + '</p>' : '';
+
+    if (!st.connected) {
+      return '<div class="cred">' + head + failed +
+        '<p class="note" style="margin:4px 0 0">Google signs this in, so there is no password to keep. ' +
+        'Create a <b>Desktop</b> OAuth client in Google Cloud, download its JSON, and upload it here. ' +
+        'The harness stores the resulting token encrypted in <b>.secrets/</b> and deletes the uploaded ' +
+        'file the moment consent finishes — read-only access, nothing else.</p>' +
+        '<div class="row"><button class="btn" onclick="chooseOauthClient(\'' + c.key + '\')">Connect Google…</button></div>' +
+        picker + '</div>';
+    }
+
+    return '<div class="cred">' + head + failed + fetchFormHTML(c.key, st) +
+      '<div class="row"><button class="btn" onclick="saveEmailFetch(\'' + c.key + '\')">Save what to fetch</button>' +
+      '<button class="btn" onclick="chooseOauthClient(\'' + c.key + '\')">Connect a different account…</button>' +
+      '</div>' + picker + '</div>';
+  }
+
+  function fetchFormHTML(key, st) {
+    const sid = sourceDomId(key);
+    const f = st.fetch || {};
+    const targets = st.can_deliver_to || [];
+    // A destination with no parser can't read what arrives, so the tool refuses
+    // it — don't offer it here either.
+    const deliver = targets.length
+      ? '<div class="field"><label for="ef-to-' + sid + '">Delivers to</label>' +
+        '<select id="ef-to-' + sid + '">' +
+        targets.map(t => '<option value="' + esc(t.key) + '"' +
+          (t.key === f.delivers_to ? ' selected' : '') + '>' + esc(t.label) + '</option>').join('') +
+        '</select><span class="sub">Which source parses the attachment this inbox finds.</span></div>'
+      : '<p class="note">No source has a parser yet, so there is nothing for this inbox to deliver to. ' +
+        'Build a parser first, then come back.</p>';
+
+    return deliver +
+      '<div class="field"><label for="ef-from-' + sid + '">From address <span class="sub">(optional)</span></label>' +
+      '<input type="text" id="ef-from-' + sid + '" value="' + esc(f.from_address || '') +
+      '" placeholder="statements@example.com" autocomplete="off"></div>' +
+      '<div class="field"><label for="ef-subj-' + sid + '">Subject contains <span class="sub">(optional)</span></label>' +
+      '<input type="text" id="ef-subj-' + sid + '" value="' + esc(f.subject_contains || '') +
+      '" placeholder="Owner Statement" autocomplete="off"></div>' +
+      '<div class="field"><label for="ef-suf-' + sid + '">Attachment ends with</label>' +
+      '<input type="text" id="ef-suf-' + sid + '" value="' + esc(f.attachment_suffix || '.pdf') + '" autocomplete="off"></div>' +
+      '<div class="field"><label for="ef-days-' + sid + '">Only messages newer than <span class="sub">(days — blank means no limit)</span></label>' +
+      '<input type="text" id="ef-days-' + sid + '" value="' +
+      esc(f.newer_than_days == null ? '' : f.newer_than_days) + '" autocomplete="off"></div>';
+  }
+
+  function chooseOauthClient(key) { const i = el('oauth-input-' + sourceDomId(key)); if (i) i.click(); }
+
+  async function handleOauthClientFile(key, event) {
+    const input = event && event.target;
+    const file = input && input.files && input.files[0];
+    if (!file) return;
+    clearToast();
+    const form = new FormData();
+    form.append('file', file);
+    try {
+      const res = await fetch('/api/upload_oauth_client/' + encodeURIComponent(key), { method: 'POST', body: form });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error((data.detail && data.detail.message) || data.detail || 'upload failed');
+      await callTool('start_gmail_consent', { source_key: key, client_secret_path: data.client_secret_path });
+      consentState[key] = { status: 'running', message: 'A browser is opening — choose the account and click Allow.' };
+      await renderSettings();
+      pollConsent(key);
+    } catch (e) {
+      consentState[key] = { status: 'failed', message: e.message };
+      await renderSettings();
+    } finally {
+      if (input) input.value = '';   // so re-picking the same file still fires
+    }
+  }
+
+  function pollConsent(key) {
+    const tick = async () => {
+      let s;
+      try { s = await callTool('gmail_consent_status', { source_key: key }); }
+      catch (e) {
+        consentState[key] = { status: 'failed', message: 'Lost contact with the consent step: ' + e.message };
+        await renderSettings();
+        return;
+      }
+      if (s.status === 'running') {
+        // Only the message changes while waiting; re-rendering would steal focus.
+        consentState[key] = { status: 'running', message: s.message };
+        setTimeout(tick, 1500);
+        return;
+      }
+      consentState[key] = s.status === 'completed'
+        ? {}
+        : { status: 'failed', message: [s.message, s.remediation].filter(Boolean).join(' ') };
+      await loadEmailStatus(key);
+      await renderSettings();
+      if (s.status === 'completed') toast('Connected ' + (s.account_email || 'the inbox') + '.', true);
+    };
+    setTimeout(tick, 1200);
+  }
+
+  async function saveEmailFetch(key) {
+    const sid = sourceDomId(key);
+    const sel = el('ef-to-' + sid);
+    if (!sel) { toast('Nothing to deliver to yet — build a parser for a source first.', false); return; }
+    clearToast();
+    const days = parseInt(el('ef-days-' + sid).value, 10);
+    try {
+      emailCache[key] = await callTool('save_email_fetch', {
+        source_key: key,
+        delivers_to: sel.value,
+        from_address: el('ef-from-' + sid).value,
+        subject_contains: el('ef-subj-' + sid).value,
+        attachment_suffix: el('ef-suf-' + sid).value,
+        newer_than_days: isNaN(days) ? null : days,
+      });
+      toast('Saved — this inbox delivers to ' + sel.value + '.', true);
+      await renderSettings();
+    } catch (e) {
+      toast('Couldn’t save: ' + e.message, false);
+    }
+  }
+
+  async function loadEmailStatus(key) {
+    try { emailCache[key] = await callTool('email_status', { source_key: key }); }
+    catch (e) { emailCache[key] = { connected: false, can_deliver_to: [] }; }
+  }
+
   async function loadCredentials() {
     try { credCache = await callTool('credential_status'); }
     catch (e) { credCache = []; }
+    await Promise.all(credCache.filter(c => c.kind === 'inbox').map(c => loadEmailStatus(c.key)));
   }
 
   async function saveCredentials(key) {

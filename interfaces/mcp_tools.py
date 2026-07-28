@@ -49,6 +49,10 @@ _LOGIN_RECOVERY_META: dict[str, dict[str, str]] = {}
 _BUILD_PROCS: dict[str, subprocess.Popen] = {}
 _BUILD_META: dict[str, dict[str, str]] = {}
 
+# Gmail consent blocks on a browser, so it runs out-of-process too.
+_CONSENT_PROCS: dict[str, subprocess.Popen] = {}
+_CONSENT_META: dict[str, dict[str, str]] = {}
+
 
 def _tail_text(path: Path, max_lines: int = 25) -> str:
     try:
@@ -159,6 +163,126 @@ def credential_status() -> list[dict]:
             "username": fields.get("username") or "",   # not a secret; shown so you know WHICH account
         })
     return out
+
+
+def email_status(source_key: str) -> dict:
+    """Whether an inbox is connected, and what it's set to fetch."""
+    from core.tools import email_oauth
+
+    service = next((s for s in _load_services() if s.key == source_key), None)
+    if service is None:
+        raise ToolError(f"Unknown source '{source_key}'.")
+
+    fetch = service.fetch
+    return {
+        "source_key": source_key,
+        "label": service.label,
+        "connected": email_oauth.is_configured(source_key),
+        "account_email": email_oauth.account_email(source_key),
+        "fetch": fetch.model_dump(exclude_none=True) if fetch else None,
+        # Which sources this inbox could deliver to — only ones that can parse.
+        "can_deliver_to": [
+            {"key": s.key, "label": s.label}
+            for s in _load_services()
+            if not source_status.is_trigger(s) and s.parser
+        ],
+    }
+
+
+def start_gmail_consent(source_key: str, client_secret_path: str) -> dict:
+    """Open Google's consent screen so the harness can read this inbox.
+
+    Runs in its own process: the flow blocks on a browser until you click Allow,
+    which no web request can wait for. Poll gmail_consent_status()."""
+    from core.tools import email_oauth  # noqa: F401  (fail early if deps are missing)
+
+    service = next((s for s in _load_services() if s.key == source_key), None)
+    if service is None:
+        raise ToolError(f"Unknown source '{source_key}'.")
+    client_json = Path(client_secret_path).expanduser()
+    if not client_json.exists():
+        raise ToolError("Upload the OAuth client JSON from Google Cloud first.")
+
+    existing = _CONSENT_PROCS.get(source_key)
+    if existing and existing.poll() is None:
+        return {"source_key": source_key, "status": "running", "pid": existing.pid}
+
+    status_path = Path(".secrets") / f"consent-{source_key}.status.json"
+    status_path.unlink(missing_ok=True)
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "core.tools.oauth_consent_worker",
+         source_key, str(client_json), str(status_path)],
+        start_new_session=True,
+    )
+    _CONSENT_PROCS[source_key] = proc
+    _CONSENT_META[source_key] = {"status_path": str(status_path)}
+    return {"source_key": source_key, "status": "running", "pid": proc.pid,
+            "message": "A browser is opening — choose the account and click Allow."}
+
+
+def gmail_consent_status(source_key: str) -> dict:
+    """Progress of a consent run: idle | running | completed | failed."""
+    from core.tools import email_oauth
+
+    proc = _CONSENT_PROCS.get(source_key)
+    meta = _CONSENT_META.get(source_key, {})
+    if proc is None:
+        return {"source_key": source_key,
+                "status": "completed" if email_oauth.is_configured(source_key) else "idle",
+                "account_email": email_oauth.account_email(source_key)}
+
+    payload = {}
+    status_path = Path(meta.get("status_path", ""))
+    if status_path.exists():
+        try:
+            payload = json.loads(status_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+
+    exit_code = proc.poll()
+    if exit_code is None:
+        return {"source_key": source_key, "status": "running",
+                "message": payload.get("message", "Waiting for you to approve access…")}
+
+    _CONSENT_PROCS.pop(source_key, None)
+    status_path.unlink(missing_ok=True)
+    if payload.get("status") == "completed":
+        return {"source_key": source_key, "status": "completed",
+                "account_email": payload.get("account_email"),
+                "message": payload.get("message", "Connected.")}
+    return {"source_key": source_key, "status": "failed",
+            "message": payload.get("error") or "Consent didn't complete.",
+            "remediation": "Confirm the JSON is a Desktop OAuth client, and that you clicked Allow."}
+
+
+def save_email_fetch(source_key: str, delivers_to: str, from_address: str = "",
+                     subject_contains: str = "", attachment_suffix: str = ".pdf",
+                     newer_than_days: int | None = None) -> dict:
+    """Tell a connected inbox which messages carry the document, and which source
+    should parse it."""
+    from core.tools.service_manifest import FetchConfig
+
+    services = _load_services()
+    if not any(s.key == source_key for s in services):
+        raise ToolError(f"Unknown source '{source_key}'.")
+    target = next((s for s in services if s.key == delivers_to), None)
+    if target is None:
+        raise ToolError(f"Unknown destination '{delivers_to}'.")
+    if not target.parser:
+        raise ToolError(
+            f"'{target.label}' has no parser yet, so it can't read what this inbox delivers. "
+            "Build a parser for it first."
+        )
+
+    ServiceManifest().set_fetch(source_key, FetchConfig(
+        provider="gmail",
+        delivers_to=delivers_to,
+        from_address=from_address.strip() or None,
+        subject_contains=subject_contains.strip() or None,
+        attachment_suffix=(attachment_suffix or "").strip() or None,
+        newer_than_days=int(newer_than_days) if newer_than_days else None,
+    ))
+    return email_status(source_key)
 
 
 def set_credentials(source_key: str, username: str | None = None,
@@ -1018,7 +1142,7 @@ def activate_parser(source_key: str) -> dict:
 
 # The tools the MCP server registers, in one place.
 READ_TOOLS = [list_sources, latest_transactions, source_transactions, action_progress,
-              source_settings, credential_status,
+              source_settings, credential_status, email_status,
               pending_approvals, llm_status, status]
 ACTION_TOOLS = [
     ingest_document,
@@ -1038,5 +1162,8 @@ ACTION_TOOLS = [
     reset_source_settings,
     set_credentials,
     forget_credentials,
+    start_gmail_consent,
+    gmail_consent_status,
+    save_email_fetch,
 ]
 ALL_TOOLS = READ_TOOLS + ACTION_TOOLS

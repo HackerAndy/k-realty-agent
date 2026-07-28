@@ -17,6 +17,7 @@ Same GUI, same tools, same core/ — only the transport differs.
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -170,6 +171,40 @@ async def upload_sample(source_key: str, file: UploadFile = File(...)):
 
     return {"source_key": source_key, "sample_path": str(dest),
             "filename": file.filename, "bytes": dest.stat().st_size}
+
+
+@app.post("/api/upload_oauth_client/{source_key}")
+async def upload_oauth_client(source_key: str, file: UploadFile = File(...)):
+    """Take the OAuth client JSON downloaded from Google Cloud.
+
+    It carries a client secret, so it lands in .secrets/ (gitignored) rather than
+    data/, and the consent worker DELETES it as soon as consent finishes — by
+    then its contents are in the encrypted store, and a second plaintext copy of
+    a client secret is pure downside.
+    """
+    safe_key = "".join(c for c in source_key if c.isalnum() or c in "_-")
+    if not safe_key:
+        raise HTTPException(status_code=400, detail={"message": f"Invalid source key '{source_key}'."})
+
+    secrets_dir = REPO_ROOT / ".secrets"
+    secrets_dir.mkdir(parents=True, exist_ok=True)
+    dest = secrets_dir / f"oauth-client-{safe_key}.json"
+    try:
+        raw = await file.read()
+        # Fail here rather than deep inside Google's flow, where the error is opaque.
+        parsed = json.loads(raw)
+        if not any(k in parsed for k in ("installed", "web")):
+            raise ValueError("not an OAuth client file — expected an 'installed' or 'web' section")
+        dest.write_bytes(raw)
+        dest.chmod(0o600)
+    except (ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=400, detail={
+            "message": f"That file isn't a Google OAuth client JSON: {exc}",
+        }) from exc
+    finally:
+        await file.close()
+
+    return {"source_key": source_key, "client_secret_path": str(dest), "filename": file.filename}
 
 
 def main() -> None:
