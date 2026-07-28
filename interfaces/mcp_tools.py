@@ -18,7 +18,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from core import progress, reconcile, source_status
+from core import hot_reload, progress, reconcile, source_status
 from core.observability import get_logger
 from core.fetch_ingest import fetch_and_ingest, persist_scraped
 from core.ingest import (
@@ -795,6 +795,14 @@ def build_status(source_key: str, event_offset: int = 0) -> dict:
     verification = (result or {}).get("verification") or {}
     payload["result"] = result
     payload["passed"] = bool(verification.get("ok"))
+
+    # The agent just rewrote this source's module on disk, but THIS process still
+    # has the version it imported at startup — so without a reload the operator
+    # runs the old code and the fix looks like it did nothing. Do it once, on the
+    # transition to completed.
+    if not meta.get("reloaded"):
+        payload["reload"] = hot_reload.reload_source_code(kind, source_key)
+        meta["reloaded"] = True
     if not payload["passed"]:
         # Ran, but the code isn't acceptable — say so plainly instead of implying success.
         payload["steps"] = [
