@@ -16,7 +16,7 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 
-from orchestration.codegen import fold_untested, run_codegen
+from orchestration.codegen import run_codegen_gated
 from orchestration.verify import run_test_file, test_path_for
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -45,8 +45,9 @@ def build_parser_for_source(
         "Also sanity-run the parser against the real sample before you finish."
     )
 
-    result = run_codegen(task, system, on_event=on_event)
-    verification = fold_untested(verify_parser(source_key, sample_path), result.tool_calls)
+    result, verification = run_codegen_gated(
+        task, system, lambda: verify_parser(source_key, sample_path), on_event=on_event
+    )
     return {
         "source_key": source_key,
         "parser_path": f"core/parsers/{source_key}.py",
@@ -78,8 +79,10 @@ def revise_parser_for_source(
         f"{test_path_for('parser', source_key)} to cover the change and run it — it MUST pass "
         "(the harness re-runs it). Say what you changed."
     )
-    result = run_codegen(task, system, on_event=on_event)
-    verification = fold_untested(verify_parser(source_key, sample_path), result.tool_calls)
+    result, verification = run_codegen_gated(
+        task, system, lambda: verify_parser(source_key, sample_path),
+        on_event=on_event, require_changes=True,
+    )
     return {
         "source_key": source_key,
         "parser_path": f"core/parsers/{source_key}.py",

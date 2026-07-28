@@ -73,6 +73,14 @@ def untested_code_files(tool_calls: list[tuple[str, dict]]) -> list[str]:
     return code if (code and not wrote_test) else []
 
 
+def files_written(tool_calls: list[tuple[str, dict]]) -> list[str]:
+    return [
+        inp.get("path", "")
+        for name, inp in tool_calls
+        if name == "write_file" and isinstance(inp, dict) and inp.get("path")
+    ]
+
+
 def fold_untested(verification: dict, tool_calls: list[tuple[str, dict]]) -> dict:
     """If the agent wrote code without a test, mark the verification not-ok and
     record which files. Reusable across builders."""
@@ -81,3 +89,79 @@ def fold_untested(verification: dict, tool_calls: list[tuple[str, dict]]) -> dic
         verification["untested_code"] = untested
         verification["ok"] = False
     return verification
+
+
+def fold_noop(verification: dict, tool_calls: list[tuple[str, dict]]) -> dict:
+    """A fix that changed NOTHING is not a success, however green the tests look.
+
+    Seen in the field: asked to add missing test coverage, the agent wrote no
+    files, re-ran the existing suite, and the harness reported ok — because
+    untested_code_files() only fires when code IS written. A no-op scored a
+    perfect green, which is worse than a failure: it ends the conversation.
+    """
+    if not files_written(tool_calls):
+        verification["no_changes"] = True
+        verification["ok"] = False
+    return verification
+
+
+def run_codegen_gated(
+    task: str,
+    system: str,
+    verify: Callable[[], dict],
+    on_event: Callable[[str], None] = print,
+    *,
+    require_changes: bool = False,
+    max_retries: int = 1,
+    **kwargs,
+) -> tuple[AgentResult, dict]:
+    """Run code-gen, verify, and give the agent ONE chance to fix its own process
+    failure before handing the operator a bad result.
+
+    `verify` re-runs the independent check and returns a verification dict.
+
+    The retry exists because the two failures below are the harness's rules being
+    ignored, not hard problems — and the operator was previously the one who had
+    to notice and say "you didn't test that", which is the harness's job:
+
+      - code written with no test at all (untested_code)
+      - a fix that changed nothing (no_changes, when require_changes)
+
+    A genuinely FAILING test is not retried here: that's a real engineering
+    problem for the operator to see and direct, not a rule the agent forgot.
+    """
+    result = run_agent(task, CODE_STANDARDS + "\n\n" + system, on_event=on_event, **kwargs)
+    verification = fold_untested(verify(), result.tool_calls)
+    if require_changes:
+        verification = fold_noop(verification, result.tool_calls)
+
+    for _ in range(max_retries):
+        reasons = []
+        if verification.get("untested_code"):
+            reasons.append(
+                "You changed " + ", ".join(verification["untested_code"]) +
+                " but wrote no test for it. Add a self-contained test that actually EXERCISES "
+                "what you changed, and run it. If the change genuinely cannot be unit-tested "
+                "(pure wiring such as a header or URL), say so explicitly and say what a live "
+                "run would have to show instead — do not write a test that only restates the code."
+            )
+        if verification.get("no_changes"):
+            reasons.append(
+                "You reported success without writing any file, so nothing was fixed. "
+                "Make the actual change, or state plainly that no change is needed and why."
+            )
+        if not reasons:
+            break
+
+        on_event("\nThe harness rejected that run: " + " ".join(reasons) + "\nRetrying once.\n")
+        result = run_agent(
+            "\n\n".join(reasons) + f"\n\nOriginal task, for context:\n{task}",
+            CODE_STANDARDS + "\n\n" + system,
+            on_event=on_event,
+            **kwargs,
+        )
+        verification = fold_untested(verify(), result.tool_calls)
+        if require_changes:
+            verification = fold_noop(verification, result.tool_calls)
+
+    return result, verification

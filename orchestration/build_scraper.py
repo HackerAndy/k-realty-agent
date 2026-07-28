@@ -21,7 +21,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from core.tools import demo_recorder
-from orchestration.codegen import fold_untested, run_codegen
+from orchestration.codegen import run_codegen_gated
 from orchestration.verify import run_test_file, test_path_for
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -60,8 +60,9 @@ def build_scraper_for_source(
         "it independently and will not approve an untested or failing scraper."
     )
 
-    result = run_codegen(task, system, on_event=on_event)
-    verification = fold_untested(verify_scraper(source_key), result.tool_calls)
+    result, verification = run_codegen_gated(
+        task, system, lambda: verify_scraper(source_key), on_event=on_event
+    )
     return {
         "source_key": source_key,
         "scraper_path": f"core/scrapers/{source_key}.py",
@@ -93,8 +94,10 @@ def revise_scraper_for_source(
         f"{test_path_for('scraper', source_key)} to cover the fix and run it — it MUST pass "
         "(the harness re-runs it). Say what you changed."
     )
-    result = run_codegen(task, system, on_event=on_event)
-    verification = fold_untested(verify_scraper(source_key), result.tool_calls)
+    result, verification = run_codegen_gated(
+        task, system, lambda: verify_scraper(source_key),
+        on_event=on_event, require_changes=True,
+    )
     return {
         "source_key": source_key,
         "scraper_path": f"core/scrapers/{source_key}.py",
