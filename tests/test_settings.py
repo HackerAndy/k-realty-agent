@@ -12,6 +12,7 @@ renders whatever a source declares and knows none of the field names itself.
 import pytest
 
 from core import settings
+from tests.test_codegen_gate import _Result, _wrote
 
 
 @pytest.fixture
@@ -183,3 +184,123 @@ def test_a_bad_value_reaches_the_operator_as_a_tool_error(isolated, declared):
 
     with pytest.raises(mcp_tools.ToolError, match="at most 365"):
         mcp_tools.save_source_settings("epic", {"lookback_days": 99999})
+
+
+# --- enforcement: no hardcoding, as infrastructure ---------------------------
+
+class TestNoHardcodedOptions:
+    """The operator's rule: this is an infrastructure requirement, not advice.
+
+    The scraper-builder prompt already asked for settings to be declared. Epic's
+    scraper was written under that instruction and still froze a 30-day window,
+    an accounting basis, a property selection and two more — which is the
+    difference between asking and enforcing.
+    """
+
+    def _scan(self, tmp_path, monkeypatch, source: str):
+        from orchestration import verify
+        monkeypatch.setattr(verify, "REPO_ROOT", tmp_path)
+        (tmp_path / "core" / "scrapers").mkdir(parents=True, exist_ok=True)
+        path = "core/scrapers/probe.py"
+        (tmp_path / path).write_text(source)
+        return verify.hardcoded_options(path)
+
+    def test_a_frozen_time_window_is_caught(self, tmp_path, monkeypatch):
+        found = self._scan(tmp_path, monkeypatch,
+                           "from datetime import timedelta\nw = timedelta(days=30)\n")
+        assert [f["kind"] for f in found] == ["time_window"]
+        assert "days=30" in found[0]["detail"]
+
+    def test_frozen_filter_selections_are_caught(self, tmp_path, monkeypatch):
+        found = self._scan(tmp_path, monkeypatch, '''
+body = {
+    "PropertySelectionType": "AllProperties",
+    "AccountingBasis": 1,
+    "IncludeFundType": True,
+    "GlAccountIds": account_ids,
+}
+''')
+        details = {f["detail"] for f in found}
+        assert "PropertySelectionType='AllProperties'" in details
+        assert "AccountingBasis=1" in details
+        assert not any("GlAccountIds" in d for d in details), "a computed value is not hardcoded"
+
+    def test_an_extract_mapping_is_not_flagged(self, tmp_path, monkeypatch):
+        """The false positive that would make the gate unusable: every scraper
+        builds a fields dict, and its values are expressions, not literals."""
+        found = self._scan(tmp_path, monkeypatch, '''
+def _extract(rows):
+    return [{
+        "Id": str(r.get("Id", "")),
+        "Date": str(r.get("Date", "")),
+        "Amount": str(r.get("Amount", "")),
+        "Name": str(r.get("Name", "")),
+    } for r in rows]
+''')
+        assert found == []
+
+    def test_a_fixed_line_can_be_exempted_with_a_stated_reason(self, tmp_path, monkeypatch):
+        """Some values really are protocol. The escape hatch is per line and has
+        to say something, so the justification is visible in review."""
+        found = self._scan(tmp_path, monkeypatch, '''
+body = {
+    "PropertySelectionType": "AllProperties",  # fixed: the API rejects any other value
+    "AccountingBasis": 1,
+    "IncludeFundType": True,
+}
+''')
+        assert all("PropertySelectionType" not in f["detail"] for f in found)
+        assert any("AccountingBasis" in f["detail"] for f in found), "only the marked line is exempt"
+
+    def test_declaring_settings_without_reading_them_does_not_count(self, tmp_path, monkeypatch):
+        from orchestration import verify
+        monkeypatch.setattr(verify, "REPO_ROOT", tmp_path)
+        (tmp_path / "core" / "scrapers").mkdir(parents=True, exist_ok=True)
+
+        (tmp_path / "core/scrapers/a.py").write_text(
+            'SETTINGS = [{"key": "lookback_days", "default": 30}]\n')
+        assert verify.declares_settings("core/scrapers/a.py") is False, "declared but never read"
+
+        (tmp_path / "core/scrapers/b.py").write_text(
+            'from core import settings\n'
+            'SETTINGS = [{"key": "lookback_days", "default": 30}]\n'
+            'def retrieve():\n    return settings.values_for("x")\n')
+        assert verify.declares_settings("core/scrapers/b.py") is True
+
+    def test_the_build_gate_fails_and_names_the_lines(self, monkeypatch):
+        """It has to be actionable: which file, which line, which value."""
+        from orchestration import codegen
+
+        monkeypatch.setattr(codegen, "hardcoded_options",
+                            lambda p: [{"line": 206, "kind": "time_window",
+                                        "detail": "timedelta(days=30)"}])
+        v = codegen.fold_hardcoded({"ok": True},
+                                   [("write_file", {"path": "core/scrapers/epic.py"})])
+
+        assert v["ok"] is False
+        assert v["hardcoded_options"]["core/scrapers/epic.py"][0]["line"] == 206
+
+    def test_the_agent_is_told_how_to_fix_it_and_retried(self, monkeypatch):
+        from orchestration import codegen
+
+        seen = {"tasks": []}
+        results = iter([
+            _Result(_wrote("core/scrapers/epic.py", "tests/test_epic.py")),
+            _Result(_wrote("core/scrapers/epic.py", "tests/test_epic.py")),
+        ])
+
+        def fake_run_agent(task, system, on_event=print, **kw):
+            seen["tasks"].append(task)
+            return next(results)
+
+        scans = iter([[{"line": 206, "kind": "time_window", "detail": "timedelta(days=30)"}], []])
+        monkeypatch.setattr(codegen, "run_agent", fake_run_agent)
+        monkeypatch.setattr(codegen, "hardcoded_options", lambda p: list(next(scans)))
+
+        _, v = codegen.run_codegen_gated(
+            "build it", "SYSTEM", lambda: {"ok": True}, on_event=lambda m: None)
+
+        assert len(seen["tasks"]) == 2, "hardcoded options must earn a retry"
+        assert "SETTINGS" in seen["tasks"][1] and "values_for" in seen["tasks"][1]
+        assert "# fixed:" in seen["tasks"][1], "the escape hatch must be offered too"
+        assert v["ok"] is True

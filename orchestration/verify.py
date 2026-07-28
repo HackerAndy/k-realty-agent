@@ -10,6 +10,7 @@ A missing test is a FAILURE, not a pass: the harness does not ship untested code
 
 from __future__ import annotations
 
+import ast
 import re
 import subprocess
 from pathlib import Path
@@ -47,6 +48,93 @@ def run_test_file(test_path: str, timeout: int = 300) -> dict:
     if len(out) > _MAX_OUTPUT:
         out = out[-_MAX_OUTPUT:]
     return {"ok": proc.returncode == 0, "missing": False, "test_path": test_path, "output": out}
+
+
+def hardcoded_options(path: str) -> list[dict]:
+    """Configuration-shaped literals baked into a source module.
+
+    Infrastructure rule: the choices a portal asks for before handing over data
+    (a lookback window, an accounting basis, a property selection) belong in
+    core/settings.py, NOT in the code — otherwise changing one costs a code edit,
+    a test run and an approval. The scraper-builder prompt says so, but a prompt
+    is advice; this makes it a gate.
+
+    Two shapes are looked for, both low-noise:
+      - `timedelta(days=30)` and friends — a hardcoded window.
+      - literal scalars inside a request-payload dict (>=3 string keys), which is
+        how a portal's filter selections get frozen.
+
+    An `_extract()` mapping is unaffected: its dict values are expressions over
+    the response, not literals.
+
+    ESCAPE HATCH: a line carrying `# fixed:` is exempt. Some values genuinely are
+    protocol, not preference, and the right answer there is a written reason
+    rather than silence — which is also why the exemption is per line and has to
+    say something.
+    """
+    full = REPO_ROOT / path
+    try:
+        source = full.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+    except (OSError, SyntaxError):
+        return []
+
+    lines = source.splitlines()
+
+    def exempt(lineno: int) -> bool:
+        line = lines[lineno - 1] if 0 < lineno <= len(lines) else ""
+        return "# fixed:" in line
+
+    def literal(node) -> bool:
+        return isinstance(node, ast.Constant) and isinstance(node.value, (str, int, float, bool))
+
+    findings: list[dict] = []
+
+    def add(node, kind: str, detail: str) -> None:
+        if not exempt(node.lineno):
+            findings.append({"line": node.lineno, "kind": kind, "detail": detail})
+
+    for node in ast.walk(tree):
+        # a hardcoded time window
+        if isinstance(node, ast.Call):
+            name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+            if name == "timedelta":
+                for kw in node.keywords:
+                    if literal(kw.value):
+                        add(node, "time_window", f"timedelta({kw.arg}={kw.value.value!r})")
+
+        # a frozen filter payload
+        if isinstance(node, ast.Dict) and len(node.keys) >= 3:
+            string_keys = [k for k in node.keys if isinstance(k, ast.Constant) and isinstance(k.value, str)]
+            if len(string_keys) < 3:
+                continue
+            for key, value in zip(node.keys, node.values):
+                if literal(value) and isinstance(key, ast.Constant):
+                    add(value, "payload_literal", f"{key.value}={value.value!r}")
+
+    return findings
+
+
+def declares_settings(path: str) -> bool:
+    """Does this module declare a non-empty SETTINGS list AND read it at run time?
+    Declaring without reading is just as hardcoded, only less honest."""
+    full = REPO_ROOT / path
+    try:
+        tree = ast.parse(full.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return False
+
+    declared = any(
+        isinstance(node, ast.Assign)
+        and any(getattr(t, "id", None) == "SETTINGS" for t in node.targets)
+        and isinstance(node.value, ast.List) and node.value.elts
+        for node in ast.walk(tree)
+    )
+    reads = any(
+        isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "values_for"
+        for node in ast.walk(tree)
+    )
+    return declared and reads
 
 
 def changed_lines(path: str) -> set[int]:

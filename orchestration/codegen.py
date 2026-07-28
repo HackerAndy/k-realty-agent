@@ -18,7 +18,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from orchestration.agent import AgentResult, run_agent
-from orchestration.verify import covers_changes
+from orchestration.verify import covers_changes, hardcoded_options
 
 # Prepended to EVERY code-gen system prompt — the rules that apply to ALL code the
 # embedded agent writes, regardless of the specific task.
@@ -111,6 +111,28 @@ def fold_uncovered(verification: dict, tool_calls: list[tuple[str, dict]], test_
     return verification
 
 
+def fold_hardcoded(verification: dict, tool_calls: list[tuple[str, dict]]) -> dict:
+    """Infrastructure rule, enforced rather than merely requested: the choices a
+    portal asks for belong in settings, not baked into the code.
+
+    The prompt already tells the agent to declare them. A prompt is advice — the
+    Epic scraper was written under that instruction and still froze a 30-day
+    window, an accounting basis, a property selection and two more. This turns it
+    into something the build fails on.
+    """
+    offenders: dict[str, list[dict]] = {}
+    for path in files_written(tool_calls):
+        if not _is_code_file(path):
+            continue
+        found = hardcoded_options(path)
+        if found:
+            offenders[path] = found
+    if offenders:
+        verification["hardcoded_options"] = offenders
+        verification["ok"] = False
+    return verification
+
+
 def fold_noop(verification: dict, tool_calls: list[tuple[str, dict]]) -> dict:
     """A fix that changed NOTHING is not a success, however green the tests look.
 
@@ -155,6 +177,7 @@ def run_codegen_gated(
         v = fold_untested(verify(), res.tool_calls)
         if test_path and not v.get("untested_code"):
             v = fold_uncovered(v, res.tool_calls, test_path)
+        v = fold_hardcoded(v, res.tool_calls)
         if require_changes:
             v = fold_noop(v, res.tool_calls)
         return v
@@ -179,6 +202,18 @@ def run_codegen_gated(
                 "leaves the change unexecuted proves nothing. Extend it so those lines actually run. "
                 "If they genuinely cannot be exercised in a unit test (pure wiring such as a header "
                 "or URL), say so explicitly and say what a live run would have to show instead."
+            )
+        if verification.get("hardcoded_options"):
+            detail = "; ".join(
+                f"{p}: " + ", ".join(f"line {o['line']} {o['detail']}" for o in found)
+                for p, found in verification["hardcoded_options"].items())
+            reasons.append(
+                "You hardcoded choices that the operator must be able to change without a code "
+                "edit — " + detail + ". Declare them in a module-level SETTINGS list and read them "
+                "at run time with settings.values_for(SERVICE_KEY), using the values you saw in the "
+                "demonstration as the DEFAULTS so behaviour is unchanged. If a value genuinely is "
+                "fixed protocol rather than a preference, leave it and add a `# fixed: <reason>` "
+                "comment on that line saying why."
             )
         if verification.get("no_changes"):
             reasons.append(
