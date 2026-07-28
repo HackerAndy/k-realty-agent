@@ -12,9 +12,8 @@ packages = [
 ]
 
 [tool.poetry.scripts]
-agent = "interfaces.tui:main"
-agent-mcp = "interfaces.mcp_server:main"
 agent-web = "interfaces.rest_server:main"
+agent-mcp = "interfaces.mcp_server:main"
 
 [tool.poetry.dependencies]
 python = "^3.11"

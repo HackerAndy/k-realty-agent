@@ -50,35 +50,43 @@ poetry install
 
 ## Running the agent
 
-Everything is controlled from one TUI:
+The browser GUI is the front-end — everything the operator does happens there:
 
 ```bash
-poetry run agent
+poetry run agent-web
 ```
 
-Menu: ingest a source (pick a source, point at its document → transactions),
-view the latest parsed transactions, manage services & credentials, and
-status. All data stays local: parsed output in `data/` (gitignored),
-credentials encrypted in `.secrets/`.
+It serves http://127.0.0.1:8765. Three pillars: **Ingest** (each source, how
+its data arrives, and the transactions it produced), **Process** and **Report**
+(not built yet, and the screen says so). **Settings** holds the LLM provider and
+every sign-in — portal logins, the Gmail inbox, the API key — stored encrypted
+in `.secrets/` and never shown back to you. All data stays local: parsed output
+in `data/` (gitignored).
 
-**Adding a source.** `core/policies/services.yaml` lists all 8 financial
-sources from the onboarding form, each with an `input_type`, `access`, a
-`parser` name, and a `status`. To handle a new one: get a real sample
-document, write a parser in `core/parsers/<source>.py` exposing
-`(path) -> list[Transaction]`, register it in `core/parsers/__init__.py`,
-and set that source's `parser` + `status: implemented` in `services.yaml`.
-The Status screen shows how many sources have parsers (1 of 8 today).
+The same tool surface is also exposed over MCP for a Claude host:
 
-If a source's parser can't read a document's layout and `ANTHROPIC_API_KEY`
-is set, the TUI offers an AI extraction fallback — the one step where data
-leaves the machine, gated behind an explicit consent prompt.
+```bash
+poetry run agent-mcp
+```
 
-Credential setup (also reachable from the TUI menu) is for the future portal
-scrapers; parsing a statement PDF needs no credentials:
+**Adding a source.** `core/policies/services.yaml` is the registry: each source
+with its `input_type`, `access`, `parser`/`scraper`, and `status`. The code that
+reads a source is **written by the harness's own agent**, not by hand — you give
+it a real sample document (or demonstrate the portal navigation) and it writes
+the parser/scraper *and a test*, which the harness re-runs independently before
+you approve it. See the Foundational directive in [CLAUDE.md](CLAUDE.md).
+
+When a source has no parser yet, or its parser can't read this month's layout,
+the GUI offers to read the document with the configured model instead — enough
+to get today's numbers, explicitly marked unverified, and gated on your consent
+because it's the step where a document's text leaves the parser.
+
+Credentials are managed in Settings. The CLI equivalent still exists for
+first-run key generation and bulk edits:
 
 ```bash
 poetry run python scripts/manage_secrets.py generate-key   # once; save the key
-poetry run python scripts/manage_secrets.py setup          # guided, all 9 services
+poetry run python scripts/manage_secrets.py setup          # guided, all services
 ```
 
 ## Portability check
