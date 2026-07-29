@@ -20,3 +20,7 @@ _googleEmail/
 
 # Coverage data written by the code-gen gate (orchestration/verify.py)
 .coverage*
+
+# Agent worktrees — full working copies of this repo (hundreds of MB), created
+# per background task. The skills beside them (.claude/skills) ARE tracked.
+.claude/worktrees/
