@@ -77,15 +77,25 @@ def reset_profile(service_key: str, profile_root: Path = DEFAULT_PROFILE_ROOT) -
     blank tabs rather than ever succeeding. One clean kill-then-launch avoids
     that entirely.
     """
-    profile_dir = str(_profile_dir(service_key, profile_root))
+    profile_dir = _profile_dir(service_key, profile_root)
     _kill_pids(_find_pids(f"core.tools.login_recovery_worker {service_key} "), exclude={os.getpid()})
-    _kill_pids(_find_pids(f"user-data-dir={profile_dir}"))
+    _kill_pids(_find_pids(_profile_pattern(profile_dir)))
 
 
 def _profile_dir(service_key: str, profile_root: Path) -> Path:
     profile_dir = profile_root / service_key
     profile_dir.mkdir(parents=True, exist_ok=True)
     return profile_dir
+
+
+def _profile_pattern(profile_dir: Path) -> str:
+    """The pgrep pattern that matches the browser holding this profile.
+
+    Chromium is launched with an ABSOLUTE --user-data-dir (Playwright resolves
+    whatever path it is given), so a pattern built from a relative path matches
+    nothing — which reads as "the browser is gone" the instant it starts.
+    """
+    return f"user-data-dir={Path(profile_dir).resolve()}"
 
 
 @contextmanager
@@ -157,19 +167,27 @@ def wait_until_window_closed(
     can no longer be read once the operator has closed the window.
     """
     deadline = time.monotonic() + max_wait_s
+    pattern = _profile_pattern(profile_dir)
     gone_checks = 0
+    seen_alive = False
     while True:
         try:
             if page.is_closed():
                 return "page closed"
         except Exception:
             return "browser connection lost"
-        if not _find_pids(f"user-data-dir={profile_dir}"):
+        if _find_pids(pattern):
+            seen_alive = True
+            gone_checks = 0
+        elif seen_alive:
+            # Only trust ABSENCE once presence has been observed. If the pattern
+            # never matched, the more likely explanation is that the pattern is
+            # wrong (it once was — a relative path against Chromium's absolute
+            # --user-data-dir), and acting on it shuts the operator's browser
+            # a second after it opens. Fall back to the close event / deadline.
             gone_checks += 1
             if gone_checks >= 2:
                 return "no browser process left for this profile"
-        else:
-            gone_checks = 0
         if on_poll is not None:
             try:
                 on_poll(page)

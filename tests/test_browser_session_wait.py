@@ -9,6 +9,8 @@ left holding the profile) and must never wait without a deadline.
 The loop is exercised through a fake page/context, so no real browser is needed.
 """
 
+from pathlib import Path
+
 import pytest
 
 import core.tools.browser_session as bs
@@ -150,6 +152,33 @@ def test_a_lost_connection_is_treated_as_closed(harness, capsys):
     context = run(_DeadPage())
     assert context.closed
     assert "connection lost" in capsys.readouterr().out
+
+
+def test_the_process_pattern_is_absolute(tmp_path, monkeypatch):
+    """THE bug: Chromium is launched with an absolute --user-data-dir (Playwright
+    resolves whatever it is given), so a pattern built from the relative path
+    matched nothing, the loop read that as "the browser is gone", and the window
+    the operator was about to use closed a second after it opened."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".browser_profiles" / "epic").mkdir(parents=True)
+
+    pattern = bs._profile_pattern(Path(".browser_profiles/epic"))
+
+    assert pattern.startswith("user-data-dir=/")
+    assert str(tmp_path.resolve()) in pattern
+
+
+def test_a_pattern_that_never_matches_does_not_end_the_session(harness):
+    """The same failure, guarded at the loop instead of the pattern: if presence
+    was never observed, absence proves nothing about the browser — it more likely
+    means the pattern is wrong, so keep waiting for the close event."""
+    run, state = harness
+    state["set_pids"](lambda pattern: [])            # nothing ever matches
+    page = _FakePage(closes_after=8)
+
+    run(page, max_wait_s=60.0)
+
+    assert page.checks >= 8, "it waited for the operator to close the window"
 
 
 def test_it_gives_up_instead_of_waiting_forever(harness):
