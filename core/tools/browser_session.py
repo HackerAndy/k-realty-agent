@@ -144,58 +144,170 @@ def bootstrap_login(
         )
 
 
-def wait_until_window_closed(
-    page: Page,
+def _wait_for_the_operator(
     profile_dir: Path,
-    max_wait_s: float = 15 * 60,
-    on_poll: "Callable[[Page], None] | None" = None,
+    max_wait_s: float,
+    done: "Callable[[], str | None]",
+    tick: "Callable[[], None] | None" = None,
 ) -> str:
-    """Block until the operator is done with a headed browser. Returns the reason.
+    """Poll until `done()` names a reason to stop. Returns that reason.
 
-    "Done" has to be recognised three ways, because the obvious one isn't enough:
+    Two stop conditions are added to whatever `done` watches, because the
+    obvious "the window closed" signal isn't enough on its own:
 
-    * `page.is_closed()` reads locally cached state that only updates when
-      Chromium delivers a CDP close event. Quit the browser abruptly (Cmd-Q,
-      crash, force quit) and that event never arrives — it stays False forever.
-    * So also consult OS truth: no Chromium process still holds this profile =>
-      the browser is gone, whatever CDP thinks. Two consecutive empty checks, so
-      a momentary pgrep miss during startup can't end the session early.
-    * Plus an absolute deadline, so this can never hang indefinitely.
+    * OS truth: no Chromium process still holds this profile => the browser is
+      gone, whatever CDP thinks (an abrupt Cmd-Q never delivers a close event).
+      Two consecutive empty checks, so a momentary pgrep miss can't end the
+      session early — and absence is only trusted once presence has been seen,
+      since a pattern that never matches means "I can't see it", not "it's gone".
+    * An absolute deadline, so this can never hang indefinitely.
 
-    `on_poll` runs on each tick WHILE the page is still alive — the hook a
-    recorder needs, since anything it wants off the page (actions, structure)
-    can no longer be read once the operator has closed the window.
+    `tick` runs on each poll WHILE the browser is still alive — the hook a
+    recorder needs, since anything it wants off a page (actions, structure) can
+    no longer be read once the operator has closed the window.
     """
     deadline = time.monotonic() + max_wait_s
     pattern = _profile_pattern(profile_dir)
     gone_checks = 0
     seen_alive = False
     while True:
-        try:
-            if page.is_closed():
-                return "page closed"
-        except Exception:
-            return "browser connection lost"
+        reason = done()
+        if reason:
+            return reason
         if _find_pids(pattern):
             seen_alive = True
             gone_checks = 0
         elif seen_alive:
-            # Only trust ABSENCE once presence has been observed. If the pattern
-            # never matched, the more likely explanation is that the pattern is
-            # wrong (it once was — a relative path against Chromium's absolute
-            # --user-data-dir), and acting on it shuts the operator's browser
-            # a second after it opens. Fall back to the close event / deadline.
             gone_checks += 1
             if gone_checks >= 2:
                 return "no browser process left for this profile"
-        if on_poll is not None:
+        if tick is not None:
             try:
-                on_poll(page)
+                tick()
             except Exception:
                 pass   # a snapshot failing must never end the operator's session
         if time.monotonic() > deadline:
             return "deadline"
         time.sleep(0.5)
+
+
+def wait_until_window_closed(
+    page: Page,
+    profile_dir: Path,
+    max_wait_s: float = 15 * 60,
+    on_poll: "Callable[[Page], None] | None" = None,
+) -> str:
+    """Block until the operator closes THIS page. Returns the reason.
+
+    For a single-page errand (log in here, then close it). Anything where the
+    operator navigates freely — and may open or close tabs on the way — wants
+    wait_until_browsing_done() instead, which doesn't tie the session's life to
+    one tab.
+    """
+
+    def done() -> str | None:
+        try:
+            return "page closed" if page.is_closed() else None
+        except Exception:
+            return "browser connection lost"
+
+    return _wait_for_the_operator(
+        profile_dir,
+        max_wait_s,
+        done,
+        None if on_poll is None else lambda: on_poll(page),
+    )
+
+
+def _live_pages(context) -> list[Page]:
+    """The pages the operator is actually looking at.
+
+    A blank tab doesn't count. Chromium opens one at launch, and on macOS can
+    auto-spawn another when the last window closes ("reopen" behaviour), so
+    counting blanks would mean the session either ends before they start or
+    never ends at all.
+    """
+    live: list[Page] = []
+    for page in list(context.pages):
+        try:
+            if page.is_closed():
+                continue
+            url = page.url or ""
+        except Exception:
+            continue
+        if url and not url.startswith(("about:", "chrome://", "chrome-error://")):
+            live.append(page)
+    return live
+
+
+def wait_until_browsing_done(
+    context,
+    profile_dir: Path,
+    max_wait_s: float = 15 * 60,
+    on_poll: "Callable[[list[Page]], None] | None" = None,
+) -> str:
+    """Block until the operator has closed everything they opened.
+
+    Watching a single page object is wrong for a demonstration: the operator
+    opens a new tab to reach the portal, a link opens one for them, or they
+    close the blank tab the browser started with — and the tab we happened to
+    hold a reference to closes while the real work is still on screen. That
+    ended demonstrations seconds after they began, with nothing captured.
+
+    So the session lives as long as ANY real page does, and `on_poll` gets all
+    of them — the operator's demonstration is whatever they did across tabs.
+    """
+    state: dict = {"pages": [], "seen": False}
+
+    def done() -> str | None:
+        try:
+            pages = _live_pages(context)
+        except Exception:
+            return "browser connection lost"
+        state["pages"] = pages
+        if pages:
+            state["seen"] = True
+            return None
+        # No real page. Before they've opened one, that's just the blank tab
+        # they haven't typed into yet — keep waiting.
+        return "all windows closed" if state["seen"] else None
+
+    return _wait_for_the_operator(
+        profile_dir,
+        max_wait_s,
+        done,
+        None if on_poll is None else lambda: on_poll(state["pages"]),
+    )
+
+
+def close_context(context, profile_dir: Path, timeout_s: float = 5.0) -> None:
+    """Close a headed context without ever hanging on it.
+
+    context.close() sends a graceful CDP Browser.close and waits for the
+    Chromium process to actually exit. On macOS that can wait forever: closing
+    the last window doesn't quit the app, so the process it's waiting on never
+    goes away — and the worker (plus the UI polling it) hangs even though the
+    operator did everything right. So arm a watchdog that kills the profile's
+    processes if the close is still waiting after `timeout_s` — the process it
+    was blocked on is then gone and the close returns. The profile is already
+    on disk by that point, so killing is safe.
+
+    The close itself must run on THIS thread: sync Playwright objects belong to
+    the greenlet that made them, and calling close() from a helper thread only
+    raises (which, silently caught, meant the close never happened at all — and
+    a demonstration's HAR is written by that close).
+    """
+    watchdog = threading.Timer(
+        timeout_s, lambda: _kill_pids(_find_pids(_profile_pattern(profile_dir)))
+    )
+    watchdog.daemon = True
+    watchdog.start()
+    try:
+        context.close()
+    except Exception:
+        pass
+    finally:
+        watchdog.cancel()
 
 
 def bootstrap_login_until_window_closed(
@@ -277,26 +389,4 @@ def bootstrap_login_until_window_closed(
                     "The session was not saved. Retry recovery and close the browser window when done."
                 )
         finally:
-            # context.close() sends a graceful CDP Browser.close and waits for
-            # the underlying Chromium process to actually exit. On macOS that
-            # can hang indefinitely: closing the last window doesn't quit the
-            # app (see the reopen note above), so the process the CDP command
-            # is waiting on never goes away, and this worker — and the
-            # session-saved signal the UI is polling for — would hang forever
-            # even though the user did everything right. Give the graceful
-            # close a few seconds, then forcibly kill the profile's process
-            # tree if it hasn't finished (the profile is already flushed to
-            # disk by then; killing after close() was requested is safe).
-            done = threading.Event()
-
-            def _graceful_close() -> None:
-                try:
-                    context.close()
-                except Exception:
-                    pass
-                finally:
-                    done.set()
-
-            threading.Thread(target=_graceful_close, daemon=True).start()
-            if not done.wait(timeout=5.0):
-                _kill_pids(_find_pids(f"user-data-dir={profile_dir}"))
+            close_context(context, profile_dir)

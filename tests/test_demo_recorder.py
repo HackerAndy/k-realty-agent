@@ -4,10 +4,16 @@ The recorder used to end with input() — "press Enter when your data is on
 screen". The GUI is the only front-end now, and it has no Enter to press, so the
 finish signal is closing the browser window, exactly like login recovery.
 
-That change creates one hazard worth pinning: a page can't be read once it's
-closed. Everything the agent needs (the clicks, the rendered table, the URL the
-operator actually reached) has to be snapshotted WHILE the window is open, or
-the demonstration comes back empty and the operator is asked to do it twice.
+That change creates two hazards worth pinning:
+
+* A page can't be read once it's closed. Everything the agent needs (the clicks,
+  the rendered table, the URL the operator actually reached) has to be
+  snapshotted WHILE the window is open, or the demonstration comes back empty
+  and the operator is asked to do it twice.
+* The demonstration is not one tab. The operator opens a new tab to reach the
+  portal, or the portal opens its report in one; tying the session's life to the
+  tab the recorder happened to hold ended demonstrations seconds after they
+  began ("finished: page closed" while the browser was still on screen).
 """
 
 import json
@@ -19,37 +25,46 @@ import core.tools.demo_recorder as dr
 
 
 class _FakePage:
-    """Closes after N is_closed() checks; serves changing state until then."""
+    """A tab that becomes real at `opens_at` and closes at `closes_after`.
 
-    def __init__(self, closes_after=3, url="https://portal.example.com/reports"):
-        self._closes_after = closes_after
-        self.checks = 0
-        self.url = "about:blank"
+    Poll number is counted by is_closed(), which the wait loop calls once per
+    page per poll. A tab still showing about:blank is not a page the operator
+    is working in — the recorder must ignore it, not finish on it.
+    """
+
+    def __init__(self, url="https://portal.example.com/reports",
+                 opens_at=2, closes_after=None, visible=True):
         self._target = url
+        self._opens_at = opens_at
+        self._closes_after = closes_after
+        self.visible = visible
+        self.url = "about:blank"
+        self.checks = 0
         self.evaluated = 0
 
     def is_closed(self):
         self.checks += 1
-        if self.checks == 2:
-            self.url = self._target      # they navigated after the browser opened
+        if self.checks >= self._opens_at:
+            self.url = self._target
         return self._closes_after is not None and self.checks >= self._closes_after
 
     def goto(self, *a, **k):
         pass
 
     def evaluate(self, script):
+        if "visibilityState" in script:
+            return "visible" if self.visible else "hidden"
         self.evaluated += 1
         return [{"kind": "click", "text": f"Generate {self.evaluated}"}] * self.evaluated
 
 
 class _FakeContext:
-    def __init__(self, page):
-        self._page = page
-        self.pages = [page]
+    def __init__(self, *pages):
+        self.pages = list(pages)
         self.closed = False
 
     def new_page(self):
-        return self._page
+        return self.pages[0]
 
     def add_init_script(self, *a, **k):
         pass
@@ -65,11 +80,12 @@ def recorder(monkeypatch, tmp_path):
     monkeypatch.setattr(bs.time, "sleep", lambda s: None)
     monkeypatch.setattr(dr, "_extract_requests", lambda har: [{"url": "/api/transactions"}])
     monkeypatch.setattr(dr, "_page_structure",
-                        lambda page: {"title": "Reports", "tables": [{"headers": ["Date", "Amount"]}]})
+                        lambda page: {"title": f"Reports {page.url}",
+                                      "tables": [{"headers": ["Date", "Amount"]}]})
     monkeypatch.setattr(dr, "PROFILE_ROOT", tmp_path / "profiles")
 
-    def run(page, url="", out_dir=None, max_wait_s=60.0):
-        context = _FakeContext(page)
+    def run(*pages, url="", out_dir=None, max_wait_s=60.0):
+        context = _FakeContext(*pages)
 
         class _PW:
             class chromium:
@@ -104,7 +120,7 @@ def test_the_page_is_captured_while_it_is_still_open(recorder):
     demo, _ = recorder(_FakePage(closes_after=4))
 
     assert demo["recorded_actions"], "the operator's clicks survived the close"
-    assert demo["final_page"]["title"] == "Reports"
+    assert demo["final_page"]["title"].startswith("Reports")
 
 
 def test_the_longest_run_of_clicks_wins(recorder):
@@ -141,6 +157,44 @@ def test_a_snapshot_that_blows_up_does_not_end_the_session(recorder, monkeypatch
 
     assert page.checks >= 4, "it kept polling"
     assert demo["final_page"] == {}
+
+
+def test_closing_the_first_tab_does_not_end_the_demonstration(recorder):
+    """THE reported bug: 'finished: page closed' arrived while the browser was
+    still open, because the operator had opened a second tab (to reach the
+    portal, or the portal opened its report in one) and closed the first."""
+    first = _FakePage(url="https://portal.example.com/login", closes_after=4)
+    second = _FakePage(url="https://portal.example.com/gl-report",
+                       opens_at=3, closes_after=8)
+
+    demo, _ = recorder(first, second)
+
+    assert second.checks >= 8, "the session lived as long as the tab in use"
+    assert demo["final_url"] == "https://portal.example.com/gl-report"
+    assert demo["final_page"]["title"].endswith("gl-report"), "it read the tab they were in"
+
+
+def test_the_tab_in_front_is_the_one_that_counts(recorder):
+    """With two tabs open, the data is on the one they're looking at."""
+    background = _FakePage(url="https://portal.example.com/login",
+                           closes_after=6, visible=False)
+    foreground = _FakePage(url="https://portal.example.com/gl-report",
+                           closes_after=6, visible=True)
+
+    demo, _ = recorder(background, foreground)
+
+    assert demo["final_url"] == "https://portal.example.com/gl-report"
+
+
+def test_clicks_from_every_tab_reach_the_agent(recorder):
+    """The demonstration is what they did, wherever they did it."""
+    first = _FakePage(url="https://portal.example.com/login", closes_after=5)
+    second = _FakePage(url="https://portal.example.com/gl-report",
+                       opens_at=2, closes_after=5)
+
+    demo, _ = recorder(first, second)
+
+    assert len(demo["recorded_actions"]) == first.evaluated + second.evaluated
 
 
 def test_it_gives_up_rather_than_waiting_forever(recorder, monkeypatch):

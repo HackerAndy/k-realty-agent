@@ -10,6 +10,7 @@ The loop is exercised through a fake page/context, so no real browser is needed.
 """
 
 from pathlib import Path
+import threading
 
 import pytest
 
@@ -179,6 +180,87 @@ def test_a_pattern_that_never_matches_does_not_end_the_session(harness):
     run(page, max_wait_s=60.0)
 
     assert page.checks >= 8, "it waited for the operator to close the window"
+
+
+class _Tab:
+    """A tab with a URL of its own, for the free-browsing wait."""
+
+    def __init__(self, url="about:blank", closes_after=None):
+        self.url = url
+        self._closes_after = closes_after
+        self.checks = 0
+
+    def is_closed(self):
+        self.checks += 1
+        return self._closes_after is not None and self.checks >= self._closes_after
+
+
+class _Tabs:
+    def __init__(self, *tabs):
+        self.pages = list(tabs)
+
+
+def _wait_over(monkeypatch, tmp_path, context, max_wait_s=60.0):
+    monkeypatch.setattr(bs, "_find_pids", lambda pattern: [4242])
+    monkeypatch.setattr(bs.time, "sleep", lambda s: None)
+    return bs.wait_until_browsing_done(context, tmp_path, max_wait_s=max_wait_s)
+
+
+def test_free_browsing_ends_when_the_last_real_tab_closes(monkeypatch, tmp_path):
+    """Not when the FIRST one does — the operator opens a tab to reach the
+    portal and closes the one the browser started them on."""
+    first = _Tab("https://portal.example.com/login", closes_after=3)
+    second = _Tab("https://portal.example.com/report", closes_after=7)
+
+    reason = _wait_over(monkeypatch, tmp_path, _Tabs(first, second))
+
+    assert reason == "all windows closed"
+    assert second.checks >= 7, "it stayed with the tab still open"
+
+
+def test_a_blank_tab_is_not_a_demonstration_that_already_ended(monkeypatch, tmp_path):
+    """Chromium opens a blank tab at launch, and on macOS can spawn another when
+    the last window closes. Counting blanks as real pages would end the session
+    before the operator typed anything; counting them as pages-still-open would
+    mean it never ends. They're neither."""
+    blank = _Tab("about:blank")
+
+    reason = _wait_over(monkeypatch, tmp_path, _Tabs(blank), max_wait_s=0.0)
+
+    assert reason == "deadline", "it waited for them rather than declaring it over"
+
+
+def test_the_context_is_closed_on_the_calling_thread(tmp_path):
+    """Sync Playwright objects belong to the greenlet that created them, so
+    closing from a helper thread only raises greenlet.error — and swallowing
+    that meant the close never happened. It is the close that writes a
+    demonstration's HAR, i.e. the best material the scraper builder gets."""
+    seen = {}
+
+    class _Ctx:
+        def close(self):
+            seen["thread"] = threading.get_ident()
+
+    bs.close_context(_Ctx(), tmp_path)
+
+    assert seen["thread"] == threading.get_ident()
+
+
+def test_a_close_that_hangs_is_broken_by_killing_the_browser(monkeypatch, tmp_path):
+    """close() waits for Chromium to exit; on macOS closing the last window
+    doesn't quit the app, so it can wait forever. The watchdog kills the
+    profile's processes, which is what lets the close return."""
+    released = threading.Event()
+    monkeypatch.setattr(bs, "_find_pids", lambda pattern: [4242])
+    monkeypatch.setattr(bs, "_kill_pids", lambda pids, exclude=None: released.set())
+
+    class _Ctx:
+        def close(self):
+            assert released.wait(timeout=5.0), "the watchdog never fired"
+
+    bs.close_context(_Ctx(), tmp_path, timeout_s=0.1)
+
+    assert released.is_set()
 
 
 def test_it_gives_up_instead_of_waiting_forever(harness):

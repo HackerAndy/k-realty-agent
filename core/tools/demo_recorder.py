@@ -77,30 +77,50 @@ def record(service_key: str, url: str = "", out_dir: Path = DEMO_DIR,
     (recorded actions, the rendered table) is snapshotted on every poll while the
     window is still open; the last good snapshot is what gets written.
     """
-    from core.tools.browser_session import wait_until_window_closed
+    from core.tools.browser_session import close_context, wait_until_browsing_done
 
     out_dir.mkdir(parents=True, exist_ok=True)
     profile = PROFILE_ROOT / service_key
     profile.mkdir(parents=True, exist_ok=True)
     har_path = out_dir / f"{service_key}-demo.har"
 
-    latest: dict = {"actions": [], "structure": {}, "final_url": url, "urls": []}
+    latest: dict = {"by_page": {}, "structure": {}, "final_url": url, "urls": []}
 
-    def snapshot(page) -> None:
-        actions = page.evaluate("() => window.__demo_actions || []")
-        structure = _page_structure(page)
-        current = page.url
-        # Keep the LONGEST action list seen: an SPA can reset window.__demo_actions
-        # on a hard navigation, and losing the operator's clicks would leave the
-        # agent with only the network trace.
-        if len(actions) >= len(latest["actions"]):
-            latest["actions"] = actions
-        if structure:
-            latest["structure"] = structure
-        if current and current != "about:blank":
-            latest["final_url"] = current
-            if current not in latest["urls"]:
+    def snapshot(pages) -> None:
+        """Snapshot every open tab. The demonstration is whatever the operator
+        did across all of them — a portal will open its report in a new tab, and
+        recording only the tab we opened would miss the actual data."""
+        focused = None
+        for page in pages:
+            try:
+                actions = page.evaluate("() => window.__demo_actions || []")
+            except Exception:
+                continue        # mid-navigation; it'll be readable next poll
+            # Keep the LONGEST action list seen per tab: an SPA can reset
+            # window.__demo_actions on a hard navigation, and losing the
+            # operator's clicks would leave the agent only the network trace.
+            key = id(page)
+            if len(actions) >= len(latest["by_page"].get(key, [])):
+                latest["by_page"][key] = actions
+            try:
+                if page.evaluate("() => document.visibilityState") == "visible":
+                    focused = page
+            except Exception:
+                pass
+            current = page.url
+            if current and current not in latest["urls"]:
                 latest["urls"].append(current)
+
+        target = focused or (pages[-1] if pages else None)
+        if target is None:
+            return
+        structure = _page_structure(target)
+        # Don't let a last-second navigation to a table-less page throw away the
+        # rendered data the operator worked to bring up.
+        if structure.get("tables") or not latest["structure"].get("tables"):
+            latest["structure"] = structure
+        if target.url:
+            latest["final_url"] = target.url
 
     with sync_playwright() as pw:
         context = pw.chromium.launch_persistent_context(
@@ -113,9 +133,11 @@ def record(service_key: str, url: str = "", out_dir: Path = DEMO_DIR,
         page = context.pages[0] if context.pages else context.new_page()
         if url:
             page.goto(url, wait_until="domcontentloaded")
-        reason = wait_until_window_closed(page, profile, max_wait_s, on_poll=snapshot)
+        reason = wait_until_browsing_done(context, profile, max_wait_s, on_poll=snapshot)
         print(f"[demo_recorder] demonstration for '{service_key}' finished: {reason}", flush=True)
-        context.close()  # flushes the HAR to disk
+        # Closing flushes the HAR — the network trace is the best material the
+        # scraper builder gets, so give it room before resorting to a kill.
+        close_context(context, profile, timeout_s=20.0)
 
     if reason == "deadline":
         raise RuntimeError(
@@ -125,6 +147,9 @@ def record(service_key: str, url: str = "", out_dir: Path = DEMO_DIR,
         )
 
     structure = latest["structure"]
+    # One demonstration, however many tabs it took: the agent needs every click
+    # in the order the tabs were opened.
+    actions = [action for clicks in latest["by_page"].values() for action in clicks]
     demo = {
         "service_key": service_key,
         # What they actually visited, not what they meant to type.
@@ -132,7 +157,7 @@ def record(service_key: str, url: str = "", out_dir: Path = DEMO_DIR,
         "final_url": latest["final_url"],
         "visited_urls": latest["urls"],
         "title": structure.get("title", ""),
-        "recorded_actions": latest["actions"],
+        "recorded_actions": actions,
         "candidate_requests": _extract_requests(har_path),
         "final_page": structure,
         "har_file": str(har_path),
