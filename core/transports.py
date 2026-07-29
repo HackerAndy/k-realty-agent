@@ -91,25 +91,32 @@ def transports_for(
         reason=None if can_scrape else "no scraper built yet — the agent can write one",
     ))
 
-    # An inbox is not a source; it is this source's email transport.
-    carrier = next(
-        (s for s in services
-         if getattr(s, "fetch", None) and s.fetch.delivers_to == key),
-        None,
-    )
-    if carrier is not None:
-        # Routing an inbox to this source is not the same as being able to READ
-        # that inbox: a carrier added but not yet signed in to would otherwise
-        # show as a working route, and "Get latest" would pick it and fail.
-        connected = True if carrier_ready is None else bool(carrier_ready(carrier.key))
+    # An inbox is not a source; it is a way IN. The source says which inbox to
+    # search and what to look for (Service.email_search) — the inbox itself only
+    # holds the access, so one connected account can carry many sources.
+    search = getattr(service, "email_search", None)
+    if search is not None:
+        carrier = next((s for s in services if s.key == search.carrier), None)
+        # Naming an inbox is not the same as being able to READ it: a source
+        # pointed at an inbox nobody has signed into would otherwise show as a
+        # working route, and "Get latest" would pick it and fail.
+        connected = (carrier is not None
+                     and (True if carrier_ready is None else bool(carrier_ready(carrier.key))))
+        carrier_label = carrier.label if carrier is not None else search.carrier
+        if carrier is None:
+            reason = f"the inbox '{search.carrier}' is gone — point this source at one that exists"
+        elif not connected:
+            reason = f"{carrier_label} isn't signed in yet — connect it in Settings"
+        else:
+            reason = None
         routes.append(_route(
             EMAIL,
             available=connected,
             unattended=True,
-            reason=None if connected else f"{carrier.label} isn't signed in yet — connect it in Settings",
-            detail=f"via {carrier.label}"
-                   + (f" · from {carrier.fetch.from_address}" if carrier.fetch.from_address else ""),
-            carrier_key=carrier.key,
+            reason=reason,
+            detail=f"via {carrier_label}"
+                   + (f" · from {search.from_address}" if search.from_address else ""),
+            carrier_key=search.carrier,
         ))
 
     return routes

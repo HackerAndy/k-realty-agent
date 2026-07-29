@@ -32,28 +32,38 @@ _yaml = YAML()
 _yaml.preserve_quotes = True
 _yaml.width = 4096  # don't hard-wrap long note lines
 
-_FIELD_ORDER = ["key", "label", "login_url", "notes", "input_type", "access", "parser", "status",
-                "default_transport", "fetch"]
+_FIELD_ORDER = ["key", "label", "login_url", "notes", "input_type", "access", "provider",
+                "parser", "status", "default_transport", "email_search"]
 
 
-class FetchConfig(BaseModel):
-    """How a *fetched* source (e.g. an inbox) pulls its document and where that
-    document goes. Non-secret — lives visibly in services.yaml. The secret half
-    (OAuth token) is stored encrypted separately (core/tools/email_oauth.py).
+class EmailSearch(BaseModel):
+    """How to find THIS source's document in an inbox.
 
-    A fetched source doesn't parse anything itself: it retrieves a document and
-    routes it to `delivers_to`, whose committed parser does the parsing. So the
-    email inbox that carries the Epic PDF has delivers_to=epic_property_management
-    and reuses that source's already-built parser.
+    Deliberately stored on the SOURCE, not on the inbox. Getting into an inbox
+    (Google consent, a token) is an access question and belongs with the other
+    sign-ins; "the sender is mail@managebuilding.com and the subject says Owner's
+    Statement" is ingestion configuration for one particular body of data. One
+    inbox carries statements from many senders, so the search terms cannot live
+    on the inbox — that limited a connected account to a single source.
+
+    Non-secret: lives visibly in services.yaml. The secret half (the OAuth token)
+    is stored encrypted per inbox (core/tools/email_oauth.py).
     """
 
-    provider: str = "gmail"  # gmail (OAuth) today; imap (app password) for other providers later
-    delivers_to: str  # source_key whose parser handles the fetched document
+    carrier: str  # key of the inbox service to search (its token is the access)
     # Search criteria — narrow to the one message that carries the document:
     from_address: str | None = None
     subject_contains: str | None = None
     attachment_suffix: str | None = None  # e.g. ".pdf" — only pull matching attachments
     newer_than_days: int | None = None  # bound the search window (Gmail newer_than:)
+
+
+def _as_map(model: BaseModel) -> CommentedMap:
+    """A pydantic model as a YAML map, so nested config round-trips with comments."""
+    out = CommentedMap()
+    for field, value in model.model_dump(exclude_none=True).items():
+        out[field] = value
+    return out
 
 
 class Service(BaseModel):
@@ -72,13 +82,18 @@ class Service(BaseModel):
     parser: str | None = None
     status: str = "planned"
 
+    # Inboxes only: how the harness gets into this one (gmail today; imap later).
+    # An inbox is a way IN, not a body of data — it has no parser of its own.
+    provider: str | None = None
+
     # Which transport "Get latest" runs for this source (upload | scrape | email).
     # See core/transports.py — a source can arrive by several routes; this pins
     # the preferred one. Automation, when enabled, runs this same route.
     default_transport: str | None = None
 
-    # Present only on fetched sources (inboxes, etc.) — see FetchConfig.
-    fetch: FetchConfig | None = None
+    # Set when this source's document ARRIVES BY EMAIL — which inbox to search
+    # and what to look for. See EmailSearch: the inbox itself only holds access.
+    email_search: EmailSearch | None = None
 
 
 class ServiceManifestError(RuntimeError):
@@ -169,11 +184,8 @@ class ServiceManifest:
             value = getattr(service, field)
             if value is None:
                 continue
-            if field == "fetch":  # nested model → nested map
-                fetch_map = CommentedMap()
-                for k, v in value.model_dump(exclude_none=True).items():
-                    fetch_map[k] = v
-                entry[field] = fetch_map
+            if field == "email_search":  # nested model → nested map
+                entry[field] = _as_map(value)
             else:
                 entry[field] = value
         return entry
@@ -209,17 +221,26 @@ class ServiceManifest:
                 return
         raise self._not_found(key)
 
-    def set_fetch(self, key: str, config: FetchConfig) -> None:
-        """Attach/replace a source's fetch config IN PLACE (comments preserved).
-        The routing + search criteria live here visibly; the OAuth token is a
-        separate encrypted secret (core/tools/email_oauth.py)."""
+    def set_email_search(self, key: str, search: EmailSearch) -> None:
+        """Attach/replace how this source's document is found in an inbox, IN
+        PLACE (comments preserved). Search terms are configuration and live here
+        visibly; the inbox's OAuth token is a separate encrypted secret
+        (core/tools/email_oauth.py)."""
         doc = self._load_doc()
         for entry in doc["services"]:
             if entry.get("key") == key:
-                fetch_map = CommentedMap()
-                for k, v in config.model_dump(exclude_none=True).items():
-                    fetch_map[k] = v
-                entry["fetch"] = fetch_map
+                entry["email_search"] = _as_map(search)
+                self._dump_doc(doc)
+                return
+        raise self._not_found(key)
+
+    def clear_email_search(self, key: str) -> None:
+        """Drop the email route from a source. Its inbox stays connected — other
+        sources may arrive through the same one."""
+        doc = self._load_doc()
+        for entry in doc["services"]:
+            if entry.get("key") == key:
+                entry.pop("email_search", None)
                 self._dump_doc(doc)
                 return
         raise self._not_found(key)

@@ -16,17 +16,21 @@ import pytest
 
 from core import transports
 from core.transports import EMAIL, SCRAPE, UPLOAD
-from core.tools.service_manifest import FetchConfig, Service
+from core.tools.service_manifest import EmailSearch, Service
 
 
 def _epic(**kw):
+    """Epic's statement arrives by email — the SOURCE says so, and says which
+    inbox to look in. Pass email_search=None for a source that doesn't."""
+    kw.setdefault("email_search", EmailSearch(carrier="email"))
     return Service(key="epic", label="Epic", parser="buildium_owner_statement",
                    status="implemented", **kw)
 
 
-def _inbox(delivers_to="epic", **fetch):
-    return Service(key="email", label="Email", input_type="email_trigger",
-                   fetch=FetchConfig(delivers_to=delivers_to, **fetch))
+def _inbox():
+    """An inbox holds the sign-in and nothing else — which source's document is in
+    there is declared by that source (Service.email_search)."""
+    return Service(key="email", label="Email", input_type="email_trigger", provider="gmail")
 
 
 def _routes(service, services=None, scraper=False, built=False):
@@ -42,17 +46,37 @@ def _by_id(routes):
 
 # --- deriving the routes -----------------------------------------------------
 
-def test_an_inbox_becomes_the_targets_email_transport():
-    epic = _epic()
-    routes = _by_id(_routes(epic, [epic, _inbox(from_address="mail@x.com")]))
+def test_the_source_names_the_inbox_that_carries_it():
+    epic = _epic(email_search=EmailSearch(carrier="email", from_address="mail@x.com"))
+    routes = _by_id(_routes(epic, [epic, _inbox()]))
     assert routes[EMAIL]["available"] is True
     assert routes[EMAIL]["carrier_key"] == "email"
     assert "mail@x.com" in routes[EMAIL]["detail"]
 
 
-def test_no_email_route_when_no_inbox_delivers_here():
-    epic = _epic()
-    assert EMAIL not in _by_id(_routes(epic, [epic, _inbox(delivers_to="somewhere_else")]))
+def test_no_email_route_when_the_source_does_not_arrive_that_way():
+    epic = _epic(email_search=None)
+    assert EMAIL not in _by_id(_routes(epic, [epic, _inbox()]))
+
+
+def test_one_inbox_carries_several_sources():
+    """The reason the search lives on the source: a mailbox is a shared way in,
+    and storing 'delivers_to' on it capped a connected account at one source."""
+    inbox = _inbox()
+    epic = _epic(email_search=EmailSearch(carrier="email", subject_contains="Owner Statement"))
+    bank = Service(key="bank", label="Bank", parser="bank", status="implemented",
+                   email_search=EmailSearch(carrier="email", from_address="bank@x.com"))
+    services = [inbox, epic, bank]
+
+    for source in (epic, bank):
+        assert _by_id(_routes(source, services))[EMAIL]["available"] is True
+
+
+def test_an_inbox_that_was_deleted_says_so_instead_of_vanishing():
+    epic = _epic(email_search=EmailSearch(carrier="gone"))
+    route = _by_id(_routes(epic, [epic]))[EMAIL]
+    assert route["available"] is False
+    assert "gone" in route["reason"]
 
 
 def test_upload_depends_on_an_ACTIVE_parser_not_a_filename():
@@ -192,7 +216,10 @@ def test_get_latest_on_an_upload_source_asks_for_the_file(two_sources):
         two_sources.get_latest("dfcu")
 
 
-def test_get_latest_routes_email_through_its_carrier(two_sources, monkeypatch):
+def test_get_latest_fetches_the_source_itself(two_sources, monkeypatch):
+    """The source is what gets fetched and ingested; the inbox is only where we
+    look. It used to be handed the carrier's key, which then had to bounce the
+    document back through a delivers_to indirection."""
     seen = {}
 
     def fake_fetch(key):
@@ -204,7 +231,7 @@ def test_get_latest_routes_email_through_its_carrier(two_sources, monkeypatch):
     result = two_sources.get_latest("epic")
 
     assert result["transport"] == EMAIL
-    assert seen["key"] == "email", "must fetch via the CARRIER, not the source"
+    assert seen["key"] == "epic"
 
 
 # --- which route actually delivered the data ---------------------------------

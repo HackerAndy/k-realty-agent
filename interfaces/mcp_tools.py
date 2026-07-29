@@ -108,6 +108,17 @@ def _inbox_connected(carrier_key: str) -> bool:
         return False
 
 
+def _inbox_account(carrier_key: str) -> str | None:
+    """Which mailbox a connected inbox actually is, so the operator can tell two
+    of them apart by address rather than by our label for them."""
+    try:
+        from core.tools import email_oauth
+
+        return email_oauth.account_email(carrier_key)
+    except Exception:
+        return None
+
+
 def list_sources(include_carriers: bool = False) -> list[dict]:
     """Every financial SOURCE, with the transports its data can arrive by.
 
@@ -181,25 +192,33 @@ def credential_status() -> list[dict]:
 
 
 def email_status(source_key: str) -> dict:
-    """Whether an inbox is connected, and what it's set to fetch."""
+    """Whether an inbox is connected, and which sources search it.
+
+    An inbox is ACCESS, nothing else: a signed-in mailbox the harness can read.
+    What to look for inside it belongs to each source that arrives that way
+    (Service.email_search), because one mailbox carries many sources — so this
+    reports who uses it, not what to search for.
+    """
     from core.tools import email_oauth
 
-    service = next((s for s in _load_services() if s.key == source_key), None)
+    services = _load_services()
+    service = next((s for s in services if s.key == source_key), None)
     if service is None:
         raise ToolError(f"Unknown source '{source_key}'.")
 
-    fetch = service.fetch
     return {
         "source_key": source_key,
         "label": service.label,
+        "provider": service.provider or "gmail",
         "connected": email_oauth.is_configured(source_key),
         "account_email": email_oauth.account_email(source_key),
-        "fetch": fetch.model_dump(exclude_none=True) if fetch else None,
-        # Which sources this inbox could deliver to — only ones that can parse.
-        "can_deliver_to": [
-            {"key": s.key, "label": s.label}
-            for s in _load_services()
-            if not source_status.is_trigger(s) and s.parser
+        # Sources whose documents arrive through THIS inbox, with what each looks
+        # for — read-only here; it's edited on the source.
+        "searched_by": [
+            {"key": s.key, "label": s.label,
+             "search": s.email_search.model_dump(exclude_none=True)}
+            for s in services
+            if s.email_search and s.email_search.carrier == source_key
         ],
     }
 
@@ -270,34 +289,78 @@ def gmail_consent_status(source_key: str) -> dict:
             "remediation": "Confirm the JSON is a Desktop OAuth client, and that you clicked Allow."}
 
 
-def save_email_fetch(source_key: str, delivers_to: str, from_address: str = "",
-                     subject_contains: str = "", attachment_suffix: str = ".pdf",
-                     newer_than_days: int | None = None) -> dict:
-    """Tell a connected inbox which messages carry the document, and which source
-    should parse it."""
-    from core.tools.service_manifest import FetchConfig
+def save_email_search(source_key: str, carrier: str, from_address: str = "",
+                      subject_contains: str = "", attachment_suffix: str = ".pdf",
+                      newer_than_days: int | None = None) -> dict:
+    """Set up a source's email route: which inbox carries its document, and how to
+    find that message.
+
+    This is ingestion configuration, and it lives on the SOURCE. The inbox itself
+    only holds the sign-in — so the same connected mailbox can carry the Epic
+    statement, a bank export, and anything else, each with its own search.
+    """
+    from core.tools.service_manifest import EmailSearch
 
     services = _load_services()
-    if not any(s.key == source_key for s in services):
+    source = next((s for s in services if s.key == source_key), None)
+    if source is None:
         raise ToolError(f"Unknown source '{source_key}'.")
-    target = next((s for s in services if s.key == delivers_to), None)
-    if target is None:
-        raise ToolError(f"Unknown destination '{delivers_to}'.")
-    if not target.parser:
+    inbox = next((s for s in services if s.key == carrier), None)
+    if inbox is None:
+        raise ToolError(f"Unknown inbox '{carrier}'.")
+    if not source_status.is_trigger(inbox):
+        raise ToolError(f"'{inbox.label}' isn't an inbox, so there is nothing to search there.")
+    if source_status.is_trigger(source):
         raise ToolError(
-            f"'{target.label}' has no parser yet, so it can't read what this inbox delivers. "
-            "Build a parser for it first."
+            f"'{source.label}' is an inbox — a way in, not a body of data. Set the email route on "
+            "the source whose document arrives there."
+        )
+    if not _inbox_connected(carrier):
+        raise ToolError(
+            f"'{inbox.label}' isn't signed in yet. Connect it under Settings → Sign-ins first; "
+            "that's the access, and it's shared by every source that arrives through it."
         )
 
-    ServiceManifest().set_fetch(source_key, FetchConfig(
-        provider="gmail",
-        delivers_to=delivers_to,
+    ServiceManifest().set_email_search(source_key, EmailSearch(
+        carrier=carrier,
         from_address=from_address.strip() or None,
         subject_contains=subject_contains.strip() or None,
         attachment_suffix=(attachment_suffix or "").strip() or None,
         newer_than_days=int(newer_than_days) if newer_than_days else None,
     ))
-    return email_status(source_key)
+    return source_email_route(source_key)
+
+
+def remove_email_search(source_key: str) -> dict:
+    """Stop this source arriving by email. The inbox stays connected — other
+    sources may come through the same one."""
+    if not any(s.key == source_key for s in _load_services()):
+        raise ToolError(f"Unknown source '{source_key}'.")
+    ServiceManifest().clear_email_search(source_key)
+    return source_email_route(source_key)
+
+
+def source_email_route(source_key: str) -> dict:
+    """A source's email route: which inbox it searches, what it looks for, and
+    which inboxes are available to point it at."""
+    services = _load_services()
+    source = next((s for s in services if s.key == source_key), None)
+    if source is None:
+        raise ToolError(f"Unknown source '{source_key}'.")
+    search = source.email_search
+    inboxes = [
+        {"key": s.key, "label": s.label, "connected": _inbox_connected(s.key),
+         "account_email": _inbox_account(s.key)}
+        for s in services if source_status.is_trigger(s)
+    ]
+    return {
+        "source_key": source_key,
+        "label": source.label,
+        "search": search.model_dump(exclude_none=True) if search else None,
+        "connected": bool(search and _inbox_connected(search.carrier)),
+        # Every inbox the harness knows about, so the source can be pointed at one.
+        "inboxes": inboxes,
+    }
 
 
 # How the operator describes a new source, and what that means in the manifest.
@@ -327,11 +390,13 @@ NEW_SOURCE_METHODS = {
         "label": "An email that delivers it",
         "detail": "It watches an inbox and takes the attachment off the message.",
         "icon": "✉", "cost": "Runs unattended", "unattended": True,
-        "input_type": "email_trigger", "access": "email_attachment",
+        # The source is the DOCUMENT that arrives, not the inbox: email is how it
+        # gets here. The inbox stays a separate, shared sign-in.
+        "input_type": "document", "access": "email_attachment",
         "act": "Connect the inbox",
         "doing": "Looking through the inbox for messages that carry a document…",
-        "next": "Connect the inbox with Google, then say which source it delivers to.",
-        "caveat": "An inbox delivers a document — something still has to read it. "
+        "next": "The agent writes a parser from the attachment it found, and tests it.",
+        "caveat": "An email delivers a document — something still has to read it. "
                   "It will use the newest attachment it finds as its sample.",
     },
 }
@@ -452,20 +517,18 @@ def preview_inbox(carrier_key: str, from_address: str = "", subject_contains: st
     that attachment is what the parser would be built from.
     """
     from core.tools import email_fetcher, email_oauth
-    from core.tools.service_manifest import FetchConfig
+    from core.tools.service_manifest import EmailSearch
 
     if not email_oauth.is_configured(carrier_key):
         raise ToolError(f"'{carrier_key}' isn't signed in to Google yet — connect it in Settings first.")
 
-    # delivers_to isn't decided until the operator answers the last question;
-    # the search itself only uses the criteria below.
-    cfg = FetchConfig(delivers_to=STAGING_KEY,
+    cfg = EmailSearch(carrier=carrier_key,
                       from_address=from_address.strip() or None,
                       subject_contains=subject_contains.strip() or None,
                       attachment_suffix=(attachment_suffix or "").strip() or None,
                       newer_than_days=int(newer_than_days) if newer_than_days else None)
     try:
-        found = email_fetcher.GmailClient(carrier_key).search_and_fetch(cfg, limit=5)
+        found = email_fetcher.GmailFetcher(carrier_key).search_and_fetch(cfg, limit=5)
     except Exception as exc:
         raise ToolError(str(exc)) from exc
 
@@ -528,8 +591,9 @@ def suggest_source_name(sample_path: str = "", filename: str = "") -> dict:
     return {**suggestion, "key": _slug(suggestion["label"])}
 
 
-def add_source(label: str, method: str, delivers_to: str = "",
-               adopt_staged: bool = False, login_url: str = "") -> dict:
+def add_source(label: str, method: str, adopt_staged: bool = False, login_url: str = "",
+               carrier: str = "", from_address: str = "", subject_contains: str = "",
+               attachment_suffix: str = "") -> dict:
     """Add a new data source to the registry.
 
     Nothing is built here — this creates the entry the rest of the harness hangs
@@ -558,16 +622,14 @@ def add_source(label: str, method: str, delivers_to: str = "",
     if any(s.key == key for s in services):
         raise ToolError(f"'{label}' is already here (key '{key}'). Pick a different name.")
 
-    # An inbox is a route to a source that parses what it delivers, so it needs
-    # to know its destination up front — otherwise it fetches into a dead end.
+    # Arriving by email means: this source's document is in that inbox, found by
+    # that search. The inbox is a shared sign-in, so it must already exist.
     if method == "email":
-        target = next((s for s in services if s.key == delivers_to), None)
-        if target is None:
-            raise ToolError("Say which source this inbox delivers to.")
-        if not target.parser:
+        inbox = next((s for s in services if s.key == carrier), None)
+        if inbox is None or not source_status.is_trigger(inbox):
             raise ToolError(
-                f"'{target.label}' has no parser yet, so it can't read what this inbox delivers. "
-                "Build a parser for it first."
+                "Say which inbox carries this source's document. Inboxes are connected under "
+                "Settings → Sign-ins, and one can carry several sources."
             )
 
     service = Service(key=key, label=label, input_type=spec["input_type"],
@@ -581,13 +643,15 @@ def add_source(label: str, method: str, delivers_to: str = "",
     adopted = _adopt_staged(key) if adopt_staged else {}
 
     if method == "email":
-        save_email_fetch(key, delivers_to=delivers_to)
+        save_email_search(key, carrier=carrier, from_address=from_address,
+                          subject_contains=subject_contains,
+                          attachment_suffix=attachment_suffix or ".pdf")
 
     log.event(
         operation="add_source",
         code="SOURCE_ADDED",
         message=f"Added source '{label}' ({method}).",
-        context={"source_key": key, "method": method, "delivers_to": delivers_to or None},
+        context={"source_key": key, "method": method, "carrier": carrier or None},
     )
     return {"source_key": key, "label": label, "method": method,
             "next": spec["next"], **adopted, **_source_row(key)}
@@ -835,8 +899,8 @@ def get_latest(source_key: str) -> dict:
     if default_id == SCRAPE:
         return {"transport": SCRAPE, **run_scraper(source_key)}
     if default_id == EMAIL:
-        carrier = next(r for r in routes if r["id"] == EMAIL)["carrier_key"]
-        return {"transport": EMAIL, **fetch_source(carrier)}
+        # The source is fetched, not the inbox: the inbox is only where we look.
+        return {"transport": EMAIL, **fetch_source(source_key)}
     # Upload can be a default — "get latest" means "hand me the file" — but the
     # file itself has to come from the operator, so the caller opens the picker.
     raise ToolError(
@@ -1701,6 +1765,8 @@ ACTION_TOOLS = [
     forget_credentials,
     start_gmail_consent,
     gmail_consent_status,
-    save_email_fetch,
+    save_email_search,
+    remove_email_search,
+    source_email_route,
 ]
 ALL_TOOLS = READ_TOOLS + ACTION_TOOLS

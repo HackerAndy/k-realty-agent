@@ -2,14 +2,15 @@
 
 Gmail is the one sign-in that can't be a username and a password (Workspace
 killed basic auth for IMAP in May 2025), so the operator's path is: upload the
-OAuth client JSON → click Allow in the browser Google opens → say which messages
-carry the document. Each of those steps has a way to go wrong quietly, which is
-what these pin:
+OAuth client JSON → click Allow in the browser Google opens. That is ALL an inbox
+is — access. What to search for belongs to each source that arrives through it
+(see the search half, below), because one mailbox carries many sources.
+
+Each step has a way to go wrong quietly, which is what these pin:
 
   * the uploaded client secret is deleted once consent finishes, however it
     finishes — a second plaintext copy of a client secret is pure downside;
-  * an inbox can only deliver to a source that actually has a parser, otherwise
-    the fetch succeeds and the document lands nowhere;
+  * a source can only be pointed at an inbox that is actually signed in;
   * consent runs out-of-process, so "no worker" must not read as "connected".
 """
 
@@ -19,7 +20,7 @@ import pytest
 
 import core.tools.credential_store as cs
 from interfaces import mcp_tools
-from core.tools.service_manifest import FetchConfig, Service
+from core.tools.service_manifest import EmailSearch, Service
 
 
 @pytest.fixture
@@ -54,14 +55,20 @@ def test_an_inbox_with_no_token_reads_as_not_connected(sources, no_token):
     st = mcp_tools.email_status("inbox")
     assert st["connected"] is False
     assert st["account_email"] is None
-    assert st["fetch"] is None
+    assert st["searched_by"] == []
 
 
-def test_only_sources_that_can_parse_are_offered_as_destinations(sources, no_token):
-    """A fetch that delivers to a parserless source pulls a document into a
-    dead end — don't put that choice on the screen."""
-    offered = {t["key"] for t in mcp_tools.email_status("inbox")["can_deliver_to"]}
-    assert offered == {"epic"}, "an inbox can't deliver to itself, nor to a source with no parser"
+def test_an_inbox_reports_the_sources_that_search_it(sources, no_token, monkeypatch):
+    """One mailbox, several sources. The inbox screen shows who uses it — it does
+    not own their search terms, which is the whole point of the split."""
+    sources.append(Service(key="bank", label="Bank", parser="p",
+                           email_search=EmailSearch(carrier="inbox", from_address="bank@x.com")))
+    sources[1].email_search = EmailSearch(carrier="inbox", subject_contains="Owner Statement")
+
+    st = mcp_tools.email_status("inbox")
+
+    assert {s["key"] for s in st["searched_by"]} == {"epic", "bank"}
+    assert st["searched_by"][0]["search"]["subject_contains"] == "Owner Statement"
 
 
 def test_an_unknown_source_is_refused(sources, no_token):
@@ -69,53 +76,106 @@ def test_an_unknown_source_is_refused(sources, no_token):
         mcp_tools.email_status("nope")
 
 
-# ── Saying what to fetch ─────────────────────────────────────────────────────
+# ── Saying what to look for — configuration, and it lives on the SOURCE ──────
 
 @pytest.fixture
 def manifest(monkeypatch):
-    """Capture set_fetch instead of writing to the real services.yaml."""
+    """Capture writes instead of touching the real services.yaml."""
     saved = {}
 
     class FakeManifest:
-        def set_fetch(self, key, config):
-            saved[key] = config
+        def set_email_search(self, key, search):
+            saved[key] = search
+
+        def clear_email_search(self, key):
+            saved[key] = None
 
     monkeypatch.setattr(mcp_tools, "ServiceManifest", FakeManifest)
+    monkeypatch.setattr(mcp_tools, "_inbox_connected", lambda key: key == "inbox")
     return saved
 
 
-def test_saving_records_the_route_and_the_search(sources, no_token, manifest):
-    mcp_tools.save_email_fetch("inbox", delivers_to="epic",
-                               from_address=" statements@epic.com ",
-                               subject_contains="Owner Statement",
-                               attachment_suffix=".pdf", newer_than_days=30)
+def test_the_search_is_saved_on_the_source_not_the_inbox(sources, no_token, manifest):
+    """It used to be stored on the inbox, which capped a connected account at one
+    source and put ingestion settings in the credentials screen."""
+    mcp_tools.save_email_search("epic", carrier="inbox",
+                                from_address=" statements@epic.com ",
+                                subject_contains="Owner Statement",
+                                attachment_suffix=".pdf", newer_than_days=30)
 
-    cfg = manifest["inbox"]
-    assert isinstance(cfg, FetchConfig)
-    assert (cfg.provider, cfg.delivers_to) == ("gmail", "epic")
+    assert "inbox" not in manifest, "the inbox holds the sign-in, nothing else"
+    cfg = manifest["epic"]
+    assert isinstance(cfg, EmailSearch) and cfg.carrier == "inbox"
     assert cfg.from_address == "statements@epic.com", "surrounding spaces are a typo, not a filter"
     assert cfg.newer_than_days == 30
 
 
+def test_one_inbox_can_carry_two_sources(sources, no_token, manifest):
+    """The reason the search moved off the inbox in the first place."""
+    sources.append(Service(key="bank", label="Bank", parser="p"))
+
+    mcp_tools.save_email_search("epic", carrier="inbox", subject_contains="Owner Statement")
+    mcp_tools.save_email_search("bank", carrier="inbox", from_address="bank@x.com")
+
+    assert manifest["epic"].carrier == manifest["bank"].carrier == "inbox"
+    assert manifest["epic"].subject_contains != manifest["bank"].from_address
+
+
 def test_blank_criteria_become_absent_rather_than_empty_strings(sources, no_token, manifest):
     """An empty subject filter would otherwise search for the empty string."""
-    mcp_tools.save_email_fetch("inbox", delivers_to="epic", from_address="",
-                               subject_contains="   ", newer_than_days=None)
+    mcp_tools.save_email_search("epic", carrier="inbox", from_address="",
+                                subject_contains="   ", newer_than_days=None)
 
-    cfg = manifest["inbox"]
+    cfg = manifest["epic"]
     assert cfg.from_address is None and cfg.subject_contains is None
     assert cfg.newer_than_days is None
 
 
-def test_delivering_to_a_source_with_no_parser_is_refused(sources, no_token, manifest):
-    with pytest.raises(mcp_tools.ToolError, match="no parser"):
-        mcp_tools.save_email_fetch("inbox", delivers_to="unbuilt")
-    assert not manifest, "nothing should be written when the route is unusable"
+def test_an_inbox_that_is_not_signed_in_is_refused(sources, no_token, manifest, monkeypatch):
+    """Otherwise the route looks configured and every fetch fails."""
+    monkeypatch.setattr(mcp_tools, "_inbox_connected", lambda key: False)
+
+    with pytest.raises(mcp_tools.ToolError, match="isn't signed in"):
+        mcp_tools.save_email_search("epic", carrier="inbox")
+    assert not manifest, "nothing should be written when the inbox can't be read"
 
 
-def test_delivering_to_a_source_that_does_not_exist_is_refused(sources, no_token, manifest):
-    with pytest.raises(mcp_tools.ToolError, match="Unknown destination"):
-        mcp_tools.save_email_fetch("inbox", delivers_to="ghost")
+def test_pointing_at_something_that_is_not_an_inbox_is_refused(sources, no_token, manifest):
+    with pytest.raises(mcp_tools.ToolError, match="isn't an inbox"):
+        mcp_tools.save_email_search("epic", carrier="unbuilt")
+
+
+def test_pointing_at_an_inbox_that_does_not_exist_is_refused(sources, no_token, manifest):
+    with pytest.raises(mcp_tools.ToolError, match="Unknown inbox"):
+        mcp_tools.save_email_search("epic", carrier="ghost")
+
+
+def test_an_inbox_cannot_arrive_by_email(sources, no_token, manifest):
+    """An inbox is a way in, not a body of data — it has nothing to parse."""
+    with pytest.raises(mcp_tools.ToolError, match="is an inbox"):
+        mcp_tools.save_email_search("inbox", carrier="inbox")
+
+
+def test_removing_the_route_leaves_the_inbox_connected(sources, no_token, manifest):
+    """Dropping one source's email route must not sign the mailbox out — others
+    may still arrive through it."""
+    sources[1].email_search = EmailSearch(carrier="inbox")
+
+    mcp_tools.remove_email_search("epic")
+
+    assert manifest["epic"] is None
+    assert mcp_tools.email_status("inbox")["connected"] is False   # unchanged by the removal
+
+
+def test_the_route_screen_offers_the_inboxes_there_are(sources, no_token, monkeypatch):
+    monkeypatch.setattr(mcp_tools, "_inbox_connected", lambda key: key == "inbox")
+    monkeypatch.setattr(mcp_tools, "_inbox_account", lambda key: "me@k.org")
+
+    route = mcp_tools.source_email_route("epic")
+
+    assert [i["key"] for i in route["inboxes"]] == ["inbox"]
+    assert route["inboxes"][0]["connected"] is True
+    assert route["search"] is None, "this source has no email route yet"
 
 
 # ── Consent, which runs in its own process ───────────────────────────────────

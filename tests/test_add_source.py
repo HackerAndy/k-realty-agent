@@ -16,7 +16,7 @@ import json
 import pytest
 
 from interfaces import mcp_tools
-from core.tools.service_manifest import FetchConfig, Service
+from core.tools.service_manifest import EmailSearch, Service
 
 
 @pytest.fixture
@@ -26,6 +26,8 @@ def registry(monkeypatch):
         Service(key="epic", label="Epic Property Management",
                 parser="core/parsers/epic.py", status="implemented"),
         Service(key="unbuilt", label="Something with no parser yet"),
+        # An inbox: a shared way in, connected once under Settings.
+        Service(key="inbox", label="Email", input_type="email_trigger", provider="gmail"),
     ]
 
     class FakeManifest:
@@ -37,14 +39,14 @@ def registry(monkeypatch):
                 if s.key == key:
                     services[i] = s.model_copy(update=fields)
 
-        def set_fetch(self, key, config):
+        def set_email_search(self, key, search):
             for i, s in enumerate(services):
                 if s.key == key:
-                    services[i] = s.model_copy(update={"fetch": config})
+                    services[i] = s.model_copy(update={"email_search": search})
 
     monkeypatch.setattr(mcp_tools, "_load_services", lambda: list(services))
     monkeypatch.setattr(mcp_tools, "ServiceManifest", FakeManifest)
-    monkeypatch.setattr(mcp_tools, "_inbox_connected", lambda key: False)
+    monkeypatch.setattr(mcp_tools, "_inbox_connected", lambda key: True)
     return services
 
 
@@ -99,46 +101,52 @@ def test_an_unknown_method_is_refused(registry):
         mcp_tools.add_source("Whatever", "carrier_pigeon")
 
 
-# ── An inbox is a route to an existing source, not a source ──────────────────
+# ── Arriving by email: the source is the document, the inbox is the way in ───
 
-def test_an_email_route_records_what_it_delivers_to(registry):
-    mcp_tools.add_source("Epic inbox", "email", delivers_to="epic")
+def test_an_emailed_source_records_which_inbox_carries_it(registry):
+    """The new source IS the statement that arrives. It is not an inbox, and it
+    doesn't deliver to anything: it searches an inbox that already exists."""
+    mcp_tools.add_source("Epic statement", "email", carrier="inbox",
+                         from_address="mail@managebuilding.com",
+                         subject_contains="Owner Statement")
 
-    carrier = _find(registry, "epic_inbox")
-    assert carrier.input_type == "email_trigger"
-    assert isinstance(carrier.fetch, FetchConfig) and carrier.fetch.delivers_to == "epic"
+    added = _find(registry, "epic_statement")
+    assert added.input_type == "document", "what arrives is a document to parse"
+    assert isinstance(added.email_search, EmailSearch)
+    assert added.email_search.carrier == "inbox"
+    assert added.email_search.from_address == "mail@managebuilding.com"
 
 
-def test_an_email_route_to_nowhere_is_refused(registry):
-    with pytest.raises(mcp_tools.ToolError, match="delivers to"):
-        mcp_tools.add_source("Orphan inbox", "email")
-    assert not any(s.key == "orphan_inbox" for s in registry), "nothing half-created"
+def test_an_emailed_source_with_no_inbox_named_is_refused(registry):
+    with pytest.raises(mcp_tools.ToolError, match="which inbox"):
+        mcp_tools.add_source("Orphan statement", "email")
+    assert not any(s.key == "orphan_statement" for s in registry), "nothing half-created"
 
 
-def test_an_email_route_to_a_source_that_cannot_read_it_is_refused(registry):
-    with pytest.raises(mcp_tools.ToolError, match="no parser"):
-        mcp_tools.add_source("Pointless inbox", "email", delivers_to="unbuilt")
+def test_pointing_a_new_source_at_a_non_inbox_is_refused(registry):
+    with pytest.raises(mcp_tools.ToolError, match="which inbox"):
+        mcp_tools.add_source("Confused statement", "email", carrier="epic")
 
 
 def test_an_inbox_that_is_not_signed_in_yet_is_not_a_working_route(registry, monkeypatch):
-    """THE trap this opens up: routing an inbox to a source is not the same as
-    being able to read that inbox. Advertising it would make "Get latest" pick a
-    route that cannot run."""
-    mcp_tools.add_source("Epic inbox", "email", delivers_to="epic")
+    """THE trap: naming an inbox is not the same as being able to read it.
+    Advertising the route would make "Get latest" pick one that cannot run."""
+    monkeypatch.setattr(mcp_tools, "_inbox_connected", lambda key: True)
+    mcp_tools.add_source("Epic statement", "email", carrier="inbox")
+    monkeypatch.setattr(mcp_tools, "_inbox_connected", lambda key: False)
 
-    epic = next(s for s in mcp_tools.list_sources() if s["key"] == "epic")
-    email_route = next(r for r in epic["transports"] if r["id"] == "email")
+    added = next(s for s in mcp_tools.list_sources() if s["key"] == "epic_statement")
+    email_route = next(r for r in added["transports"] if r["id"] == "email")
     assert email_route["available"] is False
     assert "signed in" in email_route["reason"]
-    assert epic["default_transport"] != "email"
+    assert added["default_transport"] != "email"
 
 
 def test_once_it_is_signed_in_the_route_works(registry, monkeypatch):
-    mcp_tools.add_source("Epic inbox", "email", delivers_to="epic")
-    monkeypatch.setattr(mcp_tools, "_inbox_connected", lambda key: True)
+    mcp_tools.add_source("Epic statement", "email", carrier="inbox")
 
-    epic = next(s for s in mcp_tools.list_sources() if s["key"] == "epic")
-    assert next(r for r in epic["transports"] if r["id"] == "email")["available"] is True
+    added = next(s for s in mcp_tools.list_sources() if s["key"] == "epic_statement")
+    assert next(r for r in added["transports"] if r["id"] == "email")["available"] is True
 
 
 # ── Naming, which the harness suggests rather than demands ──────────────────

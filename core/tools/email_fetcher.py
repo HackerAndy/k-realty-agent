@@ -2,12 +2,11 @@
 # See agent-harness-template/docs/promotion-log.md.
 """Fetch a document out of an email inbox.
 
-A fetched source (an inbox) doesn't parse anything itself — it locates the one
-message carrying the document and pulls the attachment, which is then routed to
-another source's committed parser (see core/fetch_ingest.py). This module is the
-retrieval half.
+An inbox doesn't parse anything — it locates the one message carrying a source's
+document and pulls the attachment, which is then ingested by that source's own
+committed parser (see core/fetch_ingest.py). This module is the retrieval half.
 
-Multi-provider by design: FetchConfig + build_gmail_query() express the search in
+Multi-provider by design: EmailSearch + build_gmail_query() express the search in
 provider-neutral terms; GmailFetcher implements it against the Gmail API (the path
 Google requires post-2025). An ImapFetcher for other providers (still allowing app
 passwords) can implement the same shape later — the interview picks which.
@@ -22,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from core.observability import get_logger
-from core.tools.service_manifest import FetchConfig
+from core.tools.service_manifest import EmailSearch
 
 log = get_logger("core.tools.email_fetcher")
 
@@ -43,8 +42,8 @@ class FetchedDocument:
         return path
 
 
-def build_gmail_query(cfg: FetchConfig) -> str:
-    """Translate FetchConfig into a Gmail search string. Deterministic and
+def build_gmail_query(cfg: EmailSearch) -> str:
+    """Translate an EmailSearch into a Gmail search string. Deterministic and
     unit-tested — the live Gmail call is a thin wrapper around this."""
     parts: list[str] = ["has:attachment"]
     if cfg.from_address:
@@ -67,8 +66,10 @@ class GmailFetcher:
     """Pull attachments from a Gmail/Workspace inbox over the Gmail API using the
     stored OAuth token (core/tools/email_oauth.py)."""
 
-    def __init__(self, source_key: str):
-        self.source_key = source_key
+    def __init__(self, inbox_key: str):
+        # The INBOX's key: its OAuth token is what opens the mailbox. The source
+        # whose document we're after is a separate thing entirely.
+        self.source_key = inbox_key
 
     def _service(self):
         from googleapiclient.discovery import build
@@ -78,7 +79,7 @@ class GmailFetcher:
         creds = email_oauth.load_credentials(self.source_key)
         return build("gmail", "v1", credentials=creds)
 
-    def search_and_fetch(self, cfg: FetchConfig, limit: int = 5) -> list[FetchedDocument]:
+    def search_and_fetch(self, cfg: EmailSearch, limit: int = 5) -> list[FetchedDocument]:
         """Find messages matching cfg and return their matching attachments,
         newest first. `limit` bounds how many messages we pull (the target
         statement is normally the most recent match)."""

@@ -549,6 +549,12 @@
       try { sourceSettingsCache[openKey] = await callTool('source_settings', { source_key: openKey }); }
       catch (e) { sourceSettingsCache[openKey] = { schema: [], values: {}, overridden: [] }; }
     }
+    // HOW this source is found in an inbox — configuration, so it lives with the
+    // source. Getting INTO the inbox is a sign-in, and lives in Settings.
+    if (openKey && sources.some(s => s.key === openKey) && !emailRouteCache[openKey]) {
+      try { emailRouteCache[openKey] = await callTool('source_email_route', { source_key: openKey }); }
+      catch (e) { emailRouteCache[openKey] = { search: null, inboxes: [] }; }
+    }
 
     let html = '<div class="acc">';
     for (const s of sources) {
@@ -876,23 +882,24 @@
     try {
       // "Another way into X" adds a route to a source that already exists —
       // it must NOT create a second source for the same body of data.
+      const emailArgs = wiz.method === 'email'
+        ? { carrier: wiz.carrier, from_address: wiz.inbox.from,
+            subject_contains: wiz.inbox.subject, attachment_suffix: wiz.inbox.suffix }
+        : {};
       const key = wiz.fork === 'new'
         ? (await callTool('add_source', {
             label: wiz.label, method: wiz.method, adopt_staged: true,
             login_url: wiz.method === 'website' ? (p.where || '') : '',
-            delivers_to: '',
+            ...emailArgs,
           })).source_key
         : wiz.fork;
 
-      if (wiz.method === 'email') {
-        // The inbox is the carrier; what it delivers to is what the fork chose.
-        await callTool('save_email_fetch', {
-          source_key: wiz.carrier,
-          delivers_to: wiz.fork === 'new' ? key : wiz.fork,
-          from_address: wiz.inbox.from, subject_contains: wiz.inbox.subject,
-          attachment_suffix: wiz.inbox.suffix,
-        });
+      // "Another way into X" adds the email route to the source that already
+      // exists — the inbox is only where its document is found.
+      if (wiz.method === 'email' && wiz.fork !== 'new') {
+        await callTool('save_email_search', { source_key: key, ...emailArgs });
       }
+      if (wiz.method === 'email') delete emailRouteCache[key];
 
       // Hand what it learned to that source's own panel, which is where code
       // gets built for every source — there is no second build flow in here.
@@ -981,6 +988,112 @@
       '<div class="catch"><div class="big">' + count + '</div>' +
       '<div class="cap">transactions</div>' +
       '<div class="cap" style="opacity:.75">however they arrived</div></div></div>';
+  }
+
+  // ── How this source is found in an inbox ──────────────────────────────────
+  // Two different questions, deliberately in two places:
+  //   ACCESS — can the harness read that mailbox at all? One Google sign-in,
+  //            shared by every source that arrives through it → Settings.
+  //   SEARCH — which message carries THIS source's document? Sender, subject,
+  //            attachment, how far back → here, with the source it belongs to.
+  // These used to be one form in Settings, which capped a connected account at a
+  // single source and put ingestion settings in the credentials screen.
+  const emailRouteCache = {};   // source_key -> source_email_route() result
+  const emailRouteOpen = {};
+
+  function emailRouteHTML(s) {
+    if (s.is_trigger) return '';        // an inbox doesn't arrive by email
+    const route = emailRouteCache[s.key];
+    if (!route) return '';
+    const search = route.search;
+    if (!search && !(route.inboxes || []).length) return '';   // no inbox to offer
+    const sid = sourceDomId(s.key);
+    const open = !!emailRouteOpen[s.key];
+
+    const inbox = (route.inboxes || []).find(i => search && i.key === search.carrier);
+    const summary = !search
+      ? 'not set up'
+      : (inbox && inbox.account_email ? esc(inbox.account_email) : esc(search.carrier)) +
+        (search.from_address ? ' · from ' + esc(search.from_address) : '');
+    const head = '<div class="build-h" onclick="toggleEmailRoute(\'' + s.key + '\')">' +
+      '<span class="caret' + (open ? ' open' : '') + '">&#8250;</span>Arrives by email' +
+      '<span class="hint" style="margin-left:auto;font-weight:400">' + summary + '</span></div>';
+    if (!open) return '<div class="build collapsed">' + head + '</div>';
+
+    if (!(route.inboxes || []).length) {
+      return '<div class="build">' + head + '<div class="build-b">' +
+        '<p class="note" style="margin:0">No inbox is connected yet. An inbox signs in with Google ' +
+        'rather than a password, so it lives in <b>Settings → Sign-ins</b> — one connected mailbox ' +
+        'can carry several sources.</p>' +
+        '<div class="row"><button class="btn" onclick="show(\'settings\')">Open Settings</button></div>' +
+        '</div></div>';
+    }
+
+    const chosen = search ? search.carrier : route.inboxes[0].key;
+    const opts = route.inboxes.map(i =>
+      '<option value="' + esc(i.key) + '"' + (i.key === chosen ? ' selected' : '') + '>' +
+      esc(i.account_email || i.label) + (i.connected ? '' : ' — not signed in') + '</option>').join('');
+    const unconnected = route.inboxes.every(i => !i.connected)
+      ? '<p class="note" style="color:var(--danger)">That inbox isn’t signed in yet — connect it under ' +
+        'Settings → Sign-ins, then save this.</p>'
+      : '';
+
+    return '<div class="build">' + head + '<div class="build-b">' +
+      '<p class="note" style="margin:0 0 12px">Which message carries this source’s document. ' +
+      'Signing in to the mailbox is separate — that’s in Settings, and it’s shared, so several ' +
+      'sources can search the same inbox for different things.</p>' + unconnected +
+      '<div class="field"><label for="er-in-' + sid + '">Look in</label>' +
+      '<select id="er-in-' + sid + '">' + opts + '</select></div>' +
+      '<div class="field"><label for="er-from-' + sid + '">From address <span class="sub">(optional)</span></label>' +
+      '<input type="text" id="er-from-' + sid + '" value="' + esc((search && search.from_address) || '') +
+      '" placeholder="statements@example.com" autocomplete="off"></div>' +
+      '<div class="field"><label for="er-subj-' + sid + '">Subject contains <span class="sub">(optional)</span></label>' +
+      '<input type="text" id="er-subj-' + sid + '" value="' + esc((search && search.subject_contains) || '') +
+      '" placeholder="Owner Statement" autocomplete="off"></div>' +
+      '<div class="field"><label for="er-suf-' + sid + '">Attachment ends with</label>' +
+      '<input type="text" id="er-suf-' + sid + '" value="' +
+      esc((search && search.attachment_suffix) || '.pdf') + '" autocomplete="off"></div>' +
+      '<div class="field"><label for="er-days-' + sid + '">Only messages newer than ' +
+      '<span class="sub">(days — blank means no limit)</span></label>' +
+      '<input type="text" id="er-days-' + sid + '" value="' +
+      esc(search && search.newer_than_days != null ? search.newer_than_days : '') + '" autocomplete="off"></div>' +
+      '<div class="row"><button class="btn primary" onclick="saveEmailRoute(\'' + s.key + '\')">' +
+      (search ? 'Save' : 'Set up this route') + '</button>' +
+      (search ? '<button class="btn" onclick="removeEmailRoute(\'' + s.key + '\')">Stop using email</button>' : '') +
+      '</div></div></div>';
+  }
+
+  function toggleEmailRoute(key) { emailRouteOpen[key] = !emailRouteOpen[key]; renderIngest(); }
+
+  async function saveEmailRoute(key) {
+    const sid = sourceDomId(key);
+    clearToast();
+    const days = parseInt(el('er-days-' + sid).value, 10);
+    try {
+      emailRouteCache[key] = await callTool('save_email_search', {
+        source_key: key,
+        carrier: el('er-in-' + sid).value,
+        from_address: el('er-from-' + sid).value,
+        subject_contains: el('er-subj-' + sid).value,
+        attachment_suffix: el('er-suf-' + sid).value,
+        newer_than_days: isNaN(days) ? null : days,
+      });
+      toast('Saved — this source can now arrive by email.', true);
+      await renderIngest();
+    } catch (e) {
+      toast('Couldn’t save: ' + e.message, false);
+    }
+  }
+
+  async function removeEmailRoute(key) {
+    clearToast();
+    try {
+      emailRouteCache[key] = await callTool('remove_email_search', { source_key: key });
+      toast('This source no longer arrives by email. The inbox stays connected.', true);
+      await renderIngest();
+    } catch (e) {
+      toast('Couldn’t remove it: ' + e.message, false);
+    }
   }
 
   // ── Per-source options, rendered from what the SOURCE declares ──
@@ -1175,7 +1288,7 @@
     // The model offer sits ahead of the build panel: "read it now" is the answer
     // when you need the numbers today; "build a parser" is the answer for every
     // month after that.
-    const head = actions + offerHTML(s) + optionsHTML(s) + buildHTML(s);
+    const head = actions + emailRouteHTML(s) + offerHTML(s) + optionsHTML(s) + buildHTML(s);
     const data = sourceTxnCache[s.key];
     if (!data) return head + '<div class="empty">Loading transactions…</div>';
     if (data.error) return head + '<div class="notbuilt">Couldn’t load transactions: ' + esc(data.error) + '</div>';
@@ -1954,48 +2067,55 @@
       ? '<p class="note" style="color:var(--danger)">' + esc(consent.message) + '</p>' : '';
 
     if (!st.connected) {
-      return '<div class="cred">' + head + failed +
-        '<p class="note" style="margin:4px 0 0">Google signs this in, so there is no password to keep. ' +
-        'Create a <b>Desktop</b> OAuth client in Google Cloud, download its JSON, and upload it here. ' +
-        'The harness stores the resulting token encrypted in <b>.secrets/</b> and deletes the uploaded ' +
-        'file the moment consent finishes — read-only access, nothing else.</p>' +
-        '<div class="row"><button class="btn" onclick="chooseOauthClient(\'' + c.key + '\')">Connect Google…</button></div>' +
-        picker + '</div>';
+      return '<div class="cred">' + head + failed + gmailGuidanceHTML() +
+        '<div class="row"><button class="btn" onclick="chooseOauthClient(\'' + c.key + '\')">' +
+        'Upload the client JSON…</button></div>' + picker + '</div>';
     }
 
-    return '<div class="cred">' + head + failed + fetchFormHTML(c.key, st) +
-      '<div class="row"><button class="btn" onclick="saveEmailFetch(\'' + c.key + '\')">Save what to fetch</button>' +
-      '<button class="btn" onclick="chooseOauthClient(\'' + c.key + '\')">Connect a different account…</button>' +
-      '</div>' + picker + '</div>';
+    return '<div class="cred">' + head + failed + inboxUsersHTML(st) +
+      '<div class="row"><button class="btn" onclick="chooseOauthClient(\'' + c.key + '\')">' +
+      'Connect a different account…</button></div>' + picker + '</div>';
   }
 
-  function fetchFormHTML(key, st) {
-    const sid = sourceDomId(key);
-    const f = st.fetch || {};
-    const targets = st.can_deliver_to || [];
-    // A destination with no parser can't read what arrives, so the tool refuses
-    // it — don't offer it here either.
-    const deliver = targets.length
-      ? '<div class="field"><label for="ef-to-' + sid + '">Delivers to</label>' +
-        '<select id="ef-to-' + sid + '">' +
-        targets.map(t => '<option value="' + esc(t.key) + '"' +
-          (t.key === f.delivers_to ? ' selected' : '') + '>' + esc(t.label) + '</option>').join('') +
-        '</select><span class="sub">Which source parses the attachment this inbox finds.</span></div>'
-      : '<p class="note">No source has a parser yet, so there is nothing for this inbox to deliver to. ' +
-        'Build a parser first, then come back.</p>';
+  /** Gmail is the one sign-in that isn't a username and a password, and the
+   *  Google Cloud side of it is genuinely fiddly. The terminal version walked the
+   *  operator through it; losing that made this the hardest screen in the app. */
+  function gmailGuidanceHTML() {
+    return '<p class="note" style="margin:4px 0 8px">Google signs this in, so there is no password to ' +
+      'keep — the harness gets a read-only token instead. Workspace disabled app passwords for mail in ' +
+      'May 2025, so this is the only way in.</p>' +
+      '<div class="wfound" style="margin-bottom:10px">' +
+      wfLine('1. A project', 'Go to <b>console.cloud.google.com</b> and create one (any name).') +
+      wfLine('2. The API', 'APIs &amp; Services → Library → enable <b>Gmail API</b>.') +
+      wfLine('3. Consent screen', 'User type <b>Internal</b>, and add the scope <b>gmail.readonly</b>.') +
+      wfLine('4. A client', 'Credentials → Create credentials → OAuth client ID → <b>Desktop app</b>.') +
+      wfLine('5. The file', 'Download its JSON, then upload it below. A browser opens; click <b>Allow</b> once.') +
+      '</div>' +
+      '<p class="sub">What is kept: the token, encrypted in <b>.secrets/</b>. The JSON you upload is ' +
+      'deleted the moment consent finishes — a second plaintext copy of a client secret is pure ' +
+      'downside. The scope is read-only: the harness can read and download mail, never send or delete.</p>';
+  }
 
-    return deliver +
-      '<div class="field"><label for="ef-from-' + sid + '">From address <span class="sub">(optional)</span></label>' +
-      '<input type="text" id="ef-from-' + sid + '" value="' + esc(f.from_address || '') +
-      '" placeholder="statements@example.com" autocomplete="off"></div>' +
-      '<div class="field"><label for="ef-subj-' + sid + '">Subject contains <span class="sub">(optional)</span></label>' +
-      '<input type="text" id="ef-subj-' + sid + '" value="' + esc(f.subject_contains || '') +
-      '" placeholder="Owner Statement" autocomplete="off"></div>' +
-      '<div class="field"><label for="ef-suf-' + sid + '">Attachment ends with</label>' +
-      '<input type="text" id="ef-suf-' + sid + '" value="' + esc(f.attachment_suffix || '.pdf') + '" autocomplete="off"></div>' +
-      '<div class="field"><label for="ef-days-' + sid + '">Only messages newer than <span class="sub">(days — blank means no limit)</span></label>' +
-      '<input type="text" id="ef-days-' + sid + '" value="' +
-      esc(f.newer_than_days == null ? '' : f.newer_than_days) + '" autocomplete="off"></div>';
+  /** A connected inbox is ACCESS, and it's shared. Which messages matter is each
+   *  source's own business, so this only says who uses it and links there. */
+  function inboxUsersHTML(st) {
+    const users = st.searched_by || [];
+    if (!users.length) {
+      return '<p class="note" style="margin:4px 0 0">Signed in and readable. No source searches it yet — ' +
+        'open a source under <b>Data ingestion</b> and set up its email route there. The search terms ' +
+        '(sender, subject, attachment) belong to the source, because one mailbox can carry several.</p>';
+    }
+    const rows = users.map(u => {
+      const f = u.search || {};
+      const terms = [f.from_address ? 'from ' + f.from_address : '',
+                     f.subject_contains ? 'subject “' + f.subject_contains + '”' : '',
+                     f.attachment_suffix || ''].filter(Boolean).join(' · ');
+      return wfLine(esc(u.label), '<span style="color:var(--muted)">' + esc(terms || 'anything with an attachment') + '</span>');
+    }).join('');
+    return '<p class="note" style="margin:4px 0 8px">Signed in and readable. Searched by:</p>' +
+      '<div class="wfound" style="margin-bottom:10px">' + rows + '</div>' +
+      '<p class="sub">What each one looks for is set on that source, under Data ingestion — this ' +
+      'mailbox is just the way in.</p>';
   }
 
   function chooseOauthClient(key) { const i = el('oauth-input-' + sourceDomId(key)); if (i) i.click(); }
@@ -2048,31 +2168,9 @@
     setTimeout(tick, 1200);
   }
 
-  async function saveEmailFetch(key) {
-    const sid = sourceDomId(key);
-    const sel = el('ef-to-' + sid);
-    if (!sel) { toast('Nothing to deliver to yet — build a parser for a source first.', false); return; }
-    clearToast();
-    const days = parseInt(el('ef-days-' + sid).value, 10);
-    try {
-      emailCache[key] = await callTool('save_email_fetch', {
-        source_key: key,
-        delivers_to: sel.value,
-        from_address: el('ef-from-' + sid).value,
-        subject_contains: el('ef-subj-' + sid).value,
-        attachment_suffix: el('ef-suf-' + sid).value,
-        newer_than_days: isNaN(days) ? null : days,
-      });
-      toast('Saved — this inbox delivers to ' + sel.value + '.', true);
-      await renderSettings();
-    } catch (e) {
-      toast('Couldn’t save: ' + e.message, false);
-    }
-  }
-
   async function loadEmailStatus(key) {
     try { emailCache[key] = await callTool('email_status', { source_key: key }); }
-    catch (e) { emailCache[key] = { connected: false, can_deliver_to: [] }; }
+    catch (e) { emailCache[key] = { connected: false, searched_by: [] }; }
   }
 
   async function loadCredentials() {

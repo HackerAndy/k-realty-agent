@@ -15,19 +15,17 @@
 # uses a round-trip YAML writer, so this documentation is safe to rely on.
 
 services:
+# An INBOX, not a source: a way in. It holds the sign-in (Gmail OAuth, read-only,
+# stored encrypted in .secrets/) and nothing else — no search terms, because one
+# mailbox carries documents for many sources. What each source looks for lives on
+# that source, under email_search. Connect this under Settings → Sign-ins.
 - key: email
   label: Email
-  notes: "Account: andy.kaminski@krealtyllc.org. Monthly kickoff signal — the Epic Owner Statement PDF arrives here from donotreply@managebuilding.com. Not a transaction source itself; it FETCHES that PDF and routes it to epic_property_management's parser. Set up the fetch (Gmail OAuth, read-only) via the TUI: Ingest a source → Email."
+  notes: Shared inbox the harness reads to pull documents that arrive as attachments. Which account it is comes from the stored token and is shown in Settings, so there is one source of truth for it.
   input_type: email_trigger
   access: api
+  provider: gmail
   status: planned
-  fetch:
-    provider: gmail
-    delivers_to: epic_property_management
-    from_address: mail@managebuilding.com
-    subject_contains: Owner's Statement
-    attachment_suffix: .pdf
-    newer_than_days: 45
 - key: epic_property_management
   label: Epic Property Management
   login_url: https://epicpropertymanagement.managebuilding.com/manager
@@ -37,6 +35,13 @@ services:
   parser: buildium_owner_statement
   status: implemented
   default_transport: email
+  # How to find this source's statement in the 'email' inbox.
+  email_search:
+    carrier: email
+    from_address: mail@managebuilding.com
+    subject_contains: Owner's Statement
+    attachment_suffix: .pdf
+    newer_than_days: 45
 - key: dfcu_financial_bank
   label: DFCU Financial bank
   login_url: https://dfcufinancial.com

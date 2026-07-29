@@ -47,10 +47,33 @@ embedded agent (`orchestration/agent.py`), working *with* the operator.
 
 After onboarding, the operator works with the harness (its browser GUI), not a code editor.
 
+## The shape of ingestion (where each screen's settings belong)
+
+Ingesting anything is the same three questions, and the UI must keep them apart:
+
+1. **What is the source?** A body of financial data — a statement, a bank
+   account. Not a route, and not a mailbox.
+2. **How do we get at it?** *Access*: a sign-in. A username+password, a portal
+   login, a Google token for an inbox. Shared, reusable, secret → **Settings →
+   Sign-ins**, and nothing else lives there.
+3. **What do we take, and how do we read it?** *Configuration*: which dropdown
+   and date range to scrape, which message carries the attachment (sender,
+   subject, attachment type, how far back), then the parse. Per source →
+   **Data ingestion**, on that source.
+
+The test for where a setting goes: could two sources share it? A mailbox is
+shared (access). "Subject contains Owner's Statement" is one source's business
+(configuration). Putting a search on the inbox capped a connected account at one
+source — see `Service.email_search` in `core/tools/service_manifest.py`.
+
 ## Other standing rules
 
 - **User transparency / nothing hidden.** Never mask a field or behavior unless
   it's a genuine secret. Everything happens via the GUI, visibly.
+- **Guide the operator through hard access setups.** Gmail OAuth (a Cloud
+  project, an enabled API, a consent screen, a Desktop client) is the example:
+  the GUI spells out the steps, says what is stored and where, and says the scope
+  is read-only. Never reduce a fiddly setup to one unexplained button.
 - **Faithful data.** Preserve each source's ACTUAL columns verbatim in
   `Transaction.fields`; invent nothing. Only `date`/`amount`/`description` are
   normalized.
