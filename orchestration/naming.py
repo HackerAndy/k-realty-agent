@@ -14,6 +14,7 @@ One short completion, no tools — this is not an agent run.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 
@@ -83,6 +84,64 @@ def _complete(system: str, user: str) -> str:
         },
     )
     return data["choices"][0]["message"]["content"]
+
+
+DESCRIBE_SYSTEM = (
+    "You inspect financial statements and exports for a bookkeeping tool. Given the "
+    "start of one, reply with ONLY a JSON object, no prose:\n"
+    '{"name": "<who issued it, as a person would say it>", '
+    '"columns": ["<the transaction table\'s column headings, exactly as printed>"], '
+    '"rows": <how many transaction rows you can see, a number>, '
+    '"earliest": "<earliest transaction date as printed>", '
+    '"latest": "<latest transaction date as printed>"}\n'
+    "Use null for anything you cannot tell. Do not invent column names."
+)
+
+
+def describe_document(sample_text: str, filename: str = "") -> dict:
+    """One cheap look at a document: what it is, and what its table looks like.
+
+    This is NOT extraction — it never claims to have read every row, and the row
+    count it reports is the model's estimate (the caller says so on screen). It
+    exists because the operator has to judge, before naming anything, whether the
+    harness understood their document at all; asking for the headings answers that
+    for the price of one short completion, on whichever provider is configured.
+
+    Degrades in pieces: a bad field is dropped, not fatal.
+    """
+    out = {"label": label_from_filename(filename), "label_source": "filename",
+           "columns": [], "rows": 0, "span": ""}
+    text = (sample_text or "").strip()
+    if not text:
+        return out
+    try:
+        raw = _complete(DESCRIBE_SYSTEM, text[:MAX_SAMPLE_CHARS * 2])
+    except Exception:
+        return out
+
+    match = re.search(r"\{.*\}", raw or "", re.S)     # local models like to chat first
+    if not match:
+        return out
+    try:
+        data = json.loads(match.group(0))
+    except (ValueError, TypeError):
+        return out
+    if not isinstance(data, dict):
+        return out
+
+    name = _clean(str(data.get("name") or ""))
+    if name and not name.upper().startswith("UNKNOWN"):
+        out["label"], out["label_source"] = name, "model"
+    cols = data.get("columns")
+    if isinstance(cols, list):
+        out["columns"] = [str(c).strip() for c in cols if str(c or "").strip()][:12]
+    try:
+        out["rows"] = max(int(data.get("rows") or 0), 0)
+    except (TypeError, ValueError):
+        pass
+    early, late = str(data.get("earliest") or "").strip(), str(data.get("latest") or "").strip()
+    out["span"] = f"{early} – {late}" if early and late and early != late else (early or late)
+    return out
 
 
 def suggest_label(sample_text: str, filename: str = "") -> dict:

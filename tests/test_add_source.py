@@ -196,6 +196,82 @@ def test_a_demonstration_teaches_the_harness_where_the_portal_is(registry, tmp_p
     assert _find(registry, "some_portal").login_url == "https://portal.example.com/manager/reports"
 
 
+def test_a_source_can_be_demonstrated_before_it_has_a_name(registry, monkeypatch, tmp_path):
+    """The whole flow depends on this: the agent looks FIRST, and what it saw is
+    how the source gets named. So the staging key needs no manifest entry."""
+    started = {}
+
+    class _Proc:
+        pid = 7
+
+        def poll(self):
+            return None
+
+    def fake_popen(cmd, **kw):
+        started["cmd"] = cmd
+        return _Proc()
+
+    monkeypatch.setattr(mcp_tools.subprocess, "Popen", fake_popen)
+    monkeypatch.chdir(tmp_path)
+
+    assert mcp_tools.start_demo(mcp_tools.STAGING_KEY)["status"] == "running"
+    assert mcp_tools.STAGING_KEY in started["cmd"]
+
+
+def test_a_staged_demonstration_moves_onto_the_real_key(registry, monkeypatch, tmp_path):
+    """Otherwise the operator demonstrates it once, names it, and the harness
+    asks them to demonstrate it again — with a second sign-in."""
+    monkeypatch.chdir(tmp_path)
+    demos = tmp_path / "data" / "demos"
+    demos.mkdir(parents=True)
+    (demos / "_new-demonstration.json").write_text("{}")
+    (demos / "_new-demo.har").write_text("{}")
+    profile = tmp_path / ".browser_profiles" / "_new"
+    profile.mkdir(parents=True)
+    (profile / "Cookies").write_text("session")
+
+    result = mcp_tools.add_source("Some Portal", "website", adopt_staged=True,
+                                  login_url="https://portal.example.com/reports")
+
+    assert result["demo_path"].endswith("some_portal-demonstration.json")
+    assert (demos / "some_portal-demonstration.json").exists()
+    assert (demos / "some_portal-demo.har").exists()
+    assert not (demos / "_new-demonstration.json").exists()
+    # The signed-in session lives in the profile directory — losing it means
+    # signing in again for nothing.
+    assert (tmp_path / ".browser_profiles" / "some_portal" / "Cookies").read_text() == "session"
+    assert result["session_kept"] is True
+
+
+def test_the_url_it_landed_on_is_stored_when_the_source_is_named(registry, monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    mcp_tools.add_source("Some Portal", "website", login_url="https://portal.example.com/reports")
+    assert _find(registry, "some_portal").login_url == "https://portal.example.com/reports"
+
+
+def test_a_staged_sample_moves_across_too(registry, monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    samples = tmp_path / "data" / "samples"
+    samples.mkdir(parents=True)
+    (samples / "_new-sample.pdf").write_bytes(b"%PDF")
+
+    result = mcp_tools.add_source("Shellpoint Mortgage", "document", adopt_staged=True)
+
+    assert (samples / "shellpoint_mortgage-sample.pdf").exists()
+    assert result["sample_path"].endswith("shellpoint_mortgage-sample.pdf")
+
+
+def test_adding_without_adopting_leaves_the_staged_files_alone(registry, monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    demos = tmp_path / "data" / "demos"
+    demos.mkdir(parents=True)
+    (demos / "_new-demonstration.json").write_text("{}")
+
+    mcp_tools.add_source("Typed By Hand", "document")
+
+    assert (demos / "_new-demonstration.json").exists()
+
+
 def test_no_demonstration_running_reads_as_idle(registry):
     mcp_tools._DEMO_PROCS.pop("some_portal", None)
     assert mcp_tools.demo_status("some_portal")["status"] == "idle"

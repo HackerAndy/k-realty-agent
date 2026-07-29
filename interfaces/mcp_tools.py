@@ -304,31 +304,199 @@ def save_email_fetch(source_key: str, delivers_to: str, from_address: str = "",
 # The wizard offers exactly these three because they're the three the harness can
 # actually handle end-to-end; anything else would be a dead end on screen.
 NEW_SOURCE_METHODS = {
-    "document": {
-        "label": "A document you upload",
-        "detail": "a statement or export you already have — PDF or CSV",
-        "input_type": "document", "access": "download",
-        "next": "The agent writes a parser from one real sample, and tests it.",
-    },
     "website": {
         "label": "A website behind a login",
-        "detail": "you show the harness how to get the data, once",
+        "detail": "Show it once; it signs in and pulls the data after that.",
+        "icon": "↻", "cost": "Runs unattended", "unattended": True,
         "input_type": "html_scrape", "access": "portal_login",
+        "act": "Open a browser and show it",
+        "doing": "A browser is open. Sign in, set your filters, bring your data up on screen — "
+                 "then close the window.",
         "next": "You demonstrate it in a browser; the agent writes a scraper from that.",
+    },
+    "document": {
+        "label": "A document you already have",
+        "detail": "A statement or an export — PDF or CSV.",
+        "icon": "↑", "cost": "You hand it the file", "unattended": False,
+        "input_type": "document", "access": "download",
+        "act": "Choose a document",
+        "doing": "Reading your document…",
+        "next": "The agent writes a parser from that sample, and tests it.",
     },
     "email": {
         "label": "An email that delivers it",
-        "detail": "an inbox receives the document as an attachment",
+        "detail": "It watches an inbox and takes the attachment off the message.",
+        "icon": "✉", "cost": "Runs unattended", "unattended": True,
         "input_type": "email_trigger", "access": "email_attachment",
+        "act": "Connect the inbox",
+        "doing": "Looking through the inbox for messages that carry a document…",
         "next": "Connect the inbox with Google, then say which source it delivers to.",
+        "caveat": "An inbox delivers a document — something still has to read it. "
+                  "It will use the newest attachment it finds as its sample.",
     },
 }
 
+# Where a source is learned before it has a name. The wizard asks the agent to
+# read the source FIRST and suggest what to call it, so the artifacts (a sample,
+# a demonstration, a browser profile with a live session) exist before there is a
+# key to file them under. They are moved to the real key when the source is saved.
+STAGING_KEY = "_new"
+
 
 def source_methods() -> list[dict]:
-    """The ways a new source's data can arrive — the wizard's first question."""
-    return [{"id": key, **{k: v for k, v in spec.items() if k != "input_type" and k != "access"}}
+    """The ways a new source's data can arrive — the wizard's first question.
+
+    Ordered best-first, and each says what it will cost the operator afterwards,
+    because that is the actual difference between them: a scrape and an inbox run
+    unattended, a document means picking a file every month.
+    """
+    skip = {"input_type", "access"}
+    return [{"id": key, **{k: v for k, v in spec.items() if k not in skip}}
             for key, spec in NEW_SOURCE_METHODS.items()]
+
+
+def preview_document(sample_path: str, filename: str = "") -> dict:
+    """Read a document the harness has never seen, and report what's in it.
+
+    This is what the operator judges before naming anything: the source's own
+    columns, how many rows, over what dates. It runs the model once (no parser
+    exists yet, by definition) and persists nothing.
+
+    Best-effort by design — if the model can't be reached or can't read the
+    layout, the answer is a smaller panel plus a name suggested from the
+    filename, never a blocked flow.
+    """
+    from core import preview
+
+    doc = Path(sample_path).expanduser()
+    if not doc.exists():
+        raise ToolError(f"No file at {doc}")
+    name = filename or doc.name
+
+    text = ""
+    try:
+        from core.tools.llm_extractor import read_document_text
+
+        text = read_document_text(doc)
+    except Exception as exc:
+        log.event(operation="preview_document", code="PREVIEW_TEXT_FAILED",
+                  message=f"Couldn't read text from {name}.", context={"error": str(exc)})
+
+    if not llm_provider.is_configured():
+        return {"method": "document", "where": name, "sample_path": str(doc),
+                "how": "Reads this document each time you upload one",
+                "rows": 0, "span": "", "columns": [], "unattended": False,
+                "rows_estimated": False,
+                "trouble": "No LLM provider is set up, so it can only go by the file name.",
+                **_suggest_name("", name)}
+
+    from orchestration.naming import describe_document
+
+    look = describe_document(text, name)
+    trouble = None
+    if not look["columns"]:
+        trouble = ("Couldn't make out a transaction table yet — the agent looks much harder "
+                   "when it writes the parser.")
+    return {
+        "method": "document", "where": name, "sample_path": str(doc),
+        "how": "Reads this document each time you upload one",
+        "rows": look["rows"], "span": look["span"], "columns": look["columns"],
+        # An estimate from one quick look, NOT a parse. The screen says so.
+        "rows_estimated": True,
+        "unattended": False, "trouble": trouble,
+        "suggested_name": look["label"], "name_source": look["label_source"],
+        "suggested_key": _slug(look["label"]),
+    }
+
+
+def preview_demo(demo_path: str) -> dict:
+    """Report what a recorded browser demonstration taught the harness.
+
+    No model needed: the operator left their data on screen, so the final page's
+    biggest table is the answer, and the largest data request they triggered is
+    how it would fetch that again.
+    """
+    from core import preview
+
+    path = Path(demo_path).expanduser()
+    if not path.exists():
+        raise ToolError(f"No demonstration at {path} — record one first.")
+    try:
+        demo = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ToolError(f"That demonstration file is unreadable: {exc}") from exc
+
+    summary = preview.summarise_demo(demo)
+    # Name it from what the page called itself, falling back to the host.
+    from urllib.parse import urlparse
+
+    host = urlparse(summary["where"]).hostname or ""
+    hint = "\n".join(filter(None, [
+        f"Page title: {summary['title']}", f"URL: {summary['where']}",
+        "Table headings: " + ", ".join(summary["columns"]) if summary["columns"] else "",
+    ]))
+    suggestion = _suggest_name(hint, summary["title"] or host.replace(".", " "))
+    return {"method": "website", "demo_path": str(path), "unattended": True,
+            "trouble": None if summary["columns"] else
+                       "It recorded your clicks but saw no table on the final page.",
+            **summary, **suggestion}
+
+
+def preview_inbox(carrier_key: str, from_address: str = "", subject_contains: str = "",
+                  attachment_suffix: str = ".pdf", newer_than_days: int | None = None) -> dict:
+    """Search a connected inbox and read the newest document it carries.
+
+    An inbox is only half a source: it delivers a document, and something still
+    has to read it. So the preview is the delivery (how many messages match, the
+    newest one) AND the document itself, previewed exactly like an uploaded one —
+    that attachment is what the parser would be built from.
+    """
+    from core.tools import email_fetcher, email_oauth
+    from core.tools.service_manifest import FetchConfig
+
+    if not email_oauth.is_configured(carrier_key):
+        raise ToolError(f"'{carrier_key}' isn't signed in to Google yet — connect it in Settings first.")
+
+    # delivers_to isn't decided until the operator answers the last question;
+    # the search itself only uses the criteria below.
+    cfg = FetchConfig(delivers_to=STAGING_KEY,
+                      from_address=from_address.strip() or None,
+                      subject_contains=subject_contains.strip() or None,
+                      attachment_suffix=(attachment_suffix or "").strip() or None,
+                      newer_than_days=int(newer_than_days) if newer_than_days else None)
+    try:
+        found = email_fetcher.GmailClient(carrier_key).search_and_fetch(cfg, limit=5)
+    except Exception as exc:
+        raise ToolError(str(exc)) from exc
+
+    if not found:
+        return {"method": "email", "carrier_key": carrier_key, "messages": 0,
+                "where": "no matching messages", "how": "Nothing matched that search",
+                "rows": 0, "span": "", "columns": [], "unattended": True,
+                "trouble": "No message matched — loosen the sender or subject and look again.",
+                "suggested_name": "", "name_source": "", "suggested_key": ""}
+
+    newest = found[0]
+    staged = Path("data/samples")
+    staged.mkdir(parents=True, exist_ok=True)
+    sample = staged / f"{STAGING_KEY}-sample{Path(newest.filename).suffix}"
+    sample.write_bytes(newest.data)
+
+    doc = preview_document(str(sample), newest.filename)
+    return {**doc, "method": "email", "carrier_key": carrier_key,
+            "messages": len(found), "received": newest.received,
+            "where": f"{newest.filename} · {len(found)} matching message"
+                     f"{'s' if len(found) != 1 else ''}",
+            "how": f"Takes the attachment off the newest match ({newest.received or 'undated'})",
+            "unattended": True}
+
+
+def _suggest_name(text: str, fallback_name: str) -> dict:
+    from orchestration.naming import suggest_label
+
+    suggestion = suggest_label(text, fallback_name)
+    return {"suggested_name": suggestion["label"], "name_source": suggestion["source"],
+            "suggested_key": _slug(suggestion["label"])}
 
 
 def _slug(label: str) -> str:
@@ -360,13 +528,18 @@ def suggest_source_name(sample_path: str = "", filename: str = "") -> dict:
     return {**suggestion, "key": _slug(suggestion["label"])}
 
 
-def add_source(label: str, method: str, delivers_to: str = "") -> dict:
+def add_source(label: str, method: str, delivers_to: str = "",
+               adopt_staged: bool = False, login_url: str = "") -> dict:
     """Add a new data source to the registry.
 
     Nothing is built here — this creates the entry the rest of the harness hangs
     off (the agent's parser/scraper, its credentials, its transports). It starts
     `planned`, with no parser and no default route, which is exactly what the
     Ingest screen should show until the agent has written something that works.
+
+    adopt_staged: take everything learned under STAGING_KEY — the demonstration,
+    and the browser profile holding the session they just signed into — and file
+    it under the real key. Without this the operator would sign in twice.
     """
     from core.tools.service_manifest import Service, ServiceManifestError
 
@@ -398,11 +571,14 @@ def add_source(label: str, method: str, delivers_to: str = "") -> dict:
             )
 
     service = Service(key=key, label=label, input_type=spec["input_type"],
-                      access=spec["access"], status="planned")
+                      access=spec["access"], status="planned",
+                      login_url=login_url.strip() or None)
     try:
         ServiceManifest().add(service)
     except ServiceManifestError as exc:
         raise ToolError(str(exc)) from exc
+
+    adopted = _adopt_staged(key) if adopt_staged else {}
 
     if method == "email":
         save_email_fetch(key, delivers_to=delivers_to)
@@ -414,7 +590,42 @@ def add_source(label: str, method: str, delivers_to: str = "") -> dict:
         context={"source_key": key, "method": method, "delivers_to": delivers_to or None},
     )
     return {"source_key": key, "label": label, "method": method,
-            "next": spec["next"], **_source_row(key)}
+            "next": spec["next"], **adopted, **_source_row(key)}
+
+
+def _adopt_staged(source_key: str) -> dict:
+    """Move what was learned before the source had a name onto its real key.
+
+    The demonstration is one file; the browser profile is a directory holding the
+    session the operator just signed into. Losing either would mean doing the
+    demonstration (and the sign-in) a second time for no reason.
+    """
+    import shutil
+
+    adopted: dict = {}
+    demo = Path("data/demos") / f"{STAGING_KEY}-demonstration.json"
+    if demo.exists():
+        target = demo.with_name(f"{source_key}-demonstration.json")
+        shutil.move(str(demo), target)
+        adopted["demo_path"] = str(target)
+        har = demo.with_name(f"{STAGING_KEY}-demo.har")
+        if har.exists():
+            shutil.move(str(har), har.with_name(f"{source_key}-demo.har"))
+
+    profile = Path(".browser_profiles") / STAGING_KEY
+    if profile.is_dir():
+        target = profile.with_name(source_key)
+        if target.exists():
+            shutil.rmtree(target, ignore_errors=True)
+        shutil.move(str(profile), target)
+        adopted["session_kept"] = True
+
+    sample = next(Path("data/samples").glob(f"{STAGING_KEY}-sample.*"), None)
+    if sample is not None:
+        target = sample.with_name(f"{source_key}-sample{sample.suffix}")
+        shutil.move(str(sample), target)
+        adopted["sample_path"] = str(target)
+    return adopted
 
 
 def _source_row(source_key: str) -> dict:
@@ -429,9 +640,12 @@ def start_demo(source_key: str, url: str = "") -> dict:
 
     Runs in its own process: it waits for a human to sign in, set filters, and get
     their data on screen, which no web request can wait for. Poll demo_status().
-    The demonstration is what the agent writes the scraper from."""
+    The demonstration is what the agent writes the scraper from.
+
+    Accepts the staging key: a source being added is demonstrated BEFORE it has a
+    name, because what the agent sees is how it gets named."""
     service = next((s for s in _load_services() if s.key == source_key), None)
-    if service is None:
+    if service is None and source_key != STAGING_KEY:
         raise ToolError(f"Unknown source '{source_key}'.")
 
     existing = _DEMO_PROCS.get(source_key)
@@ -443,7 +657,7 @@ def start_demo(source_key: str, url: str = "") -> dict:
     status_path.unlink(missing_ok=True)
     proc = subprocess.Popen(
         [sys.executable, "-m", "core.tools.demo_worker",
-         source_key, (url or service.login_url or "-"), str(status_path)],
+         source_key, (url or (service.login_url if service else "") or "-"), str(status_path)],
         start_new_session=True,
     )
     _DEMO_PROCS[source_key] = proc
@@ -481,7 +695,9 @@ def demo_status(source_key: str) -> dict:
                 "remediation": "Start it again, and close the browser window once your data is on screen."}
 
     landed = payload.get("final_url") or payload.get("start_url") or ""
-    if landed:
+    # A staged demonstration has no manifest entry to write to yet — add_source
+    # stores the URL when the operator names it.
+    if landed and source_key != STAGING_KEY:
         ServiceManifest().update(source_key, login_url=landed)
     return {"source_key": source_key, "status": "completed",
             "demo_path": payload.get("demo_path"),
@@ -1439,6 +1655,9 @@ READ_TOOLS = [list_sources, source_methods, latest_transactions, source_transact
 ACTION_TOOLS = [
     add_source,
     suggest_source_name,
+    preview_document,
+    preview_demo,
+    preview_inbox,
     start_demo,
     demo_status,
     ingest_document,
