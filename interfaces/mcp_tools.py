@@ -870,6 +870,9 @@ def source_transactions(source_key: str, limit: int = 500) -> dict:
             # HOW it was read: a verified parser, or the model. Model-read data is
             # unverified, and the screen has to say so rather than look identical.
             "extraction_method": run.get("extraction_method"),
+            # WHICH model, when a model read it. "the model" is not an answer the
+            # operator can audit; the name of the one that ran is.
+            "model": run.get("model"),
             **_summary(txns), "transactions": _rows(txns, limit)}
 
 
@@ -897,17 +900,31 @@ def pending_approvals() -> list[dict]:
 
 
 def llm_status() -> dict:
-    """Which LLM provider the harness is configured to use. `api_key_set` says
-    whether a key is in the vault — never the key itself."""
+    """Which LLM provider and model the harness will actually use. `api_key_set`
+    says whether a key is in the vault — never the key itself.
+
+    The model reported here is the RESOLVED one (llm_provider.resolve()), not
+    just the stored field: a provider saved without a model still runs something,
+    and a screen that showed a blank while a default ran is the black box this
+    exists to close. `model_source` says where the answer came from.
+    """
     cfg = llm_provider.current_config() or {}
+    choice = llm_provider.resolve()
     return {"configured": llm_provider.is_configured(),
-            "provider": cfg.get("provider"), "model": cfg.get("model"), "base_url": cfg.get("base_url"),
+            "provider": cfg.get("provider") or choice.provider,
+            "model": choice.model,
+            "model_source": choice.model_source,
+            "base_url": cfg.get("base_url") or choice.base_url,
             "api_key_set": bool(cfg.get("api_key")),
             # Where a document's text would actually GO. Asking "may I send this
             # off your machine?" when the model runs on the LAN would be a lie,
             # and the answer differs per provider, so it's computed, not assumed.
             "destination": _llm_destination(cfg),
-            "offsite": _llm_is_offsite(cfg)}
+            "offsite": _llm_is_offsite(cfg),
+            # What each provider would run if the operator doesn't name a model,
+            # so the form can show the truth instead of its own copy of a constant.
+            "defaults": {"anthropic": llm_provider.DEFAULT_MODEL,
+                         "openai_compatible": llm_provider.DEFAULT_OMLX_MODEL}}
 
 
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
@@ -972,6 +989,7 @@ def ingest_document(source_key: str, path: str, allow_llm_fallback: bool = False
     run = ingest_source(source_key, doc, allow_llm_fallback=allow_llm_fallback)
     return {"source_key": source_key, "run_path": run["run_path"],
             "extraction_method": run["extraction_method"],
+            "model": run.get("model"),
             **_summary(transactions_from_run(run))}
 
 
@@ -994,6 +1012,9 @@ def extract_now(source_key: str, path: str) -> dict:
     run = ingest_via_llm(source_key, doc)
     return {"source_key": source_key, "run_path": run["run_path"],
             "extraction_method": run["extraction_method"],
+            # Which model read it — the screen names it rather than leaving the
+            # operator to assume it was whatever Settings says today.
+            "model": run.get("model"),
             **_summary(transactions_from_run(run))}
 
 

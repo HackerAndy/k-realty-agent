@@ -15,6 +15,7 @@ This module must stay framework-free (no langgraph/langchain imports).
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import errno as _errno
 import ipaddress
 import json
@@ -39,6 +40,144 @@ DEFAULT_PROVIDER = "anthropic"
 #   openai_compatible  — any local/hosted OpenAI-compatible server (OMLX, Ollama,
 #                        LM Studio, vLLM …); needs base_url + model, key optional.
 PROVIDERS = ("anthropic", "openai_compatible")
+
+# Aliases the operator (or an env var, or a caller) may use for each provider.
+_ALIASES = {
+    "anthropic": "anthropic", "claude": "anthropic",
+    "openai_compatible": "openai_compatible", "openai": "openai_compatible",
+    "omlx": "openai_compatible", "local": "openai_compatible",
+}
+
+# Last-resort defaults, used only when nothing is stored and nothing is in the
+# environment. They live HERE, next to the stored settings, so there is exactly
+# one answer to "which model is this harness using" — a second copy in a caller
+# is how a harness ends up running a model the operator never chose.
+DEFAULT_MODEL = "claude-opus-4-8"
+DEFAULT_OMLX_MODEL = "qwen2.5-coder:7b"
+DEFAULT_OMLX_BASE_URL = "http://klabss-MacBook-Pro.local:9090/v1"
+DEFAULT_OMLX_API_KEY = "local"
+
+_WHERE = {
+    "settings": "chosen in Settings",
+    "environment": "from the environment",
+    "default": "the built-in default — nothing is set in Settings",
+}
+
+
+def normalise_provider(provider: str | None) -> str:
+    return _ALIASES.get((provider or "").strip().lower(), (provider or "").strip().lower())
+
+
+@dataclass(frozen=True)
+class LLMChoice:
+    """WHICH model this harness is about to talk to, and where that came from.
+
+    Every LLM call in the harness resolves through here. The operator picks a
+    provider and model in Settings; anything that reached for its own hardcoded
+    model would be running something they never chose, with no way to tell from
+    the screen — so `model_source` is carried along and shown.
+    """
+
+    provider: str
+    model: str
+    base_url: str | None = None
+    api_key: str | None = None
+    provider_source: str = "default"
+    model_source: str = "default"
+
+    @property
+    def is_anthropic(self) -> bool:
+        return self.provider == "anthropic"
+
+    def describe(self) -> str:
+        """One line, for a log or a screen: what ran, and why it was picked."""
+        return f"{self.model} ({self.provider}, {_WHERE.get(self.model_source, self.model_source)})"
+
+
+def _stored() -> dict:
+    try:
+        return dict(CredentialStore().get(LLM_CREDENTIAL_KEY))
+    except CredentialStoreError:
+        return {}
+
+
+def _pick(explicit: str | None, stored: str | None, env_var: str, default: str) -> tuple[str, str]:
+    """Value + where it came from, in the order that keeps Settings honest."""
+    if explicit:
+        return explicit, "caller"
+    if stored:
+        return stored, "settings"
+    from_env = os.getenv(env_var)
+    if from_env:
+        return from_env, "environment"
+    return default, "default"
+
+
+def resolve(
+    provider: str | None = None,
+    model: str | None = None,
+    base_url: str | None = None,
+) -> LLMChoice:
+    """The one place that answers "which model, on which provider".
+
+    Precedence: an explicit argument, then what the operator stored in Settings,
+    then the environment, then the built-in default. Settings beats the
+    environment deliberately — the GUI is where the choice is made and shown, so
+    a stale env var must not quietly redirect a run somewhere else.
+
+    A stored model/base_url/key is only used when the stored credential is for
+    the provider being resolved. Otherwise switching provider would carry the
+    other one's model name across, and the request fails (or worse, runs
+    something unintended).
+    """
+    cred = _stored()
+    stored_provider = normalise_provider(cred.get("provider"))
+    resolved_provider, provider_source = _pick(
+        normalise_provider(provider) or None, stored_provider or None,
+        "LLM_PROVIDER", DEFAULT_PROVIDER,
+    )
+    resolved_provider = normalise_provider(resolved_provider) or DEFAULT_PROVIDER
+    # Only trust the stored details if they belong to this provider.
+    own = cred if stored_provider == resolved_provider else {}
+
+    if resolved_provider == "anthropic":
+        chosen_model, model_source = _pick(model, own.get("model"), "AGENT_MODEL", DEFAULT_MODEL)
+        return LLMChoice(
+            provider=resolved_provider,
+            model=chosen_model,
+            api_key=own.get("api_key") or os.getenv("ANTHROPIC_API_KEY"),
+            provider_source=provider_source,
+            model_source=model_source,
+        )
+
+    chosen_model, model_source = _pick(model, own.get("model"), "OMLX_MODEL", DEFAULT_OMLX_MODEL)
+    chosen_url, _ = _pick(base_url, own.get("base_url"), "OMLX_BASE_URL", DEFAULT_OMLX_BASE_URL)
+    return LLMChoice(
+        provider=resolved_provider,
+        model=chosen_model,
+        base_url=chosen_url,
+        api_key=own.get("api_key") or os.getenv("OMLX_API_KEY") or DEFAULT_OMLX_API_KEY,
+        provider_source=provider_source,
+        model_source=model_source,
+    )
+
+
+def chat_completion(base_url: str, api_key: str, payload: dict, timeout_s: int = 120) -> dict:
+    """POST to an OpenAI-compatible /chat/completions. Lives here, with the rest
+    of the provider plumbing, so core/ code can reach a local server without
+    importing the orchestration layer."""
+    url = f"{base_url.rstrip('/')}/chat/completions"
+    body = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+    req = request.Request(url, data=body, headers=headers, method="POST")
+    try:
+        with request.urlopen(req, timeout=timeout_s) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace") if exc.fp else str(exc)
+        raise RuntimeError(f"OpenAI-compatible API error {exc.code}: {detail}") from exc
+    except error.URLError as exc:
+        raise RuntimeError(f"Could not reach OpenAI-compatible API at {url}: {exc}") from exc
 
 
 def is_configured() -> bool:

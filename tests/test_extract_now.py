@@ -17,8 +17,11 @@ from datetime import datetime
 import pytest
 
 from core.models import Transaction
+from core.tools.llm_provider import LLMChoice
 from interfaces import mcp_tools
 from core.tools.service_manifest import Service
+
+_CHOICE = LLMChoice(provider="anthropic", model="claude-opus-4-8", model_source="settings")
 
 
 @pytest.fixture
@@ -94,8 +97,8 @@ def test_model_read_data_records_the_route_it_arrived_by(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ingest, "DATA_DIR", tmp_path / "parsed")
     monkeypatch.setattr(llm_extractor, "read_document_text", lambda p: "text", raising=False)
-    monkeypatch.setattr(llm_extractor, "extract_transactions",
-                        lambda *a: [_txn(amount=1.0)], raising=False)
+    monkeypatch.setattr(llm_extractor, "extract_with_model",
+                        lambda *a: ([_txn(amount=1.0)], _CHOICE), raising=False)
 
     class FakeManifest:
         def get(self, key):

@@ -15,7 +15,6 @@ One short completion, no tools — this is not an agent run.
 from __future__ import annotations
 
 import json
-import os
 import re
 
 MAX_SAMPLE_CHARS = 2000     # the top of page one is where the issuer's name lives
@@ -49,34 +48,32 @@ def _clean(text: str) -> str:
 
 
 def _complete(system: str, user: str) -> str:
-    """One completion from whichever provider is configured."""
-    provider = (os.getenv("LLM_PROVIDER") or "anthropic").strip().lower()
+    """One completion from the provider and model the operator chose.
 
-    if provider in {"anthropic", "claude"}:
+    Which one that is comes from llm_provider.resolve() — the same answer the
+    agent loop and the extractor get. A local copy of "default to Claude" here
+    would mean a suggestion quietly came from a model they never picked.
+    """
+    from core.tools import llm_provider
+
+    choice = llm_provider.resolve()
+
+    if choice.is_anthropic:
         import anthropic
 
-        from orchestration.agent import DEFAULT_MODEL
-
-        message = anthropic.Anthropic().messages.create(
-            model=os.getenv("AGENT_MODEL") or DEFAULT_MODEL,
+        message = anthropic.Anthropic(api_key=choice.api_key).messages.create(
+            model=choice.model,
             max_tokens=64,
             system=system,
             messages=[{"role": "user", "content": user}],
         )
         return "".join(b.text for b in message.content if b.type == "text")
 
-    from orchestration.agent import (
-        DEFAULT_OMLX_API_KEY,
-        DEFAULT_OMLX_BASE_URL,
-        DEFAULT_OMLX_MODEL,
-        _openai_chat_completion,
-    )
-
-    data = _openai_chat_completion(
-        os.getenv("OMLX_BASE_URL") or DEFAULT_OMLX_BASE_URL,
-        os.getenv("OMLX_API_KEY", DEFAULT_OMLX_API_KEY),
+    data = llm_provider.chat_completion(
+        choice.base_url,
+        choice.api_key,
         {
-            "model": os.getenv("OMLX_MODEL") or DEFAULT_OMLX_MODEL,
+            "model": choice.model,
             "max_tokens": 64,
             "temperature": 0,
             "messages": [{"role": "system", "content": system},

@@ -69,6 +69,87 @@ def test_stored_api_key_is_scoped_to_its_provider(tmp_path, monkeypatch):
     assert lp.stored_api_key() == "sk-test"  # unscoped: whatever is stored
 
 
+# --- resolve(): the one answer to "which model" ------------------------------
+#
+# Every LLM call in the harness routes through resolve(). The rule it exists to
+# enforce: what the operator picked in Settings is what runs. Anything that kept
+# its own default was a black box — the extractor did, so an operator on a local
+# server was told to "check ANTHROPIC_API_KEY" for a model they never chose.
+
+def test_settings_beat_a_stale_environment_variable(tmp_path, monkeypatch):
+    """THE case. The GUI is where the choice is made and shown; an env var left
+    over from a shell must not quietly redirect the run somewhere else."""
+    _isolate(tmp_path, monkeypatch)
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    monkeypatch.setenv("AGENT_MODEL", "claude-opus-4-8")
+    lp.store_llm_credential("openai_compatible", base_url="http://box:9090/v1", model="qwen-30b")
+
+    choice = lp.resolve()
+
+    assert (choice.provider, choice.model) == ("openai_compatible", "qwen-30b")
+    assert choice.base_url == "http://box:9090/v1"
+    assert choice.model_source == "settings"
+
+
+def test_the_environment_is_used_when_settings_are_silent(tmp_path, monkeypatch):
+    """Headless/CI runs still need a way in."""
+    _isolate(tmp_path, monkeypatch)
+    monkeypatch.setenv("LLM_PROVIDER", "openai_compatible")
+    monkeypatch.setenv("OMLX_MODEL", "from-env")
+
+    choice = lp.resolve()
+
+    assert choice.model == "from-env" and choice.model_source == "environment"
+
+
+def test_nothing_configured_falls_back_to_the_documented_default(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+
+    choice = lp.resolve()
+
+    assert choice.provider == lp.DEFAULT_PROVIDER
+    assert choice.model == lp.DEFAULT_MODEL
+    assert choice.model_source == "default"
+
+
+def test_an_explicit_argument_still_wins(tmp_path, monkeypatch):
+    """A caller asking for a specific model (a build run pinned by the operator)
+    is a deliberate act, not a silent substitution."""
+    _isolate(tmp_path, monkeypatch)
+    lp.store_llm_credential("anthropic", api_key="sk-test", model="claude-opus-4-8")
+
+    assert lp.resolve(model="claude-haiku-4-5-20251001").model == "claude-haiku-4-5-20251001"
+
+
+def test_a_stored_model_never_crosses_to_another_provider(tmp_path, monkeypatch):
+    """Switching provider must not carry the other one's model name (or key)
+    across — 'claude-opus-4-8' sent to a local server is a confusing 404."""
+    _isolate(tmp_path, monkeypatch)
+    lp.store_llm_credential("anthropic", api_key="sk-test", model="claude-opus-4-8")
+
+    choice = lp.resolve(provider="openai_compatible")
+
+    assert choice.model == lp.DEFAULT_OMLX_MODEL
+    assert choice.api_key != "sk-test", "an Anthropic key must not reach a local server"
+
+
+def test_provider_aliases_resolve_to_one_name(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    assert lp.resolve(provider="claude").provider == "anthropic"
+    assert lp.resolve(provider="omlx").provider == "openai_compatible"
+    assert lp.resolve(provider="local").provider == "openai_compatible"
+
+
+def test_describe_says_which_model_and_where_it_came_from(tmp_path, monkeypatch):
+    """This string is what the operator reads in a log or on screen."""
+    _isolate(tmp_path, monkeypatch)
+    lp.store_llm_credential("openai_compatible", base_url="http://box:9090/v1", model="qwen-30b")
+
+    described = lp.resolve().describe()
+
+    assert "qwen-30b" in described and "Settings" in described
+
+
 # --- local-network detection -------------------------------------------------
 
 @pytest.mark.parametrize(

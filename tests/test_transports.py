@@ -154,6 +154,10 @@ def two_sources(monkeypatch):
     monkeypatch.setattr(mcp_tools, "_load_services", lambda: services)
     monkeypatch.setattr(mcp_tools, "has_scraper", lambda k: k == "epic")
     monkeypatch.setattr(mcp_tools.source_status, "parser_built", lambda k: False)
+    # Whether the inbox is signed in decides whether EMAIL is even a route, so
+    # the test has to state it. It used to be answered by the operator's real
+    # .secrets/ — the assertions below passed on this machine and nowhere else.
+    monkeypatch.setattr(mcp_tools, "_inbox_connected", lambda k: True)
     return mcp_tools
 
 

@@ -10,28 +10,41 @@ Two jobs:
 
 Everything it returns should be treated as lower-confidence than a verified
 deterministic parser (that's why the harness prefers building a real parser).
-Requires ANTHROPIC_API_KEY. Reading a document's text stays local; only that
-text is sent to the API.
+
+It runs on WHATEVER PROVIDER AND MODEL the operator chose in Settings — resolved
+through llm_provider.resolve(), like every other LLM call in the harness. It used
+to hardcode a Claude model, which meant an operator pointing the harness at their
+own local server still got "check ANTHROPIC_API_KEY" (or, with a key present, a
+run on a model they never picked). Reading a document's text stays local; only
+that text goes to the provider.
 
 Framework-free (the anthropic SDK is plain Python, allowed in core/).
 """
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime
 from pathlib import Path
 
-import anthropic
 import pdfplumber
 import yaml
 from pydantic import BaseModel, Field
 
 from core.models import Transaction
 from core.observability import get_logger
+from core.tools import llm_provider
 
 PROMPT_PATH = Path("core/prompts/transaction_extraction.v1.yaml")
-MODEL = "claude-opus-4-8"
+
+# Servers without structured-output support are told the shape in words instead.
+JSON_INSTRUCTION = (
+    'Reply with ONLY a JSON object, no prose and no markdown fence:\n'
+    '{"transactions": [{"date": "<as printed>", "description": "<verbatim>", '
+    '"amount": <signed number>, "property_name": <string or null>, '
+    '"unit": <string or null>}]}'
+)
 
 log = get_logger("core.tools.llm_extractor")
 
@@ -77,40 +90,86 @@ def _parse_date(date_str: str) -> datetime:
     ))
 
 
-def extract_transactions(
+def _rows_from_anthropic(choice, system: str, user: str) -> list[_Row]:
+    import anthropic
+
+    response = anthropic.Anthropic(api_key=choice.api_key).messages.parse(
+        model=choice.model,
+        max_tokens=16000,
+        system=system,
+        messages=[{"role": "user", "content": user}],
+        output_format=_Extracted,
+    )
+    return response.parsed_output.transactions
+
+
+def _rows_from_openai_compatible(choice, system: str, user: str) -> list[_Row]:
+    """The same job against any OpenAI-compatible server. No structured-output
+    API to lean on, so the shape is asked for in the prompt and the reply is
+    parsed leniently — local models like to say hello before the JSON."""
+    data = llm_provider.chat_completion(
+        choice.base_url,
+        choice.api_key,
+        {
+            "model": choice.model,
+            "max_tokens": 16000,
+            "temperature": 0,
+            "messages": [
+                {"role": "system", "content": f"{system}\n\n{JSON_INSTRUCTION}"},
+                {"role": "user", "content": user},
+            ],
+        },
+        timeout_s=600,   # a long document on a local box is minutes, not seconds
+    )
+    raw = data["choices"][0]["message"]["content"] or ""
+    match = re.search(r"\{.*\}", raw, re.S)
+    if not match:
+        raise ValueError(f"the reply contained no JSON object (started {raw[:120]!r})")
+    return _Extracted.model_validate(json.loads(match.group(0))).transactions
+
+
+def extract_with_model(
     document_text: str, source_key: str, source_label: str
-) -> list[Transaction]:
-    """Send document text to the API and return transactions (marked
-    extraction_method=llm in metadata)."""
+) -> tuple[list[Transaction], llm_provider.LLMChoice]:
+    """Extract, and say which model did it — the caller records that on the run
+    so a set of rows can always be traced to what produced them."""
     prompt = yaml.safe_load(PROMPT_PATH.read_text())
-    client = anthropic.Anthropic()
+    choice = llm_provider.resolve()
+    system = prompt["system"].format(source_label=source_label, source_key=source_key)
+    user = prompt["user_template"].format(
+        source_label=source_label, document_text=document_text
+    )
 
     try:
-        response = client.messages.parse(
-            model=MODEL,
-            max_tokens=16000,
-            system=prompt["system"].format(source_label=source_label, source_key=source_key),
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt["user_template"].format(
-                        source_label=source_label, document_text=document_text
-                    ),
-                }
-            ],
-            output_format=_Extracted,
-        )
+        rows = (_rows_from_anthropic(choice, system, user) if choice.is_anthropic
+                else _rows_from_openai_compatible(choice, system, user))
     except Exception as exc:
         raise ExtractionError(log.failure(
             operation="llm_extract",
             code="LLM_API_ERROR",
-            message=f"The LLM extraction call failed for '{source_key}'.",
-            remediation="Check ANTHROPIC_API_KEY and network; retry, or build a deterministic parser.",
-            context={"source_key": source_key, "model": MODEL, "text_chars": len(document_text)},
+            message=f"The LLM extraction call failed for '{source_key}' on {choice.describe()}.",
+            remediation=(
+                "Check the provider under Settings — the key for the Claude API, or that the "
+                "server and model are reachable for a local one — then retry, or build a "
+                "deterministic parser."
+            ),
+            context={"source_key": source_key, "provider": choice.provider,
+                     "model": choice.model, "model_source": choice.model_source,
+                     "base_url": choice.base_url, "text_chars": len(document_text)},
             exc=exc,
         )) from exc
 
-    rows = response.parsed_output.transactions
+    return _to_transactions(rows, source_key, len(document_text)), choice
+
+
+def extract_transactions(
+    document_text: str, source_key: str, source_label: str
+) -> list[Transaction]:
+    """Transactions only, for callers that don't record which model ran."""
+    return extract_with_model(document_text, source_key, source_label)[0]
+
+
+def _to_transactions(rows: list[_Row], source_key: str, text_chars: int) -> list[Transaction]:
     if not rows:
         raise ExtractionError(log.failure(
             operation="llm_extract",
@@ -118,7 +177,7 @@ def extract_transactions(
             message="LLM extraction returned zero transactions.",
             remediation="The document may not contain a transaction table, or the text is unusable "
                         "— inspect the source document.",
-            context={"source_key": source_key, "text_chars": len(document_text)},
+            context={"source_key": source_key, "text_chars": text_chars},
         ))
 
     transactions = []

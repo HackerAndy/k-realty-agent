@@ -1614,13 +1614,16 @@
     // Model-read data must not look identical to parsed data. Nothing verified
     // it, and the fix (build a parser) is one panel below.
     const byModel = data.extraction_method === 'llm_extract' || data.extraction_method === 'llm_fallback';
+    // …and it names WHICH model, recorded at the time it ran. Settings can
+    // change afterwards; what read these rows cannot.
+    const readBy = data.model ? ' Read by <b>' + esc(data.model) + '</b>.' : '';
     const provenance = byModel
       ? '<div class="notbuilt" style="margin-bottom:12px"><b>Read by the model, not by a parser.</b> ' +
         (data.extraction_method === 'llm_fallback'
           ? 'The committed parser couldn’t read that layout, so the model read it instead. '
           : 'This source has no parser yet, so the model read it. ') +
         'Nothing tested this — check the rows below, and have the agent build a parser so next month ' +
-        'is deterministic.</div>'
+        'is deterministic.' + readBy + '</div>'
       : '';
 
     const groupSafe = cols.includes(view.group) ? view.group : 'None';
@@ -1816,10 +1819,18 @@
     if (!credCache) await loadCredentials();
     if (llmForm.provider === null) llmForm.provider = cfg.provider || 'anthropic';
 
+    // `model` here is what will ACTUALLY run, not just what was typed into the
+    // field: a provider saved without one still runs something, and a screen
+    // that stayed blank while a built-in default ran is a black box.
+    const modelNote = cfg.model_source === 'default'
+      ? ' <span class="sub">(built-in default — nothing chosen yet)</span>'
+      : (cfg.model_source === 'environment' ? ' <span class="sub">(from the environment)</span>' : '');
     const currently = cfg.configured
       ? 'Currently: <b>' + esc(cfg.provider === 'anthropic' ? 'Claude API' : 'Local / OpenAI-compatible') + '</b>' +
-        (cfg.model ? ' · <b>' + esc(cfg.model) + '</b>' : '') +
-        (cfg.base_url ? ' · ' + esc(cfg.base_url) : '')
+        (cfg.model ? ' · <b>' + esc(cfg.model) + '</b>' + modelNote : '') +
+        (cfg.base_url ? ' · ' + esc(cfg.base_url) : '') +
+        '<div class="sub" style="margin-top:4px">Every model call the harness makes — reading a ' +
+        'document, suggesting a name, building a parser — uses this one.</div>'
       : 'No LLM provider is set up yet.';
 
     const seg = '<div class="seg">' +
@@ -1843,7 +1854,8 @@
         '<input type="password" id="llm-key" placeholder="' + keyPlaceholder + '" autocomplete="off">' +
         keyHint + '</div>' +
         '<div class="field"><label for="llm-model">Model</label>' +
-        '<input type="text" id="llm-model" value="' + esc(sameProvider && cfg.model ? cfg.model : 'claude-opus-4-8') + '"></div>';
+        '<input type="text" id="llm-model" value="' +
+        esc(sameProvider && cfg.model ? cfg.model : ((cfg.defaults || {}).anthropic || '')) + '"></div>';
     } else {
       const opts = llmForm.models.length
         ? '<div class="field"><label for="llm-model-sel">Model</label><select id="llm-model-sel">' +

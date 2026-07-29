@@ -5,8 +5,9 @@ LLM drives the repo tools (read/write/run_command/list) until it reports done.
 It's how the harness builds and repairs its own parsers without a human opening
 a code editor.
 
-Provider selection defaults to Anthropic and can be switched to a local OMLX
-OpenAI-compatible API. Progress is streamed to an `on_event` callback so the
+Which provider and model it runs on is NOT decided here: it comes from
+core.tools.llm_provider.resolve(), i.e. from what the operator chose in Settings,
+and every run announces the answer. Progress is streamed to an `on_event` callback so the
 harness UI can show what the agent is doing (transparency matters — you should
 see every file it writes and command it runs).
 
@@ -19,17 +20,20 @@ import json
 import os
 from dataclasses import dataclass
 from collections.abc import Callable
-from urllib import error, request
 
 import anthropic
 
+from core.tools import llm_provider
 from orchestration import agent_tools
 
-DEFAULT_PROVIDER = "anthropic"
-DEFAULT_MODEL = "claude-opus-4-8"
-DEFAULT_OMLX_MODEL = "qwen2.5-coder:7b"
-DEFAULT_OMLX_BASE_URL = "http://klabss-MacBook-Pro.local:9090/v1"
-DEFAULT_OMLX_API_KEY = "local"
+# Which provider/model to use is decided in ONE place — core/tools/llm_provider —
+# from what the operator chose in Settings. These re-exports keep the old import
+# sites working without giving this module a second opinion.
+DEFAULT_PROVIDER = llm_provider.DEFAULT_PROVIDER
+DEFAULT_MODEL = llm_provider.DEFAULT_MODEL
+DEFAULT_OMLX_MODEL = llm_provider.DEFAULT_OMLX_MODEL
+DEFAULT_OMLX_BASE_URL = llm_provider.DEFAULT_OMLX_BASE_URL
+DEFAULT_OMLX_API_KEY = llm_provider.DEFAULT_OMLX_API_KEY
 MAX_TOKENS = 16000
 DEFAULT_MAX_TURNS = 40
 
@@ -77,8 +81,11 @@ class LLMAdapter:
 
 
 class AnthropicAdapter(LLMAdapter):
-    def __init__(self, model: str, max_tokens: int):
-        self.client = anthropic.Anthropic()
+    def __init__(self, model: str, max_tokens: int, api_key: str | None = None):
+        # The key comes from the resolved choice (the vault), not only from the
+        # environment — a worker process that never called load_into_env() would
+        # otherwise fail with "no API key" while Settings plainly shows one.
+        self.client = anthropic.Anthropic(api_key=api_key)
         self.model = model
         self.max_tokens = max_tokens
 
@@ -221,7 +228,11 @@ def run_agent(
 ) -> AgentResult:
     """Run the tool-use loop until the model stops calling tools (or the turn
     cap is hit). `on_event` receives human-readable progress lines."""
-    adapter = _build_adapter(provider=provider, model=model, api_url=api_url)
+    choice = llm_provider.resolve(provider=provider, model=model, base_url=api_url)
+    # Say which model is about to do the work. The operator picks one in
+    # Settings; a run that silently used a different one would be unauditable.
+    on_event(f"[model] {choice.describe()}")
+    adapter = _build_adapter(choice)
     messages = adapter.init_messages(task)
     tool_calls: list[tuple[str, dict]] = []
     final_text = ""
@@ -252,47 +263,31 @@ def run_agent(
     return AgentResult(final_text, max_turns, tool_calls)
 
 
-def _build_adapter(provider: str | None, model: str | None, api_url: str | None) -> LLMAdapter:
-    selected_provider = (provider or os.getenv("LLM_PROVIDER") or DEFAULT_PROVIDER).strip().lower()
-
-    if selected_provider in {"anthropic", "claude"}:
-        selected_model = model or os.getenv("AGENT_MODEL") or DEFAULT_MODEL
+def _build_adapter(choice: llm_provider.LLMChoice) -> LLMAdapter:
+    """Turn the resolved choice into a client. No provider/model decisions are
+    made here — that is llm_provider.resolve()'s job, and only its job."""
+    if choice.is_anthropic:
         return AnthropicAdapter(
-            model=selected_model,
+            model=choice.model,
             max_tokens=int(os.getenv("AGENT_MAX_TOKENS", str(MAX_TOKENS))),
+            api_key=choice.api_key,
         )
 
-    if selected_provider in {"omlx", "openai", "openai_compatible", "local"}:
-        selected_model = model or os.getenv("OMLX_MODEL") or DEFAULT_OMLX_MODEL
-        selected_url = api_url or os.getenv("OMLX_BASE_URL") or DEFAULT_OMLX_BASE_URL
-        selected_key = os.getenv("OMLX_API_KEY", DEFAULT_OMLX_API_KEY)
+    if choice.provider == "openai_compatible":
         return OpenAICompatibleAdapter(
-            model=selected_model,
-            base_url=selected_url,
-            api_key=selected_key,
+            model=choice.model,
+            base_url=choice.base_url,
+            api_key=choice.api_key,
             max_tokens=int(os.getenv("OMLX_MAX_TOKENS", str(MAX_TOKENS))),
             temperature=float(os.getenv("OMLX_TEMPERATURE", "0.2")),
         )
 
-    raise ValueError(f"Unsupported LLM provider '{selected_provider}'.")
+    raise ValueError(f"Unsupported LLM provider '{choice.provider}'.")
 
 
-def _openai_chat_completion(base_url: str, api_key: str, payload: dict) -> dict:
-    url = f"{base_url}/chat/completions"
-    body = json.dumps(payload).encode("utf-8")
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}",
-    }
-    req = request.Request(url, data=body, headers=headers, method="POST")
-    try:
-        with request.urlopen(req, timeout=120) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace") if exc.fp else str(exc)
-        raise RuntimeError(f"OpenAI-compatible API error {exc.code}: {detail}") from exc
-    except error.URLError as exc:
-        raise RuntimeError(f"Could not reach OpenAI-compatible API at {url}: {exc}") from exc
+# The HTTP call itself lives in core/tools/llm_provider so core/ code can reach a
+# local server without importing orchestration. Kept under the old name here.
+_openai_chat_completion = llm_provider.chat_completion
 
 
 def _preview(name: str, arguments: dict) -> str:

@@ -47,7 +47,7 @@ def _dump_debug_text(source_key: str, extracted_text: str) -> Path:
 
 
 def _persist(source_key: str, transactions: list[Transaction], input_path: Path, method: str,
-             parser: str | None, transport: str | None = None) -> dict:
+             parser: str | None, transport: str | None = None, model: str | None = None) -> dict:
     month_key = f"{transactions[0].date:%Y-%m}" if transactions else "unknown"
     run = {
         "parsed_at": datetime.now(UTC).isoformat(),
@@ -59,6 +59,10 @@ def _persist(source_key: str, transactions: list[Transaction], input_path: Path,
         # draws the route the current data actually arrived by as a solid line,
         # so this has to be recorded rather than guessed from the parser used.
         "transport": transport,
+        # WHICH MODEL read it, when a model did. Rows a model produced are only
+        # as trustworthy as the model that produced them, so the run says which
+        # one rather than leaving the operator to infer it from Settings today.
+        "model": model,
         "month": month_key,
         "transaction_count": len(transactions),
         "transactions": [t.model_dump(mode="json") for t in transactions],
@@ -127,10 +131,11 @@ def ingest_source(
             if dump_path:
                 raise ParseError(human, extracted_text=exc.extracted_text) from exc
             raise
-        from core.tools.llm_extractor import extract_transactions
+        from core.tools.llm_extractor import extract_with_model
 
-        transactions = extract_transactions(exc.extracted_text, source_key, source.label)
-        return _persist(source_key, transactions, input_path, "llm_fallback", source.parser, transport)
+        transactions, choice = extract_with_model(exc.extracted_text, source_key, source.label)
+        return _persist(source_key, transactions, input_path, "llm_fallback", source.parser,
+                        transport, model=choice.describe())
 
     return _persist(source_key, transactions, input_path, "deterministic_parser", source.parser, transport)
 
@@ -141,14 +146,15 @@ def ingest_via_llm(
 ) -> dict:
     """Extract a source's document with the LLM directly (no deterministic
     parser required). This is the "handle it now" path for a source the harness
-    doesn't yet have a parser for. Requires ANTHROPIC_API_KEY; document text is
-    sent to the API."""
+    doesn't yet have a parser for. Runs on the provider/model chosen in Settings;
+    document text is sent to that provider."""
     source = _source(source_key, manifest)
-    from core.tools.llm_extractor import extract_transactions, read_document_text
+    from core.tools.llm_extractor import extract_with_model, read_document_text
 
     text = read_document_text(input_path)
-    transactions = extract_transactions(text, source_key, source.label)
-    return _persist(source_key, transactions, input_path, "llm_extract", None, transport)
+    transactions, choice = extract_with_model(text, source_key, source.label)
+    return _persist(source_key, transactions, input_path, "llm_extract", None, transport,
+                    model=choice.describe())
 
 
 def load_latest_parsed() -> dict | None:
