@@ -139,11 +139,23 @@
 
 const SOURCE = {
   label: 'Epic Property Management',
+  // Stage 1 — getting at it. Each of these is a route, and carries the ★/⏵.
   routes: [
-    { id: 'upload', icon: '⬆', label: 'File upload',   w: 'needs you',           parsed: true  },
-    { id: 'scrape', icon: '↻', label: 'Portal scrape', w: 'can run unattended',  parsed: false },
-    { id: 'email',  icon: '✉', label: 'Email',         w: 'can run unattended',  parsed: true, def: true },
+    { id: 'upload',  icon: '⬆', label: 'File upload', w: 'needs you',          reader: 'parser' },
+    { id: 'website', icon: '⌘', label: 'Website',     w: 'can run unattended', reader: 'api',
+      detail: 'epicpropertymanagement.managebuilding.com' },
+    { id: 'email',   icon: '✉', label: 'Mailbox',     w: 'can run unattended', reader: 'parser',
+      def: true, detail: 'rentals@krealtyllc.org' },
   ],
+  // Stage 2 — reading it. Two kinds, because the two kinds really are different.
+  readers: {
+    parser: { label: 'Parser', code: 'buildium_owner_statement', kind: 'document',
+              test: 'test_parser_epic.py passing',
+              last: 'read 14 rows from Owner Statement 2026-05.pdf' },
+    api:    { label: 'API call', code: '/manager/api/generalLedger/transactions', kind: 'portal',
+              test: 'test_scraper_epic_property_management.py passing',
+              last: 'pulled 14 rows · 30-day window ending today' },
+  },
   parser: {
     name: 'buildium_owner_statement',
     test: 'test_parser_epic.py passing',
@@ -159,8 +171,8 @@ const SOURCE = {
 };
 
 const VARIANTS = {
-  a: { name: 'A · one drawing, two hops', render: variantA,
-       q: 'The existing funnel extended: doors → parser → count, in a single picture.' },
+  a: { name: 'A · CHOSEN — three ways in, two kinds of reading', render: variantA,
+       q: 'Chosen shape, refined: a website is a way IN, and the API call that reads it is its own node — as the parser is for documents. Click any node for its panel.' },
   b: { name: 'B · three labelled stages', render: variantB,
        q: 'Stacked bands that name the stages, so "separate processes" is stated, not implied.' },
   c: { name: 'C · two panels in series', render: variantC,
@@ -183,6 +195,26 @@ function doorHTML(r) {
   </div>`;
 }
 
+/** Stage 2 nodes. A document is read by a PARSER; a portal is read by the API
+ *  call the agent found — different code, different failures, different fix, so
+ *  they are different nodes rather than one "reader". */
+function readerHTML(id) {
+  const r = SOURCE.readers[id];
+  const live = SOURCE.routes.find(x => x.id === SOURCE.live);
+  const isLive = live && live.reader === id;
+  return `<div class="parser ${sel === id ? 'sel' : ''}" onclick="pick('${id}')">
+    <div class="nm">${r.label} <code>${shortCode(r.code)}</code>
+      <span class="pass">tests pass</span>
+      <span class="run" style="margin-left:auto"
+            title="${id === 'parser' ? 'Read the document already on disk again'
+                                     : 'Call the API again with the session we have'}"
+            onclick="event.stopPropagation();run('${id}')">⏵</span></div>
+    <div class="sub">${isLive ? r.last : 'not what produced the rows below'}</div>
+  </div>`;
+}
+
+const shortCode = c => c.length > 34 ? '…' + c.slice(-33) : c;
+
 function parserHTML(compact) {
   const p = SOURCE.parser;
   return `<div class="parser ${sel === 'parser' ? 'sel' : ''}" onclick="pick('parser')">
@@ -195,38 +227,67 @@ function parserHTML(compact) {
 
 function settingsSlot() {
   if (!sel) return '';
+
   if (sel === 'parser') {
-    return `<div class="slot"><div class="h">How this source is read</div>
-      <div>Committed code, with a test of its own — the agent wrote both and you approved them.
-        Nothing here is configuration: if the layout changed, the fix is a new version of the code.</div>
-      <div class="field"><label>Parser</label><input value="${SOURCE.parser.name}" readonly></div>
-      <div class="field"><label>Its test</label><input value="${SOURCE.parser.test}" readonly></div>
+    // Andy: the agent is needed when a PARSE needs fixing — so the fix panel
+    // lives on this node and nowhere else.
+    return `<div class="slot"><div class="h">Parser — how a document is turned into rows</div>
+      <div>Committed code with a test of its own; the agent wrote both and you approved them.
+        Nothing here is a setting: if the layout changed, the fix is a new version of the code.</div>
+      <div class="field"><label>Code</label><input value="core/parsers/${SOURCE.readers.parser.code}.py" readonly></div>
+      <div class="field"><label>Its test</label><input value="${SOURCE.readers.parser.test}" readonly></div>
       <div style="display:flex;gap:8px;margin-top:10px">
         <button class="btn primary">Have the agent fix it</button>
-        <button class="btn">Read the last document again</button>
-      </div></div>`;
+        <button class="btn">Read the last document again</button></div></div>`;
   }
+
+  if (sel === 'api') {
+    return `<div class="slot"><div class="h">API call — how the portal hands over rows</div>
+      <div>The agent found the request the portal fires itself, so there are no clicks to replay:
+        it signs in for cookies, takes the XSRF token, then calls the endpoint directly.</div>
+      <div class="field"><label>Endpoint</label><input value="POST ${SOURCE.readers.api.code}" readonly></div>
+      <div class="field"><label>Its test</label><input value="${SOURCE.readers.api.test}" readonly></div>
+      <div style="margin:12px 0 4px;font-weight:600">What the call needs</div>
+      <div class="field"><label>Date range</label><input value="last 30 days, ending today"></div>
+      <div class="field"><label>Accounts</label><input value="every GL account (fetched first)"></div>
+      <div style="border:1px dashed var(--border);border-radius:8px;padding:9px;margin-top:8px;
+                  color:var(--muted);font-size:11.5px">
+        Honest state today: both of those are <b>hardcoded in the scraper</b>
+        (<code>date.today() - 30</code>), not settings — so this panel can't change them yet.
+        Making the agent declare them is issue #43, and this design is what makes that visible.</div>
+      <div style="display:flex;gap:8px;margin-top:10px">
+        <button class="btn primary">Have the agent fix it</button>
+        <button class="btn">Call it again</button></div></div>`;
+  }
+
   const r = SOURCE.routes.find(x => x.id === sel);
-  if (r.id === 'email') {
-    return `<div class="slot"><div class="h">Which message carries it</div>
-      <div class="field"><label>Look in</label><select><option>rentals@krealtyllc.org</option></select></div>
-      <div class="field"><label>From address</label><input value="mail@managebuilding.com"></div>
-      <div class="field"><label>Subject contains</label><input value="Owner's Statement"></div>
+  if (r.id === 'website') {
+    return `<div class="slot"><div class="h">Website — how the harness gets in</div>
+      <div>The same sign-in as <b>Settings → Websites</b>; changing it here changes it there.
+        It is shared, so anything else using this portal gets the change too.</div>
+      <div class="field"><label>Address</label><input value="https://${r.detail}/manager"></div>
+      <div class="field"><label>Username</label><input value="andy.kaminski@krealtyllc.org"></div>
+      <div class="field"><label>Password</label><input type="password" placeholder="•••••••••••• saved"></div>
       <div style="margin-top:10px"><button class="btn primary">Save</button></div></div>`;
   }
-  if (r.id === 'scrape') {
-    return `<div class="slot"><div class="h">What to ask the portal for</div>
-      <div class="field"><label>Report</label><select><option>General ledger</option></select></div>
-      <div class="field"><label>Date range</label><input value="Last full month"></div>
+  if (r.id === 'email') {
+    return `<div class="slot"><div class="h">Mailbox — which message carries it</div>
+      <div>Signing in to the mailbox is shared, and lives in <b>Settings → Email</b>.
+        What to look for inside it is this source's own business, and lives here.</div>
+      <div class="field"><label>Look in</label><select><option>${r.detail}</option></select></div>
+      <div class="field"><label>From address</label><input value="mail@managebuilding.com"></div>
+      <div class="field"><label>Subject contains</label><input value="Owner's Statement"></div>
+      <div class="field"><label>Attachment ends with</label><input value=".pdf"></div>
       <div style="margin-top:10px"><button class="btn primary">Save</button></div></div>`;
   }
   return `<div class="slot"><div class="h">File upload</div>
-    <div>Nothing to set up — press ⏵ on the chip to choose a document.
-      What happens to it afterwards is the parser's business, one stage along.</div></div>`;
+    <div>Nothing to set up — press ⏵ on the chip to choose a document. What happens to it
+      afterwards belongs to the parser, one stage along.</div></div>`;
 }
 
 function dataHTML() {
-  const showing = !sel || sel === 'parser' || dataIsFrom(sel);
+  const isReader = sel === 'parser' || sel === 'api';
+  const showing = !sel || isReader || dataIsFrom(sel);
   if (!showing) {
     const r = SOURCE.routes.find(x => x.id === sel);
     const liveLabel = SOURCE.routes.find(x => x.id === SOURCE.live).label.toLowerCase();
@@ -255,31 +316,46 @@ function shell(inner) {
 /* ── A · one drawing, two hops ──────────────────────────────────────────── */
 
 function variantA() {
-  // Doors on the left, the parser in the middle, the count on the right. The
-  // scrape line skips the middle, which is the whole point of the picture.
-  const svgL = `<svg viewBox="0 0 60 150" style="width:60px;height:150px" aria-hidden="true">
-      <path d="M2 22 C34 22, 26 62, 58 62" stroke="currentColor" stroke-width="1.5" fill="none"/>
-      <path d="M2 75 C34 75, 26 128, 58 128" stroke="currentColor" stroke-width="1.5"
-            stroke-dasharray="3 3" fill="none"/>
-      <path d="M2 128 C34 128, 26 62, 58 62" stroke="currentColor" stroke-width="1.5" fill="none"/>
+  // Chosen shape. Three ways in on the left, the two kinds of reading in the
+  // middle, the rows on the right. The solid path is the one that produced what
+  // is on screen; dashed paths exist but weren't used.
+  const live = SOURCE.routes.find(x => x.id === SOURCE.live);
+  const H = 200;   // the reader column is the tallest thing in the row
+  const y = { upload: 46, website: 100, email: 154, parser: 46, api: 154, out: 100 };
+  const dashed = id => (live && live.id === id) ? '' : ' stroke-dasharray="3 3"';
+  const dashedReader = id => (live && live.reader === id) ? '' : ' stroke-dasharray="3 3"';
+  const curve = (y1, y2, dash) =>
+    `<path d="M2 ${y1} C34 ${y1}, 24 ${y2}, 56 ${y2}" stroke="currentColor" stroke-width="1.5"
+       fill="none"${dash}/>`;
+
+  const svgL = `<svg viewBox="0 0 58 ${H}" style="width:58px;height:${H}px" aria-hidden="true">
+      ${curve(y.upload, y.parser, dashed('upload'))}
+      ${curve(y.email, y.parser, dashed('email'))}
+      ${curve(y.website, y.api, dashed('website'))}
     </svg>`;
-  const svgR = `<svg viewBox="0 0 60 150" style="width:60px;height:150px" aria-hidden="true">
-      <path d="M2 62 C34 62, 26 95, 56 95" stroke="currentColor" stroke-width="1.5" fill="none"/>
-      <path d="M2 128 C34 128, 26 95, 56 95" stroke="currentColor" stroke-width="1.5"
-            stroke-dasharray="3 3" fill="none"/>
-      <circle cx="56" cy="95" r="3" fill="currentColor"/>
+  const svgR = `<svg viewBox="0 0 58 ${H}" style="width:58px;height:${H}px" aria-hidden="true">
+      ${curve(y.parser, y.out, dashedReader('parser'))}
+      ${curve(y.api, y.out, dashedReader('api'))}
+      <circle cx="56" cy="${y.out}" r="3" fill="currentColor"/>
     </svg>`;
+
   return shell(`
-    <div style="display:grid;grid-template-columns:minmax(0,1.1fr) 52px minmax(0,1fr) 52px auto;align-items:center">
-      <div class="doors">${SOURCE.routes.map(doorHTML).join('')}</div>
+    <div style="display:grid;grid-template-columns:minmax(0,1fr) 58px minmax(0,1fr) 58px auto;
+                align-items:center;gap:0">
+      <div class="doors" style="justify-content:space-between;height:${H}px">
+        ${SOURCE.routes.map(doorHTML).join('')}</div>
       <div class="pipe">${svgL}</div>
-      <div>${parserHTML(true)}
-        <div style="font-size:11px;color:var(--faint);margin-top:6px;text-align:center">
-          a scrape skips this — it returns rows itself</div></div>
+      <div style="display:flex;flex-direction:column;justify-content:space-between;
+                  height:${H}px">
+        ${readerHTML('parser')}
+        ${readerHTML('api')}
+      </div>
       <div class="pipe">${svgR}</div>
       <div class="count" style="padding-left:6px"><div class="big">${SOURCE.count}</div>
         <div class="cap">transactions</div></div>
     </div>
+    <div style="font-size:12.5px;color:var(--success);font-weight:600;margin:10px 0 0">
+      ★ Can run itself — ${live ? live.label.toLowerCase() : 'nothing yet'}</div>
     ${settingsSlot()}
     ${dataHTML()}`);
 }

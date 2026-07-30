@@ -44,14 +44,29 @@ selected route isn't the one that produced the data on screen, the data clears
 parser — the scraper returns rows itself — so the parser stage has two inputs
 (upload, email), not three.
 
-**Open questions the prototype raised, not yet answered.**
+**VERDICT — Andy, 2026-07-29: variant A, refined.**
 
-1. Variant C still shows the `14 transactions` count while the data below is
-   cleared. Should the count blank out too, or is it a property of the source
-   rather than of the selected route?
-2. Where the agent's build/fix panel belongs once the parser has a node of its
-   own — inside the parser's settings, or below the data.
-3. Whether `★ Can run itself — email` survives "nothing between the chips and the
-   data".
+- **A** is the shape. It now draws **three ways in → two kinds of reading → the rows**.
+- A website is a way IN, not a reader. So the portal route is two nodes: a
+  **Website** node (address, username, password — the same sign-in as Settings →
+  Websites, editable in both places) pointing at an **API call** node.
+- It really is an API call, not replayed clicks: `core/scrapers/epic_property_management.py`
+  logs in for cookies + the XSRF token, then POSTs `/manager/api/generalLedger/transactions`.
+  So the node is named for what it is. A source whose agent-built code drives the UI
+  instead would presumably read `Scraper`.
+- **The agent's fix panel belongs on the reading node, and only there** — Andy:
+  *"when is an agent needed? it's needed when a parsing action needs to be fixed."*
+  The Parser node offers "Have the agent fix it"; the API node offers the same plus
+  the variables the call needs.
+- `★ Can run itself — email` **survives**, directly under the graph.
+- Reader nodes get their own ⏵: re-read the document already on disk, or call the
+  API again with the session we have — neither re-fetches.
 
-**Verdict:** _(awaiting Andy)_
+**What building it will expose.** The API node's "what the call needs" panel has
+nothing to edit yet: the date window is hardcoded (`date.today() - timedelta(days=30)`
+in the scraper) and Epic declares no `SETTINGS`. That is issue #43, and this design
+is what makes it visible — the panel would otherwise be an empty box.
+
+**Still open:** in a two-stage graph, does selecting a route that didn't produce the
+rows also blank the `14 transactions` count, or is the count a property of the source?
+(Today the prototype keeps it and clears only the table.)
