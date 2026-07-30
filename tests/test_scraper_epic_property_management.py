@@ -8,7 +8,7 @@ agent-built scraper is covered like the hand-written parsers are.
 """
 
 from core import reconcile
-from core.scrapers.epic_property_management import SERVICE_KEY, _extract
+from core.scrapers.epic_property_management import SERVICE_KEY, SETTINGS, _extract
 
 # Shaped like the real API: account wrappers, some with no activity.
 RAW = [
@@ -136,6 +136,53 @@ def test_extract_no_reconciliation_when_total_is_none():
     assert len(checks) == 0
 
 
+def test_settings_declares_adjustable_dropdowns():
+    """SETTINGS must declare the portal's dropdown choices as adjustable."""
+    assert isinstance(SETTINGS, list) and len(SETTINGS) > 0
+
+    keys = {s["key"] for s in SETTINGS}
+    # Must include the accounting basis dropdown
+    assert "accounting_basis" in keys, "accounting_basis must be a configurable setting"
+    # Must include lookback days
+    assert "lookback_days" in keys, "lookback_days must be a configurable setting"
+    # Must include property_id (replaces the old property_selection)
+    assert "property_id" in keys, "property_id must be a configurable setting"
+
+    # Verify each setting has the required shape
+    for s in SETTINGS:
+        assert "key" in s
+        assert "label" in s
+        assert "type" in s
+        assert "default" in s
+
+    # Verify accounting_basis has proper options
+    basis_setting = next(s for s in SETTINGS if s["key"] == "accounting_basis")
+    assert basis_setting["type"] == "choice"
+    options = {o["value"] for o in basis_setting["options"]}
+    assert "cash" in options, "cash basis must be an option"
+    assert "accrual" in options, "accrual basis must be an option"
+
+    # Verify property_id has proper structure
+    prop_setting = next(s for s in SETTINGS if s["key"] == "property_id")
+    assert prop_setting["type"] == "choice"
+    # Must include "all" as an option
+    prop_options = {o["value"] for o in prop_setting["options"]}
+    assert "all" in prop_options, '"all" must be a property option'
+
+
+def test_settings_no_longer_has_property_selection_or_unit_selection():
+    """The old property_selection and unit_selection settings were replaced by property_id."""
+    keys = {s["key"] for s in SETTINGS}
+    assert "property_selection" not in keys, "property_selection was replaced by property_id"
+    assert "unit_selection" not in keys, "unit_selection is no longer needed"
+
+
+def test_property_id_default_is_all():
+    """The property_id setting should default to 'all'."""
+    prop_setting = next(s for s in SETTINGS if s["key"] == "property_id")
+    assert prop_setting["default"] == "all"
+
+
 # ── The XSRF token: where every API call succeeds or 403s ────────────────────
 #
 # The token is the whole of the scraper's authorisation. Nothing about it can be
@@ -151,15 +198,20 @@ def test_extract_no_reconciliation_when_total_is_none():
 #     like "a quiet month" and silently under-report the books.
 
 import json as _json
+from pathlib import Path
+from io import StringIO
 
 import pytest
+from ruamel.yaml import YAML
 
 from core import observability
 from core.scrapers.base import ScrapeError
 from core.scrapers.epic_property_management import (
     _extract_xsrf_token,
     _fetch_json,
+    _fetch_properties,
     _get_gl_account_ids,
+    _get_property_options,
     _post_json,
 )
 
@@ -298,3 +350,64 @@ def test_the_token_reaches_the_account_lookup():
     assert ids == ["7", "9"], "ids come back as strings — the payload wants strings"
     assert page.request.calls[0]["headers"]["X-XSRF-TOKEN"] == "tok"
     assert "excludeBankAccounts=true" in page.request.calls[0]["url"]
+
+
+def test_fetch_properties_returns_id_and_name():
+    """_fetch_properties extracts id and name from the API response."""
+    page = _FakePage(payload=[
+        {"Id": 10, "Name": "1029 E. Granet Ave."},
+        {"Id": 20, "Name": "8095 Prospect Ave."},
+    ])
+
+    props = _fetch_properties(page, "tok")
+
+    assert len(props) == 2
+    assert props[0] == {"id": "10", "name": "1029 E. Granet Ave."}
+    assert props[1] == {"id": "20", "name": "8095 Prospect Ave."}
+
+
+def test_get_property_options_builds_from_stored_properties(tmp_path, monkeypatch):
+    """_get_property_options reads stored properties and builds choice options.
+
+    We write directly to the settings YAML (bypassing save_for which rejects
+    'properties' as an unknown key) and then verify the options are built.
+    """
+    import core.settings as _settings
+
+    SETTINGS_PATH = Path("core/policies/source_settings.yaml")
+    _yaml = YAML()
+    _yaml.preserve_quotes = True
+    _yaml.width = 4096
+
+    # Save original file content
+    original_content = SETTINGS_PATH.read_text() if SETTINGS_PATH.exists() else ""
+
+    try:
+        # Write test properties directly to YAML (bypassing save_for validation)
+        data = {"sources": {SERVICE_KEY: {
+            "lookback_days": 30,
+            "accounting_basis": "cash",
+            "property_id": "all",
+            "properties": [
+                {"id": "10", "name": "1029 E. Granet Ave."},
+                {"id": "20", "name": "8095 Prospect Ave."},
+            ],
+        }}}
+        buf = StringIO()
+        _yaml.dump(data, buf)
+        SETTINGS_PATH.write_text(buf.getvalue())
+
+        # Re-import to pick up new settings (or just call the function)
+        options = _get_property_options()
+        values = {o["value"] for o in options}
+        labels = {o["label"] for o in options}
+
+        assert "all" in values
+        assert "10" in values
+        assert "20" in values
+        assert "All Properties" in labels
+        assert "1029 E. Granet Ave." in labels
+        assert "8095 Prospect Ave." in labels
+    finally:
+        # Restore original file content
+        SETTINGS_PATH.write_text(original_content)

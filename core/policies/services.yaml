@@ -34,7 +34,7 @@ services:
   access: email_attachment
   parser: buildium_owner_statement
   status: implemented
-  default_transport: email
+  default_transport: scrape
   # How to find this source's statement in the 'email' inbox.
   email_search:
     carrier: email

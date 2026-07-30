@@ -1,0 +1,8 @@
+# Operator-adjustable options per source — edited from the app, not by hand.
+# The available fields are declared by each source's own module (SETTINGS);
+# see core/settings.py. Values here override those declared defaults.
+sources:
+  epic_property_management:
+    lookback_days: 60
+    accounting_basis: cash
+    property_id: all
