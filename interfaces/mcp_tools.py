@@ -223,6 +223,96 @@ def email_status(source_key: str) -> dict:
     }
 
 
+def add_inbox(label: str) -> dict:
+    """Add another mailbox for the harness to read.
+
+    An inbox is a way IN, shared by whatever sources arrive through it — so
+    having several is normal (a business mailbox and a personal one, say). It
+    starts unconnected; the Gmail walkthrough in Settings does the sign-in.
+    """
+    from core.tools.service_manifest import Service, ServiceManifestError
+
+    label = (label or "").strip()
+    if not label:
+        raise ToolError("Give the inbox a name — it's how you'll tell it apart from the others.")
+    key = _slug(label)
+    if not key:
+        raise ToolError(f"'{label}' has no letters or digits to make a key from — try another name.")
+    if any(s.key == key for s in _load_services()):
+        raise ToolError(f"'{label}' is already here (key '{key}'). Pick a different name.")
+
+    try:
+        ServiceManifest().add(Service(key=key, label=label, input_type="email_trigger",
+                                      access="api", provider="gmail", status="planned"))
+    except ServiceManifestError as exc:
+        raise ToolError(str(exc)) from exc
+
+    log.event(operation="add_inbox", code="INBOX_ADDED",
+              message=f"Added inbox '{label}'.", context={"source_key": key})
+    return email_status(key)
+
+
+def delete_inbox(source_key: str) -> dict:
+    """Remove an inbox: forget its token and drop it from the registry.
+
+    Refused while a source still arrives through it — deleting it would leave
+    that source with a route to nowhere. Stop those sources arriving by email
+    first, which is a decision about them, not about this mailbox.
+    """
+    from core.tools import email_oauth
+
+    services = _load_services()
+    inbox = next((s for s in services if s.key == source_key), None)
+    if inbox is None:
+        raise ToolError(f"Unknown inbox '{source_key}'.")
+    if not source_status.is_trigger(inbox):
+        raise ToolError(f"'{inbox.label}' isn't an inbox.")
+
+    users = [s.label for s in services
+             if s.email_search and s.email_search.carrier == source_key]
+    if users:
+        raise ToolError(
+            f"'{inbox.label}' is still used by {', '.join(users)}. Open each of those under Data "
+            "ingestion and stop it arriving by email first — otherwise they'd have no route."
+        )
+
+    email_oauth.forget(source_key)
+    for leftover in (Path(".secrets") / f"oauth-client-{source_key}.json",
+                     Path(".secrets") / f"oauth-client-{source_key}.reapprove.json",
+                     Path(".secrets") / f"consent-{source_key}.status.json"):
+        leftover.unlink(missing_ok=True)
+    ServiceManifest().remove(source_key)
+    _CONSENT_PROCS.pop(source_key, None)
+    _CONSENT_META.pop(source_key, None)
+
+    log.event(operation="delete_inbox", code="INBOX_DELETED",
+              message=f"Deleted inbox '{inbox.label}'.", context={"source_key": source_key})
+    return {"source_key": source_key, "deleted": True, "label": inbox.label}
+
+
+def reapprove_inbox(source_key: str) -> dict:
+    """Get a fresh token for an inbox that's already set up.
+
+    For a token that expired or was revoked at myaccount.google.com. The OAuth
+    client is already in the vault (it has to be, to refresh tokens), so this is
+    one click — no going back to Google Cloud for the file.
+    """
+    from core.tools import email_oauth
+    from core.tools.credential_store import CredentialStoreError
+
+    inbox = next((s for s in _load_services() if s.key == source_key), None)
+    if inbox is None:
+        raise ToolError(f"Unknown inbox '{source_key}'.")
+    if not source_status.is_trigger(inbox):
+        raise ToolError(f"'{inbox.label}' isn't an inbox.")
+
+    try:
+        client_json = email_oauth.client_config_file(source_key)
+    except CredentialStoreError as exc:
+        raise ToolError(str(exc)) from exc
+    return start_gmail_consent(source_key, str(client_json))
+
+
 def start_gmail_consent(source_key: str, client_secret_path: str) -> dict:
     """Open Google's consent screen so the harness can read this inbox.
 
@@ -1765,6 +1855,9 @@ ACTION_TOOLS = [
     forget_credentials,
     start_gmail_consent,
     gmail_consent_status,
+    add_inbox,
+    delete_inbox,
+    reapprove_inbox,
     save_email_search,
     remove_email_search,
     source_email_route,

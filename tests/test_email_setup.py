@@ -15,6 +15,7 @@ Each step has a way to go wrong quietly, which is what these pin:
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -286,3 +287,101 @@ def test_a_source_key_cannot_escape_the_secrets_directory(client):
         written = root / ".secrets" / "oauth-client-escaped.json"
         assert written.exists(), "the separators must be stripped, not honoured"
     assert not (root.parent / "escaped").exists()
+
+
+# ── Managing the inboxes themselves ──────────────────────────────────────────
+
+@pytest.fixture
+def registry(monkeypatch, sources):
+    """A fake manifest that add/remove actually mutate."""
+    class FakeManifest:
+        def add(self, service):
+            sources.append(service)
+
+        def remove(self, key):
+            sources[:] = [s for s in sources if s.key != key]
+
+        def set_email_search(self, key, search):
+            for i, s in enumerate(sources):
+                if s.key == key:
+                    sources[i] = s.model_copy(update={"email_search": search})
+
+    monkeypatch.setattr(mcp_tools, "ServiceManifest", FakeManifest)
+    return sources
+
+
+def test_a_second_inbox_can_be_added(registry, no_token):
+    """Several mailboxes is a normal state — a business one and a personal one."""
+    st = mcp_tools.add_inbox("Rentals mailbox")
+
+    added = next(s for s in registry if s.key == "rentals_mailbox")
+    assert added.input_type == "email_trigger" and added.provider == "gmail"
+    assert added.parser is None, "an inbox reads nothing itself"
+    assert st["connected"] is False, "it still has to be signed in"
+
+
+def test_a_nameless_inbox_is_refused(registry, no_token):
+    with pytest.raises(mcp_tools.ToolError, match="name"):
+        mcp_tools.add_inbox("   ")
+
+
+def test_adding_an_inbox_that_is_already_here_is_refused(registry, no_token):
+    mcp_tools.add_inbox("Rentals mailbox")
+    with pytest.raises(mcp_tools.ToolError, match="already here"):
+        mcp_tools.add_inbox("rentals mailbox")
+
+
+def test_deleting_an_inbox_forgets_its_token_and_the_entry(registry, no_token):
+    no_token.set("email_oauth::inbox", refresh_token="rt", account_email="me@k.org")
+
+    result = mcp_tools.delete_inbox("inbox")
+
+    assert result["deleted"] is True
+    assert not any(s.key == "inbox" for s in registry)
+    from core.tools import email_oauth
+    assert email_oauth.is_configured("inbox") is False
+
+
+def test_deleting_an_inbox_a_source_still_uses_is_refused(registry, no_token):
+    """It would leave that source with a route to nowhere. The fix is a decision
+    about the source, so it is made there."""
+    for i, s in enumerate(registry):
+        if s.key == "epic":
+            registry[i] = s.model_copy(update={"email_search": EmailSearch(carrier="inbox")})
+
+    with pytest.raises(mcp_tools.ToolError, match="still used by Epic"):
+        mcp_tools.delete_inbox("inbox")
+    assert any(s.key == "inbox" for s in registry), "nothing was deleted"
+
+
+def test_deleting_something_that_is_not_an_inbox_is_refused(registry, no_token):
+    with pytest.raises(mcp_tools.ToolError, match="isn't an inbox"):
+        mcp_tools.delete_inbox("epic")
+
+
+def test_reapproving_reuses_the_stored_oauth_client(registry, no_token, monkeypatch, tmp_path):
+    """The client id/secret are already in the vault (they must be, to refresh
+    tokens), so a fresh token must not send the operator back to Google Cloud."""
+    from core.tools import email_oauth
+
+    # Write the rebuilt client into a temp dir, never the operator's .secrets/.
+    monkeypatch.setattr(email_oauth.client_config_file, "__defaults__", (tmp_path,))
+    no_token.set("email_oauth::inbox", refresh_token="rt", account_email="me@k.org",
+                 client_id="cid", client_secret="csecret")
+    started = {}
+    monkeypatch.setattr(mcp_tools, "start_gmail_consent",
+                        lambda source_key, client_secret_path: started.update(
+                            key=source_key, path=client_secret_path) or {"status": "running"})
+
+    result = mcp_tools.reapprove_inbox("inbox")
+
+    assert result["status"] == "running"
+    assert started["key"] == "inbox"
+    written = json.loads(Path(started["path"]).read_text())
+    assert written["installed"]["client_id"] == "cid"
+    assert oct(Path(started["path"]).stat().st_mode)[-3:] == "600", "a client secret, so owner-only"
+
+
+def test_reapproving_an_inbox_that_was_never_connected_says_so(registry, no_token):
+    with pytest.raises(mcp_tools.ToolError, match="never been connected"):
+        mcp_tools.reapprove_inbox("inbox")

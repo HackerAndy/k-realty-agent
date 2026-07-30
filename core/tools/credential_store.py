@@ -120,5 +120,14 @@ class CredentialStore:
         data[service_key] = fields
         self._save(data)
 
+    def delete(self, service_key: str) -> bool:
+        """Forget one stored credential. True if there was one to forget."""
+        data = self._load()
+        if service_key not in data:
+            return False
+        data.pop(service_key)
+        self._save(data)
+        return True
+
     def list_services(self) -> list[str]:
         return sorted(self._load().keys())

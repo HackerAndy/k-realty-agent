@@ -120,6 +120,56 @@ def run_consent(source_key: str, client_secret_path: Path) -> str:
     return email
 
 
+def forget(source_key: str) -> bool:
+    """Delete this inbox's stored token. True if there was one.
+
+    The mailbox itself is untouched — this only drops the harness's access to it.
+    Google's own record of the grant lives at myaccount.google.com/permissions.
+    """
+    return CredentialStore().delete(_credential_key(source_key))
+
+
+def client_config_file(source_key: str, directory: Path = Path(".secrets")) -> Path:
+    """Rebuild the Desktop-client JSON from the encrypted copy kept at consent.
+
+    Re-approving an inbox (an expired or revoked token) needs the same OAuth
+    client, and we already store its id/secret in order to refresh tokens — so
+    asking the operator to go back to Google Cloud and download the file again
+    would be busywork. Written 0600, and the consent worker deletes it when it
+    finishes, exactly as it does the uploaded one.
+    """
+    try:
+        cred = CredentialStore().get(_credential_key(source_key))
+    except CredentialStoreError as exc:
+        raise CredentialStoreError(log.failure(
+            operation="client_config_file",
+            code="OAUTH_NOT_CONFIGURED",
+            message=f"'{source_key}' has never been connected, so there's no client to reuse.",
+            remediation="Run the Gmail setup walkthrough in Settings instead.",
+            context={"source_key": source_key},
+            exc=exc,
+        )) from exc
+    if not cred.get("client_id") or not cred.get("client_secret"):
+        raise CredentialStoreError(log.failure(
+            operation="client_config_file",
+            code="OAUTH_CLIENT_MISSING",
+            message=f"The stored credential for '{source_key}' has no OAuth client in it.",
+            remediation="Run the Gmail setup walkthrough again and upload the client JSON.",
+            context={"source_key": source_key},
+        ))
+
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"oauth-client-{source_key}.reapprove.json"
+    path.write_text(json.dumps({"installed": {
+        "client_id": cred["client_id"],
+        "client_secret": cred["client_secret"],
+        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+        "token_uri": TOKEN_URI,
+    }}))
+    path.chmod(0o600)
+    return path
+
+
 def load_credentials(source_key: str):
     """Rebuild live Google credentials from the stored refresh token (mints a
     fresh access token; no browser). Returns a google.oauth2.credentials

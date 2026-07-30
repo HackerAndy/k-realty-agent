@@ -74,7 +74,8 @@
   .field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; max-width: 460px; }
   .field label { font-size: 12.5px; color: var(--muted); }
   .field input, .field select { font: inherit; font-size: 13px; padding: 8px 11px; border-radius: 8px; border: 1px solid var(--border); background: var(--card); color: var(--text); }
-  .field .sub { font-size: 11.5px; color: var(--faint); }
+  .field .sub, p.sub { font-size: 11.5px; color: var(--faint); }
+  p.sub { margin: 6px 0 0; line-height: 1.45; }
   .seg { display: inline-flex; gap: 4px; border: 1px solid var(--border); border-radius: 999px; padding: 4px; margin-bottom: 16px; }
   .seg button { font-size: 13px; border: none; background: transparent; color: var(--muted); padding: 6px 14px; border-radius: 999px; }
   .seg button.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
@@ -1997,39 +1998,123 @@
       credentialsHTML();
   }
 
-  // ── Sign-ins. Everything the harness authenticates with, in one place. ──
+  // ── The sign-ins, grouped by TYPE and collapsed like the data sources ─────
   // Presence only: a screen that can show a stored password is a screen that can
   // leak one. You can replace a credential; nothing reads one back out.
   let credCache = null;
+  const credSectionOpen = { websites: true, email: true };
+  const credOpen = {};        // source_key -> expanded?
 
   function credentialsHTML() {
-    if (!credCache) return '<div class="setting"><h2>Sign-ins</h2><p class="note">Loading…</p></div>';
-    const rows = credCache.map(c => {
-      const sid = sourceDomId(c.key);
-      const stored = c.has_username && c.has_password;
-      const badge = stored
-        ? '<span class="verdict pass" style="font-size:11.5px;padding:2px 9px">saved</span>'
-        : '<span class="tag">not set up</span>';
-      if (c.kind === 'inbox') return inboxHTML(c);
-      return '<div class="cred"><div class="cred-h"><b>' + esc(c.label) + '</b>' + badge +
-        (c.login_url ? '<span class="hint" style="margin-left:auto">' + esc(c.login_url) + '</span>' : '') +
-        '</div>' +
-        '<div class="field"><label for="cu-' + sid + '">Username or email</label>' +
-        '<input type="text" id="cu-' + sid + '" value="' + esc(c.username) + '" autocomplete="off"></div>' +
-        '<div class="field"><label for="cp-' + sid + '">Password</label>' +
-        '<input type="password" id="cp-' + sid + '" autocomplete="off" placeholder="' +
-          (c.has_password ? '•••••••••••• saved' : 'not set') + '">' +
-        (c.has_password ? '<span class="sub">Leave blank to keep the saved one.</span>' : '') + '</div>' +
-        '<div class="row"><button class="btn" onclick="saveCredentials(\'' + c.key + '\')">' +
-          (stored ? 'Update' : 'Save') + '</button>' +
-        (stored ? '<button class="btn" onclick="forgetCredentials(\'' + c.key + '\')">Forget</button>' : '') +
-        '</div></div>';
-    }).join('');
+    if (!credCache) return '<div class="setting"><p class="note">Loading sign-ins…</p></div>';
+    const websites = credCache.filter(c => c.kind !== 'inbox');
+    const inboxes = credCache.filter(c => c.kind === 'inbox');
 
-    return '<div class="setting"><h2>Sign-ins</h2>' +
-      '<p class="note">What the harness signs in with. Stored encrypted in <b>.secrets/</b>, ' +
-      'never written into the repo and never shown back to you — you can replace one, but nothing ' +
-      'can read one out.</p>' + rows + '</div>';
+    return credSectionHTML('websites', 'Websites', websites.length,
+             websites.map(websiteHTML).join('') ||
+             '<p class="note" style="margin:0">No source signs in to a website yet.</p>') +
+           credSectionHTML('email', 'Email', inboxes.length,
+             inboxes.map(inboxHTML).join('') + addInboxHTML());
+  }
+
+  /** One type of sign-in. Collapsible, with the count on the header, so the page
+   *  reads as a short list of kinds rather than a wall of forms. */
+  function credSectionHTML(id, title, count, body) {
+    const open = !!credSectionOpen[id];
+    return '<div class="setting">' +
+      '<div class="build-h" style="padding:0;background:none;border:0" ' +
+        'onclick="toggleCredSection(\'' + id + '\')">' +
+      '<span class="caret' + (open ? ' open' : '') + '">&#8250;</span><b>' + esc(title) + '</b>' +
+      '<span class="hint" style="margin-left:auto;font-weight:400">' + count + '</span></div>' +
+      (open ? '<div style="margin-top:12px">' + body + '</div>' : '') + '</div>';
+  }
+
+  function toggleCredSection(id) { credSectionOpen[id] = !credSectionOpen[id]; renderSettings(); }
+  function toggleCred(key) { credOpen[key] = !credOpen[key]; renderSettings(); }
+
+  /** A collapsed sign-in shows only what you'd scan for: who it is, whether it's
+   *  set up, and where it signs in. The fields appear when you open it. */
+  function credRowHTML(key, label, badge, aside, body) {
+    const open = !!credOpen[key];
+    return '<div class="cred">' +
+      '<div class="cred-h" style="cursor:pointer" onclick="toggleCred(\'' + key + '\')">' +
+      '<span class="caret' + (open ? ' open' : '') + '">&#8250;</span><b>' + esc(label) + '</b>' + badge +
+      (aside ? '<span class="hint" style="margin-left:auto">' + aside + '</span>' : '') +
+      '</div>' + (open ? body : '') + '</div>';
+  }
+
+  function websiteHTML(c) {
+    const sid = sourceDomId(c.key);
+    const stored = c.has_username && c.has_password;
+    const badge = stored
+      ? '<span class="verdict pass" style="font-size:11.5px;padding:2px 9px">saved</span>'
+      : '<span class="tag">not set up</span>';
+    const body =
+      '<div class="field"><label for="cu-' + sid + '">Username or email</label>' +
+      '<input type="text" id="cu-' + sid + '" value="' + esc(c.username) + '" autocomplete="off"></div>' +
+      '<div class="field"><label for="cp-' + sid + '">Password</label>' +
+      '<input type="password" id="cp-' + sid + '" autocomplete="off" placeholder="' +
+        (c.has_password ? '•••••••••••• saved' : 'not set') + '">' +
+      '<span class="sub">' + (c.has_password ? 'Leave blank to keep the saved one. ' : '') +
+      'Stored encrypted in <b>.secrets/</b> — never in the repo, never shown back to you.</span></div>' +
+      '<div class="row"><button class="btn" onclick="saveCredentials(\'' + c.key + '\')">' +
+        (stored ? 'Update' : 'Save') + '</button>' +
+      (stored ? '<button class="btn" onclick="forgetCredentials(\'' + c.key + '\')">Forget</button>' : '') +
+      '</div>';
+    return credRowHTML(c.key, c.label, badge, c.login_url ? esc(c.login_url) : '', body);
+  }
+
+  function addInboxHTML() {
+    return '<div class="cred">' +
+      '<div class="field"><label for="new-inbox">Add another mailbox</label>' +
+      '<input type="text" id="new-inbox" placeholder="e.g. Rentals mailbox" autocomplete="off">' +
+      '<span class="sub">Name it, then sign in to it — several sources can share one mailbox, ' +
+      'and different sources can use different mailboxes.</span></div>' +
+      '<div class="row"><button class="btn" onclick="addInbox()">Add mailbox</button></div></div>';
+  }
+
+  async function addInbox() {
+    const node = el('new-inbox');
+    const label = node ? node.value.trim() : '';
+    if (!label) { toast('Give the mailbox a name first.', false); return; }
+    clearToast();
+    try {
+      const st = await callTool('add_inbox', { label });
+      emailCache[st.source_key] = st;
+      credCache = null;
+      await loadCredentials();
+      credOpen[st.source_key] = true;      // open it: signing in is the next step
+      await renderSettings();
+      toast('Added ' + label + '. Next: sign in to it.', true);
+    } catch (e) {
+      toast('Couldn’t add it: ' + e.message, false);
+    }
+  }
+
+  async function reapproveInbox(key) {
+    clearToast();
+    try {
+      await callTool('reapprove_inbox', { source_key: key });
+      consentState[key] = { status: 'running', message: 'A browser is opening — click Allow again.' };
+      await renderSettings();
+      pollConsent(key);
+    } catch (e) {
+      toast('Couldn’t start that: ' + e.message, false);
+    }
+  }
+
+  async function deleteInbox(key) {
+    clearToast();
+    try {
+      const r = await callTool('delete_inbox', { source_key: key });
+      delete emailCache[key];
+      credCache = null;
+      await loadCredentials();
+      await renderSettings();
+      toast('Deleted ' + r.label + '. Its token is gone from .secrets/.', true);
+    } catch (e) {
+      toast(e.message, false);
+    }
   }
 
   // ── An inbox signs in with Google, so there is no password to store: the
@@ -2042,58 +2127,152 @@
     const sid = sourceDomId(c.key);
     const st = emailCache[c.key];
     const consent = consentState[c.key] || {};
+    const picker = '<input type="file" accept=".json,application/json" style="display:none" ' +
+      'id="oauth-input-' + sid + '" onchange="handleOauthClientFile(\'' + c.key + '\', event)">';
     if (!st) {
-      return '<div class="cred"><div class="cred-h"><b>' + esc(c.label) + '</b>' +
-        '<span class="tag">loading…</span></div></div>';
+      return credRowHTML(c.key, c.label, '<span class="tag">loading…</span>', '', '');
     }
 
     const badge = st.connected
       ? '<span class="verdict pass" style="font-size:11.5px;padding:2px 9px">connected</span>'
       : '<span class="tag">not connected</span>';
-    const head = '<div class="cred-h"><b>' + esc(c.label) + '</b>' + badge +
-      (st.account_email ? '<span class="hint" style="margin-left:auto">' + esc(st.account_email) + '</span>' : '') +
-      '</div>';
-    const picker = '<input type="file" accept=".json,application/json" style="display:none" ' +
-      'id="oauth-input-' + sid + '" onchange="handleOauthClientFile(\'' + c.key + '\', event)">';
+    const aside = st.account_email ? esc(st.account_email) : '';
 
+    // Mid-consent: the operator is in Google's window, so say only that.
     if (consent.status === 'running') {
-      return '<div class="cred">' + head +
+      return credRowHTML(c.key, c.label, badge, aside,
         '<p class="note" style="margin:4px 0 0">' + esc(consent.message || 'Waiting for you to approve access…') + '</p>' +
-        '<p class="sub">Google opened a browser window — pick the account this inbox belongs to and click <b>Allow</b>.</p>' +
-        picker + '</div>';
+        '<p class="sub">Google opened a browser window — pick the account this mailbox belongs to and ' +
+        'click <b>Allow</b>.</p>' + picker);
     }
 
     const failed = consent.status === 'failed'
       ? '<p class="note" style="color:var(--danger)">' + esc(consent.message) + '</p>' : '';
 
     if (!st.connected) {
-      return '<div class="cred">' + head + failed + gmailGuidanceHTML() +
-        '<div class="row"><button class="btn" onclick="chooseOauthClient(\'' + c.key + '\')">' +
-        'Upload the client JSON…</button></div>' + picker + '</div>';
+      // Not connected yet: either the intro, or whichever step of the setup
+      // they're on. Never a bare button whose behaviour is a surprise.
+      const body = oauthSetup.key === c.key
+        ? gmailStepHTML(c)
+        : '<p class="note" style="margin:4px 0 8px">Google signs this in, so there is no password to ' +
+          'keep — the harness gets a read-only token instead. Workspace disabled app passwords for ' +
+          'mail in May 2025, so this is the only way in. It takes five short steps in Google Cloud; ' +
+          'the harness walks you through them one at a time.</p>' +
+          '<div class="row"><button class="btn primary" onclick="startGmailSetup(\'' + c.key + '\')">' +
+          'Set up Gmail access</button>' + deleteInboxButton(c, st) + '</div>';
+      return credRowHTML(c.key, c.label, badge, aside, failed + body + picker);
     }
 
-    return '<div class="cred">' + head + failed + inboxUsersHTML(st) +
-      '<div class="row"><button class="btn" onclick="chooseOauthClient(\'' + c.key + '\')">' +
-      'Connect a different account…</button></div>' + picker + '</div>';
+    // Connected: what it's used for, and the three things you can do to it.
+    const controls = '<div class="row">' +
+      '<button class="btn" onclick="reapproveInbox(\'' + c.key + '\')">Re-approve access</button>' +
+      deleteInboxButton(c, st) + '</div>' +
+      '<p class="sub">Re-approve when the token expires or you revoke it at ' +
+      'myaccount.google.com/permissions — the harness kept this mailbox’s OAuth client, so there is ' +
+      'no file to download again.</p>';
+    return credRowHTML(c.key, c.label, badge, aside,
+      failed + inboxUsersHTML(st) + controls + picker);
   }
 
-  /** Gmail is the one sign-in that isn't a username and a password, and the
-   *  Google Cloud side of it is genuinely fiddly. The terminal version walked the
-   *  operator through it; losing that made this the hardest screen in the app. */
-  function gmailGuidanceHTML() {
-    return '<p class="note" style="margin:4px 0 8px">Google signs this in, so there is no password to ' +
-      'keep — the harness gets a read-only token instead. Workspace disabled app passwords for mail in ' +
-      'May 2025, so this is the only way in.</p>' +
-      '<div class="wfound" style="margin-bottom:10px">' +
-      wfLine('1. A project', 'Go to <b>console.cloud.google.com</b> and create one (any name).') +
-      wfLine('2. The API', 'APIs &amp; Services → Library → enable <b>Gmail API</b>.') +
-      wfLine('3. Consent screen', 'User type <b>Internal</b>, and add the scope <b>gmail.readonly</b>.') +
-      wfLine('4. A client', 'Credentials → Create credentials → OAuth client ID → <b>Desktop app</b>.') +
-      wfLine('5. The file', 'Download its JSON, then upload it below. A browser opens; click <b>Allow</b> once.') +
-      '</div>' +
-      '<p class="sub">What is kept: the token, encrypted in <b>.secrets/</b>. The JSON you upload is ' +
-      'deleted the moment consent finishes — a second plaintext copy of a client secret is pure ' +
-      'downside. The scope is read-only: the harness can read and download mail, never send or delete.</p>';
+  /** Deleting a mailbox that a source still arrives through would leave that
+   *  source with a route to nowhere, so the button says so instead of failing
+   *  after the click. */
+  function deleteInboxButton(c, st) {
+    const users = st.searched_by || [];
+    if (users.length) {
+      return '<button class="btn" disabled title="Used by ' +
+        esc(users.map(u => u.label).join(', ')) + '">Delete — in use</button>';
+    }
+    return '<button class="btn" onclick="deleteInbox(\'' + c.key + '\')">Delete this mailbox</button>';
+  }
+
+  // ── Connecting a Gmail/Workspace inbox, one step at a time ────────────────
+  // The terminal version walked the operator through the Google Cloud side of
+  // this, and it is genuinely fiddly: a project, an enabled API, a consent
+  // screen, a Desktop client, a downloaded file. A single unlabelled button that
+  // silently opened a file picker was the regression this replaces.
+  const oauthSetup = { key: null, step: 0 };    // which inbox, and how far in
+
+  const GMAIL_STEPS = [
+    {
+      title: 'Create a Google Cloud project',
+      body: 'Open <b>console.cloud.google.com</b> and create a project — any name will do ' +
+            '(e.g. <i>k-realty-agent</i>). It only exists to hold the credential.',
+      link: 'https://console.cloud.google.com/projectcreate',
+      link_label: 'Open Google Cloud → new project',
+    },
+    {
+      title: 'Turn on the Gmail API',
+      body: 'In that project: <b>APIs &amp; Services → Library</b>, search for <b>Gmail API</b>, ' +
+            'and press Enable. Without this the sign-in will succeed and then every read fails.',
+      link: 'https://console.cloud.google.com/apis/library/gmail.googleapis.com',
+      link_label: 'Open the Gmail API page',
+    },
+    {
+      title: 'Fill in the consent screen',
+      body: '<b>APIs &amp; Services → OAuth consent screen</b>. For a Workspace account choose ' +
+            'user type <b>Internal</b>, then add the scope <b>.../auth/gmail.readonly</b> — ' +
+            'read-only, so nothing here can send or delete mail.',
+      link: 'https://console.cloud.google.com/apis/credentials/consent',
+      link_label: 'Open the consent screen',
+    },
+    {
+      title: 'Create an OAuth client',
+      body: '<b>Credentials → Create credentials → OAuth client ID</b>, and pick application ' +
+            'type <b>Desktop app</b>. Desktop matters: it is the type that can complete the ' +
+            'approval on this machine.',
+      link: 'https://console.cloud.google.com/apis/credentials',
+      link_label: 'Open Credentials',
+    },
+    {
+      title: 'Download the client file, then hand it over',
+      body: 'On the client you just made, press the download button — it saves a small ' +
+            '<b>.json</b> file. Choose that file below. A browser window then opens on Google’s ' +
+            'own approval page: pick this mailbox and click <b>Allow</b>, once.',
+      file: true,
+    },
+  ];
+
+  function startGmailSetup(key) { oauthSetup.key = key; oauthSetup.step = 0; renderSettings(); }
+  function cancelGmailSetup() { oauthSetup.key = null; oauthSetup.step = 0; renderSettings(); }
+  function gmailStepBack() {
+    if (oauthSetup.step === 0) return cancelGmailSetup();
+    oauthSetup.step -= 1; renderSettings();
+  }
+  function gmailStepNext() {
+    oauthSetup.step = Math.min(oauthSetup.step + 1, GMAIL_STEPS.length - 1); renderSettings();
+  }
+
+  function gmailStepHTML(c) {
+    const i = oauthSetup.step;
+    const step = GMAIL_STEPS[i];
+    const dots = GMAIL_STEPS.map((_, n) =>
+      '<span class="wstep' + (n === i ? ' on' : (n < i ? ' done' : '')) + '">' +
+      '<span class="n">' + (n < i ? '&#10003;' : (n + 1)) + '</span></span>' +
+      (n < GMAIL_STEPS.length - 1 ? '<span class="warrow">&#8250;</span>' : '')).join('');
+
+    const link = step.link
+      ? '<p class="note" style="margin:0 0 10px"><a href="' + step.link + '" target="_blank" rel="noopener">' +
+        esc(step.link_label) + ' ↗</a> <span class="sub">(opens in your browser)</span></p>'
+      : '';
+    // The last step is the only one that touches a file, and it says so before
+    // anything opens: no button whose behaviour you learn by pressing it.
+    const act = step.file
+      ? '<button class="btn primary" onclick="chooseOauthClient(\'' + c.key + '\')">' +
+        'Choose the downloaded .json file…</button>'
+      : '<button class="btn primary" onclick="gmailStepNext()">Done — next step</button>';
+
+    return '<div class="wsteps" style="margin:6px 0 10px">' + dots + '</div>' +
+      '<div class="lbl">Step ' + (i + 1) + ' of ' + GMAIL_STEPS.length + ' · ' + esc(step.title) + '</div>' +
+      '<p class="note" style="margin:4px 0 10px">' + step.body + '</p>' + link +
+      (step.file
+        ? '<p class="sub" style="margin-bottom:10px">What is kept: the token and client id/secret, ' +
+          'encrypted in <b>.secrets/</b>, never in the repo. The .json you choose is deleted as soon ' +
+          'as approval finishes — a second plaintext copy of a client secret is pure downside.</p>'
+        : '') +
+      '<div class="row">' +
+      '<button class="btn" onclick="gmailStepBack()">' + (i === 0 ? 'Cancel' : 'Back') + '</button>' +
+      act + '</div>';
   }
 
   /** A connected inbox is ACCESS, and it's shared. Which messages matter is each
@@ -2101,21 +2280,13 @@
   function inboxUsersHTML(st) {
     const users = st.searched_by || [];
     if (!users.length) {
-      return '<p class="note" style="margin:4px 0 0">Signed in and readable. No source searches it yet — ' +
-        'open a source under <b>Data ingestion</b> and set up its email route there. The search terms ' +
-        '(sender, subject, attachment) belong to the source, because one mailbox can carry several.</p>';
+      return '<p class="note" style="margin:4px 0 0">Signed in and readable. Not used by any data ' +
+        'source yet — that is set up on the source itself, under <b>Data ingestion</b>.</p>';
     }
-    const rows = users.map(u => {
-      const f = u.search || {};
-      const terms = [f.from_address ? 'from ' + f.from_address : '',
-                     f.subject_contains ? 'subject “' + f.subject_contains + '”' : '',
-                     f.attachment_suffix || ''].filter(Boolean).join(' · ');
-      return wfLine(esc(u.label), '<span style="color:var(--muted)">' + esc(terms || 'anything with an attachment') + '</span>');
-    }).join('');
-    return '<p class="note" style="margin:4px 0 8px">Signed in and readable. Searched by:</p>' +
-      '<div class="wfound" style="margin-bottom:10px">' + rows + '</div>' +
-      '<p class="sub">What each one looks for is set on that source, under Data ingestion — this ' +
-      'mailbox is just the way in.</p>';
+    // WHICH data sources use this mailbox belongs here. WHAT each one searches
+    // for does not — that is ingestion configuration, and it lives on the source.
+    return '<p class="note" style="margin:4px 0 0">Signed in and readable.<br>' +
+      'Used in <b>Data sources</b>: ' + users.map(u => esc(u.label)).join(', ') + '</p>';
   }
 
   function chooseOauthClient(key) { const i = el('oauth-input-' + sourceDomId(key)); if (i) i.click(); }
@@ -2133,6 +2304,7 @@
       if (!res.ok) throw new Error((data.detail && data.detail.message) || data.detail || 'upload failed');
       await callTool('start_gmail_consent', { source_key: key, client_secret_path: data.client_secret_path });
       consentState[key] = { status: 'running', message: 'A browser is opening — choose the account and click Allow.' };
+      oauthSetup.key = null; oauthSetup.step = 0;    // the walkthrough is done
       await renderSettings();
       pollConsent(key);
     } catch (e) {
