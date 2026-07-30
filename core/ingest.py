@@ -238,6 +238,9 @@ def runs_by_transport(source_key: str) -> dict[str, dict]:
             "parser": run.get("parser"),
             "model": run.get("model"),
             "run_path": run.get("run_path"),
+            # What it read, so the reader can be re-run over the document already
+            # on disk without fetching it down the route a second time.
+            "source_input": run.get("source_input"),
         }
     return latest
 

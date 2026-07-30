@@ -95,14 +95,20 @@ def _from_run(run: dict, service: Any, scraper_method: Any) -> dict | None:
 def _configured_parser(service: Any) -> dict:
     name = getattr(service, "parser", None)
     if not name:
-        return _none("No parser yet")
+        # A document can always be read RIGHT NOW by the model, which is how the
+        # harness is never blocked on a source it has no parser for.
+        return _none("No parser yet",
+                     "the agent can write one — or read it once with the model")
     return _reader(PARSER, name, f"Parser · {name}", built=True, verified=True)
 
 
 def _configured_scraper(service: Any, has_scraper: Any, scraper_method: Any) -> dict:
     key = getattr(service, "key", "")
     if not has_scraper(key):
-        return _none("No scraper yet")
+        # No model offer here: there is no document to read. Getting a portal's
+        # data at all needs code, and that starts with a demonstration.
+        return _none("No scraper yet",
+                     "show the agent how you pull it, and it writes one")
     return _scraper_reader(scraper_method, key)
 
 
@@ -117,9 +123,8 @@ def _scraper_reader(scraper_method: Any, key: str) -> dict:
     return _reader(API, key, "Scraper", built=True, verified=True)
 
 
-def _none(label: str) -> dict:
-    return _reader(NONE, None, label, built=False, verified=False,
-                   note="the agent can write one — or read it once with the model")
+def _none(label: str, note: str = "the agent can write one") -> dict:
+    return _reader(NONE, None, label, built=False, verified=False, note=note)
 
 
 def _reader(kind: str, name: str | None, label: str, *, built: bool, verified: bool,

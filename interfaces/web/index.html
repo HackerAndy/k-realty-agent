@@ -198,9 +198,31 @@
   .accbody { padding: 16px; }
   .accbody .actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
 
-  /* ── Funnel: several ways in, one body of data ── */
-  .funnel { display: grid; grid-template-columns: minmax(0,1fr) auto minmax(0,1fr); align-items: center; gap: 0; margin-bottom: 12px; }
-  .doors { display: flex; flex-direction: column; gap: 8px; }
+  /* ── The graph: ways IN → what READS it → the rows ──
+     Getting the data and reading it are two acts that fail differently — an
+     inbox that won't connect and a PDF the parser can't read are not the same
+     problem — so they are two columns, not one arrow. */
+  .funnel { display: grid; grid-template-columns: minmax(0,1fr) 52px minmax(0,1fr) 52px auto;
+    align-items: center; gap: 0; margin-bottom: 12px; }
+  .doors { display: flex; flex-direction: column; justify-content: space-around; }
+  .readers { display: flex; flex-direction: column; justify-content: space-around; }
+  /* A reader is always a node, even unbuilt: "No reader yet" is where the offer
+     lives, which makes a new source and a portal with no scraper one shape. */
+  .rnode { border: 1px solid var(--border); border-radius: 10px; padding: 8px 11px;
+    background: color-mix(in oklab, var(--muted) 5%, var(--card)); font-size: 12.5px; cursor: pointer; }
+  .rnode:hover { border-color: color-mix(in oklab, var(--accent) 55%, var(--border)); }
+  .rnode.sel, .door.sel { border-color: var(--accent);
+    box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent) 22%, transparent); }
+  .rnode .nm { font-weight: 600; display: flex; align-items: center; gap: 7px; }
+  .rnode .sub { color: var(--muted); font-size: 11px; margin-top: 3px; }
+  .rnode.unbuilt { border-style: dashed; }
+  .rnode.unbuilt .nm { color: var(--muted); font-weight: 500; }
+  /* Rows a model produced are not rows a tested parser produced, and must not
+     look like them. */
+  .rnode .flag { font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 999px;
+    border: 1px solid var(--border); color: var(--muted); }
+  .rnode .flag.unverified { color: #9a6a12; border-color: color-mix(in oklab, #9a6a12 40%, var(--border)); }
+  :root[data-theme="dark"] .rnode .flag.unverified { color: #d7ab5c; }
   .door { display: flex; align-items: center; gap: 9px; font-size: 12.5px; border: 1px solid var(--border);
     border-radius: 10px; padding: 9px 12px; background: color-mix(in oklab, var(--muted) 5%, var(--card)); }
   .door.on { border-color: color-mix(in oklab, var(--accent) 45%, var(--border)); background: color-mix(in oklab, var(--accent) 10%, var(--card)); }
@@ -219,16 +241,23 @@
     font-size: 13px; color: var(--muted); cursor: pointer; }
   .door .rerun:hover { border-color: var(--accent); color: var(--accent);
     background: color-mix(in oklab, var(--accent) 12%, var(--card)); }
-  .pipe { width: 58px; display: grid; place-items: center; color: var(--muted); opacity: .6; }
+  .pipe { width: 52px; display: grid; place-items: center; color: var(--muted); opacity: .6; }
   .catch { padding-left: 10px; }
   .catch .big { font-size: 24px; font-weight: 700; letter-spacing: -.02em; line-height: 1.1; }
+  .catch .big.none { font-size: 19px; color: var(--muted); }
   .catch .cap { color: var(--muted); font-size: 12px; }
   .verdict-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 14px; }
   .verdict-txt { font-size: 12.5px; font-weight: 600; }
   .verdict-txt.self { color: var(--success); }
   .verdict-txt.manual { color: #9a6a12; }
   :root[data-theme="dark"] .verdict-txt.manual { color: #d7ab5c; }
-  @media (max-width: 620px) { .funnel { grid-template-columns: 1fr; } .pipe { display: none; } .catch { padding: 10px 0 0; } }
+  @media (max-width: 760px) {
+    .funnel { grid-template-columns: 1fr; }
+    .pipe { display: none; }
+    .doors, .readers { height: auto !important; gap: 8px; }
+    .readers { margin-top: 8px; }
+    .catch { padding: 10px 0 0; }
+  }
 
   .kstrip { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; margin-bottom: 14px; }
   .kstrip .k { background: var(--card); padding: 11px 13px; }
@@ -336,6 +365,7 @@
   const sourceView = {};      // source_key -> { group, query }
   const sourceTxnCache = {};  // source_key -> source_transactions() result
   const sourceSettingsCache = {};  // source_key -> source_settings() result
+  let sourcesCache = [];      // last list_sources() result, for handlers between renders
   const svState = k => sourceView[k] || (sourceView[k] = { group: 'None', query: '' });
 
   // ── Re-rendering a panel must not move the operator ───────────────────────
@@ -537,6 +567,7 @@
     }
 
     const sources = sourcesRes.value || [];
+    sourcesCache = sources;
     // The ways a source can arrive are declared by the harness, not listed twice.
     if (!methodsCache) {
       try { methodsCache = await callTool('source_methods'); } catch (e) { methodsCache = []; }
@@ -926,7 +957,7 @@
       const label = wiz.label, wasNew = wiz.fork === 'new';
       closeWizard();
       ingestOpen.key = key;
-      delete sourceTxnCache[key];
+      forgetSource(key);
       await renderIngest();
       toast(wasNew ? ('Added ' + label + '. Next: it writes the code, and you approve it.')
                    : 'Added another way into ' + key + '.', true);
@@ -942,32 +973,119 @@
     renderIngest();
   }
 
-  const ROUTE_ICON = { email: '✉', scrape: '↻', upload: '⬆' };
+  const ROUTE_ICON = { email: '✉', scrape: '⌘', upload: '⬆' };
 
-  /** One source, several ways in. The picture IS the model: doors on the left,
-   *  one body of data on the right. ★ is the default — what "Get latest" runs. */
+  // Which node of a source's graph is selected — a route id, or a reader's id.
+  // Null means nothing is: the source shows whatever ran last, as before.
+  const graphSel = {};      // source_key -> node id
+  const routeTxnCache = {}; // source_key|transport -> source_transactions() result
+
+  /** A run changed this source's data, so drop everything cached about it.
+   *  Every route's cached rows too: a route's chip carries a count that a new
+   *  run may have just replaced, and a stale one would be a wrong number under
+   *  a right label. */
+  function forgetSource(key) {
+    delete sourceTxnCache[key];
+    Object.keys(routeTxnCache).forEach(slot => {
+      if (slot.slice(0, key.length + 1) === key + '|') delete routeTxnCache[slot];
+    });
+  }
+
+  /** Distinct readers, with the routes that feed each.
+   *  Upload and Mailbox both hand a document to the SAME parser — that is a fact
+   *  about the code, not a drawing convenience — so their arrows converge on one
+   *  node rather than repeating it. A portal's API call is its own. */
+  function readerGroups(routes) {
+    const groups = [];
+    routes.forEach(r => {
+      const rd = r.reader || { kind: 'none', label: 'No reader yet', built: false };
+      // Label is part of the identity so two unbuilt readers ("No parser yet",
+      // "No scraper yet") stay apart — they are different missing things.
+      const id = 'rdr:' + rd.kind + ':' + (rd.name || rd.label);
+      let g = groups.find(x => x.id === id);
+      if (!g) { g = { id: id, reader: rd, routes: [] }; groups.push(g); }
+      g.routes.push(r.id);
+    });
+    return groups;
+  }
+
+  function selectNode(key, id) {
+    graphSel[key] = graphSel[key] === id ? null : id;
+    // A route's own rows, not whichever route ran last. Fetched on demand
+    // because most routes are never looked at.
+    const route = (sourcesCache.find(x => x.key === key) || {}).transports || [];
+    if (route.some(r => r.id === graphSel[key])) loadRouteTxns(key, graphSel[key]);
+    renderIngest();
+  }
+
+  async function loadRouteTxns(key, transport) {
+    const slot = key + '|' + transport;
+    if (routeTxnCache[slot]) return;
+    try {
+      routeTxnCache[slot] = await callTool('source_transactions',
+        { source_key: key, transport: transport });
+    } catch (e) {
+      routeTxnCache[slot] = { error: e.message, transactions: [], count: 0 };
+    }
+    renderIngest();
+  }
+
+  /** The reader node. Named for what it IS — a parser, an API call, a model —
+   *  because the three are trusted differently and fixed differently. */
+  function readerNodeHTML(s, g, isLive) {
+    const rd = g.reader;
+    const sel = graphSel[s.key] === g.id;
+    const flag = rd.built && !rd.verified
+      ? '<span class="flag unverified">unverified</span>'
+      : '';
+    const sub = rd.built
+      ? (isLive ? 'read the rows on screen' : esc(rd.note || 'built and tested'))
+      : esc(rd.note || '');
+    return '<div class="rnode' + (rd.built ? '' : ' unbuilt') + (sel ? ' sel' : '') + '"' +
+      ' onclick="selectNode(\'' + s.key + '\',\'' + g.id + '\')"' +
+      ' title="' + esc(rd.built ? 'What turns this route’s delivery into rows'
+                                : 'Nothing reads this route yet') + '">' +
+      '<div class="nm">' + esc(rd.label) + flag + '</div>' +
+      (sub ? '<div class="sub">' + sub + '</div>' : '') + '</div>';
+  }
+
+  /** One source, several ways in, and what reads each. The picture IS the model:
+   *  ways in on the left, the reading in the middle, the rows on the right.
+   *  ★ is the default — what "Get latest" runs. */
   function funnelHTML(s) {
     const routes = s.transports || [];
     if (!routes.length) return '';
-    const n = routes.length;
-    const h = Math.max(78, n * 44), mid = h / 2, top = 14, bot = h - 14;
-    // Solid = the route the data on screen ACTUALLY came by; dashed = available
+    const groups = readerGroups(routes);
+    const n = routes.length, m = groups.length;
+    const h = Math.max(96, n * 52, m * 52), mid = h / 2;
+    // space-around puts each item in the centre of an equal slot, so these
+    // positions hold whatever height the boxes turn out to be.
+    const slot = (i, count) => h * (i + 0.5) / count;
+    const routeY = routes.map((_, i) => slot(i, n));
+    const groupY = groups.map((_, i) => slot(i, m));
+
+    // Solid = the path the data on screen ACTUALLY came by; dashed = available
     // but not used. So the drawing is history, not configuration — the ★ carries
     // the config meaning. Falls back to the default before anything has run.
     const data = sourceTxnCache[s.key];
     const live = (data && data.last_transport) || s.default_transport;
-    const liveIndex = routes.findIndex(r => r.id === live);
-    const dash = i => (i === liveIndex ? '' : ' stroke-dasharray="3 3"');
+    const liveGroup = groups.find(g => g.routes.includes(live));
+    const curve = (y1, y2, solid) =>
+      (Math.abs(y1 - y2) < 1
+        ? '<path d="M2 ' + y1 + ' H50"'
+        : '<path d="M2 ' + y1 + ' C32 ' + y1 + ', 20 ' + y2 + ', 50 ' + y2 + '"') +
+      ' stroke="currentColor" stroke-width="1.5" fill="none"' +
+      (solid ? '' : ' stroke-dasharray="3 3"') + '/>';
 
-    let paths = '<path d="M2 ' + mid + ' H56" stroke="currentColor" stroke-width="1.5" fill="none"' + dash(0) + '/>';
-    if (n > 1) {
-      const ys = routes.map((_, i) => n === 1 ? mid : top + (bot - top) * (i / (n - 1)));
-      paths = ys.map((y, i) =>
-        (Math.abs(y - mid) < 1
-          ? '<path d="M2 ' + y + ' H56"'
-          : '<path d="M2 ' + y + ' C36 ' + y + ', 26 ' + mid + ', 56 ' + mid + '"') +
-        ' stroke="currentColor" stroke-width="1.5" fill="none"' + dash(i) + '/>').join('');
-    }
+    const svgIn = routes.map((r, i) => {
+      const gi = groups.findIndex(g => g.routes.includes(r.id));
+      return curve(routeY[i], groupY[gi], r.id === live);
+    }).join('');
+    const svgOut = groups.map((g, i) =>
+      curve(groupY[i], mid, liveGroup && g.id === liveGroup.id)).join('') +
+      '<circle cx="50" cy="' + mid + '" r="3" fill="currentColor"/>';
+    const svg = (inner) => '<svg viewBox="0 0 52 ' + h + '" style="width:52px;height:' + h +
+      'px" aria-hidden="true">' + inner + '</svg>';
 
     const doors = routes.map(r => {
       const isDefault = r.id === s.default_transport;
@@ -993,22 +1111,48 @@
         : '';
       const settings = routeSettingsTarget(s, r.id);
       return '<div class="door' + (isDefault ? ' on' : '') + (runnable ? ' go' : ' off') +
-        (r.id === live ? ' live' : '') + '"' +
-        (settings ? ' onclick="openRouteSettings(\'' + s.key + '\',\'' + r.id + '\')"' +
-                    ' title="' + esc(settings.hint) + '"'
-                  : ' title="' + esc(r.available ? r.detail : (r.reason || r.detail)) + '"') + '>' +
+        (r.id === live ? ' live' : '') + (graphSel[s.key] === r.id ? ' sel' : '') + '"' +
+        ' onclick="selectNode(\'' + s.key + '\',\'' + r.id + '\')"' +
+        ' title="' + esc(settings ? settings.hint
+                                  : (r.available ? r.detail : (r.reason || r.detail))) + '">' +
         star + '<span>' + (ROUTE_ICON[r.id] || '•') + '</span>' +
         '<span class="t">' + esc(r.label) + '</span>' +
         '<span class="w">' + right + '</span>' + rerun + '</div>';
     }).join('');
 
+    const readerNodes = groups.map(g =>
+      readerNodeHTML(s, g, liveGroup && g.id === liveGroup.id)).join('');
+
+    return '<div class="funnel">' +
+      '<div class="doors" style="height:' + h + 'px">' + doors + '</div>' +
+      '<div class="pipe">' + svg(svgIn) + '</div>' +
+      '<div class="readers" style="height:' + h + 'px">' + readerNodes + '</div>' +
+      '<div class="pipe">' + svg(svgOut) + '</div>' +
+      countHTML(s, routes) + '</div>';
+  }
+
+  /** The count belongs to the RUN that produced it, not to the source. Select a
+   *  route that has never run and it says so, rather than showing another
+   *  route's number under this route's name. */
+  function countHTML(s, routes) {
+    const sel = graphSel[s.key];
+    const route = routes.find(r => r.id === sel);
+    if (route) {
+      const run = route.last_run;
+      if (!run) {
+        return '<div class="catch"><div class="big none">Not run</div>' +
+          '<div class="cap">by this route</div></div>';
+      }
+      return '<div class="catch"><div class="big">' + run.count + '</div>' +
+        '<div class="cap">transactions</div>' +
+        '<div class="cap" style="opacity:.75">' + esc(route.label.toLowerCase()) +
+        (run.month ? ' · ' + esc(run.month) : '') + '</div></div>';
+    }
+    const data = sourceTxnCache[s.key];
     const count = data && data.count ? data.count : 0;
-    return '<div class="funnel"><div class="doors">' + doors + '</div>' +
-      '<div class="pipe"><svg viewBox="0 0 58 ' + h + '" style="height:' + h + 'px;width:58px" aria-hidden="true">' +
-      paths + '<circle cx="56" cy="' + mid + '" r="3" fill="currentColor"/></svg></div>' +
-      '<div class="catch"><div class="big">' + count + '</div>' +
+    return '<div class="catch"><div class="big">' + count + '</div>' +
       '<div class="cap">transactions</div>' +
-      '<div class="cap" style="opacity:.75">however they arrived</div></div></div>';
+      '<div class="cap" style="opacity:.75">however they arrived</div></div>';
   }
 
   // ── How this source is found in an inbox ──────────────────────────────────
@@ -1020,7 +1164,6 @@
   // These used to be one form in Settings, which capped a connected account at a
   // single source and put ingestion settings in the credentials screen.
   const emailRouteCache = {};   // source_key -> source_email_route() result
-  const emailRouteOpen = {};
 
   function emailRouteHTML(s) {
     if (s.is_trigger) return '';        // an inbox doesn't arrive by email
@@ -1029,7 +1172,9 @@
     const search = route.search;
     if (!search && !(route.inboxes || []).length) return '';   // no inbox to offer
     const sid = sourceDomId(s.key);
-    const open = !!emailRouteOpen[s.key];
+    // One selection, one panel: the open panel is always the selected node's,
+    // so a route's settings can't sit open under a different route's chip.
+    const open = graphSel[s.key] === 'email';
 
     const inbox = (route.inboxes || []).find(i => search && i.key === search.carrier);
     const summary = !search
@@ -1084,7 +1229,7 @@
       '</div></div></div>';
   }
 
-  function toggleEmailRoute(key) { emailRouteOpen[key] = !emailRouteOpen[key]; renderIngest(); }
+  function toggleEmailRoute(key) { selectNode(key, 'email'); }
 
   async function saveEmailRoute(key) {
     const sid = sourceDomId(key);
@@ -1120,14 +1265,13 @@
   // ── Per-source options, rendered from what the SOURCE declares ──
   // Nothing here names a portal's fields; the schema arrives from the source's
   // own module, so a new source with different knobs needs no UI change.
-  const optsOpen = {};
 
   function optionsHTML(s) {
     const cfg = sourceSettingsCache[s.key];
     if (!cfg || !cfg.schema || !cfg.schema.length) return '';   // nothing to adjust
     const sid = sourceDomId(s.key);
     const changed = (cfg.overridden || []).length;
-    const open = !!optsOpen[s.key];
+    const open = graphSel[s.key] === 'scrape';
 
     const head = '<div class="build-h" onclick="toggleOptions(\'' + s.key + '\')">' +
       '<span class="caret' + (open ? ' open' : '') + '">&#8250;</span>Options for this pull' +
@@ -1164,7 +1308,7 @@
       '</div></div></div>';
   }
 
-  function toggleOptions(key) { optsOpen[key] = !optsOpen[key]; renderIngest(); }
+  function toggleOptions(key) { selectNode(key, 'scrape'); }
 
   function readOptions(key) {
     const cfg = sourceSettingsCache[key];
@@ -1201,24 +1345,19 @@
     }
   }
 
-  /** Click the box, run that route. Upload opens the picker; the rest just go. */
-  /** What a route's box opens, if anything. Email has its search; a portal has
-   *  the options it asks for before handing over data; an upload has neither. */
+  /** What a route's box opens, if anything. A mailbox has its search; a website
+   *  has the options it asks for before handing over data; an upload has neither
+   *  — and selecting it is still worth doing, because it shows that route's own
+   *  last run. */
   function routeSettingsTarget(s, transport) {
     if (transport === 'email' && emailRouteCache[s.key]) {
-      return { kind: 'email', hint: 'Open this route’s settings — which inbox, and what to look for' };
+      return { kind: 'email', hint: 'Show this route — which inbox, what to look for, and what it last brought in' };
     }
     const cfg = sourceSettingsCache[s.key];
     if (transport === 'scrape' && cfg && cfg.schema && cfg.schema.length) {
-      return { kind: 'options', hint: 'Open this route’s settings — what to ask the portal for' };
+      return { kind: 'options', hint: 'Show this route — what to ask the portal for, and what it last brought in' };
     }
     return null;
-  }
-
-  function openRouteSettings(key, transport) {
-    if (transport === 'email') emailRouteOpen[key] = true;
-    if (transport === 'scrape') optsOpen[key] = true;
-    renderIngest();
   }
 
   function runRoute(key, transport) {
@@ -1318,6 +1457,39 @@
     }
   }
 
+  /** Which rows belong under the graph right now.
+   *
+   *  Selecting a route asks a question about THAT route, so it answers with that
+   *  route's own last run — not with whatever ran most recently, which would put
+   *  one route's rows under another route's name. A route that has never run says
+   *  so, and names the route that did produce what the source has. */
+  function selectedData(s) {
+    const sel = graphSel[s.key];
+    const route = (s.transports || []).find(r => r.id === sel);
+    if (!route) return sourceTxnCache[s.key];       // nothing selected, or a reader
+    if (!route.last_run) {
+      // The route that produced the rows the source is showing — which is the
+      // most RECENT run, not merely the first route that has ever run. Naming
+      // the wrong one sends the operator to a route that isn't holding the data.
+      const live = (s.transports || [])
+        .filter(r => r.last_run)
+        .sort((a, b) => (b.last_run.parsed_at || '').localeCompare(a.last_run.parsed_at || ''))[0];
+      const where = live
+        ? ' The rows this source has came in by <b>' + esc(live.label.toLowerCase()) + '</b>.'
+        : '';
+      // Only point at ⏵ when there IS one. An unavailable route's chip has no run
+      // control, so telling the operator to press it sends them looking for a
+      // button that isn't there — say what's missing instead.
+      const why = route.reason || 'this route isn’t available yet';
+      const next = route.available
+        ? ' Press ⏵ on the chip to bring the data in this way.'
+        : ' ' + esc(why.charAt(0).toUpperCase() + why.slice(1)) + '.';
+      return { notRun: '<b>' + esc(route.label) + '</b> has never run — nothing to show for it.' +
+        where + next };
+    }
+    return routeTxnCache[s.key + '|' + sel];        // undefined while it loads
+  }
+
   function sourceBodyHTML(s, isPending) {
     const actions = funnelHTML(s) + verdictHTML(s, isPending) + sourceUploadStepsRow(s.key);
     // The build/fix panel sits directly under the action + step timeline, BEFORE
@@ -1329,7 +1501,8 @@
     // when you need the numbers today; "build a parser" is the answer for every
     // month after that.
     const head = actions + emailRouteHTML(s) + offerHTML(s) + optionsHTML(s) + buildHTML(s);
-    const data = sourceTxnCache[s.key];
+    const data = selectedData(s);
+    if (data && data.notRun) return head + '<div class="notbuilt">' + data.notRun + '</div>';
     if (!data) return head + '<div class="empty">Loading transactions…</div>';
     if (data.error) return head + '<div class="notbuilt">Couldn’t load transactions: ' + esc(data.error) + '</div>';
     if (!data.transactions || !data.transactions.length) {
@@ -1761,7 +1934,7 @@
         toast('Build failed: ' + (s.message || 'unknown error'), false);
       }
       await loadStatus();
-      delete sourceTxnCache[key];
+      forgetSource(key);
       await renderIngest();
     };
     setTimeout(tick, 1500);
@@ -2006,7 +2179,7 @@
           if (progressPct) progressPct.textContent = '100%';
           toast('upload_ingest done' + (payload.count != null ? ' — ' + payload.count + ' transactions' : '') + '.', true);
           await loadStatus();
-          delete sourceTxnCache[sourceKey];
+          forgetSource(sourceKey);
           if (current === 'ingest') await renderIngest();
           resolve(payload);
         } else {
@@ -2627,7 +2800,7 @@
           latest = updateUploadStep(latest, 'done', 'success', 'Complete');
           renderUploadSteps(sourceKey, latest);
           await loadStatus();
-          delete sourceTxnCache[sourceKey];
+          forgetSource(sourceKey);
           if (current === 'ingest') await renderIngest();
           if (resumeTool) {
             // The original action failed only because the session was stale —
@@ -2820,7 +2993,7 @@
               (bal && bal.ok === true ? ', reconciled against ' + bal.checked + ' source totals' : '') + '.', true);
       }
       await loadStatus();
-      if (sourceKey) delete sourceTxnCache[sourceKey];
+      if (sourceKey) forgetSource(sourceKey);
       if (current === 'ingest') await renderIngest();
     } catch (e) {
       stopProgress.done = true;

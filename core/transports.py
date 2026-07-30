@@ -42,10 +42,14 @@ EMAIL = "email"
 # least from the operator.
 _PREFERENCE = (EMAIL, SCRAPE, UPLOAD)
 
+# Named for the WAY IN, not for what happens afterwards: "Portal scrape" packed
+# getting at the data and reading it into one word, and they are two stages that
+# fail separately. The website is the door; the API call that reads it is its own
+# node, one stage along (core/readers.py).
 _LABELS = {
     UPLOAD: ("File upload", "a document you already have"),
-    SCRAPE: ("Portal scrape", "sign in and pull the data"),
-    EMAIL: ("Email", "arrives as an attachment"),
+    SCRAPE: ("Website", "sign in and pull the data"),
+    EMAIL: ("Mailbox", "arrives as an attachment"),
 }
 
 

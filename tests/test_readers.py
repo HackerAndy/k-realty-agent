@@ -79,12 +79,22 @@ def test_a_website_with_no_scraper_shows_the_same_empty_reader():
     assert "No scraper yet" in node["label"]
 
 
-def test_the_empty_node_carries_both_ways_out():
+def test_the_empty_parser_node_carries_both_ways_out():
     """It's where the offer lives: build one, or read it once with the model."""
     note = _reader("upload", _Service(parser=None))["note"]
 
     assert "agent can write one" in note
     assert "model" in note
+
+
+def test_the_empty_scraper_node_does_not_offer_the_model():
+    """There is no document for a model to read — a portal's data needs code to
+    reach at all, and that starts with a demonstration. Offering the model here
+    would be a button that cannot work."""
+    note = _reader("scrape", scraper=False)["note"]
+
+    assert "model" not in note
+    assert "show the agent" in note
 
 
 # --- what actually ran beats what is configured -----------------------------
