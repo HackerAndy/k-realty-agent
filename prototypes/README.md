@@ -67,6 +67,14 @@ nothing to edit yet: the date window is hardcoded (`date.today() - timedelta(day
 in the scraper) and Epic declares no `SETTINGS`. That is issue #43, and this design
 is what makes it visible — the panel would otherwise be an empty box.
 
-**Still open:** in a two-stage graph, does selecting a route that didn't produce the
-rows also blank the `14 transactions` count, or is the count a property of the source?
-(Today the prototype keeps it and clears only the table.)
+**Answered, 2026-07-29:** the count belongs to the RUN, not the source. Select a
+route that didn't produce the rows and the count reads **"Not run · by this route"**,
+with the table replaced by one line naming the route that did produce them.
+
+**New question this raises (unresolved).** Andy qualified it: *"when you select a
+route that didn't produce the rows **and there is no previous run to show**"* — which
+implies that if that route HAS run before, its own last result should appear.
+Storage can't do that today: `core/ingest._persist` writes one file per
+`<source>-<month>`, so a later run by any route overwrites the earlier one. The
+transport is recorded ON the run, but no per-route history is kept. Showing a
+route's own last result means keying runs by transport too.

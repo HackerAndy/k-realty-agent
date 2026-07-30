@@ -291,8 +291,9 @@ function dataHTML() {
   if (!showing) {
     const r = SOURCE.routes.find(x => x.id === sel);
     const liveLabel = SOURCE.routes.find(x => x.id === SOURCE.live).label.toLowerCase();
-    return `<div class="empty">The ${SOURCE.count} transactions on screen came in by ${liveLabel}.
-      Press ⏵ on <b>${r.label}</b> to pull this source that way instead.</div>`;
+    return `<div class="empty"><b>${r.label}</b> hasn't run — nothing to show for it.
+      The ${SOURCE.count} rows this source does have came in by ${liveLabel};
+      press ⏵ to pull it this way instead.</div>`;
   }
   return `<div class="kstrip">
       <div class="k"><div class="l">Money in</div><div class="v pos">$3,819.00</div></div>
@@ -304,6 +305,20 @@ function dataHTML() {
     <tbody>${SOURCE.rows.map(r =>
       `<tr><td>${r[0]}</td><td>${r[1]}</td><td style="text-align:right">${r[2]}</td></tr>`).join('')}
     </tbody></table>`;
+}
+
+/** The count belongs to the run that produced it. Selecting a route that hasn't
+ *  run says "Not run" rather than showing another route's number, which would
+ *  read as this route's result. */
+function countHTML() {
+  const isReader = sel === 'parser' || sel === 'api';
+  if (sel && !isReader && !dataIsFrom(sel)) {
+    return `<div class="count" style="padding-left:6px">
+      <div class="big" style="color:var(--faint);font-size:20px">Not run</div>
+      <div class="cap">by this route</div></div>`;
+  }
+  return `<div class="count" style="padding-left:6px"><div class="big">${SOURCE.count}</div>
+    <div class="cap">transactions</div></div>`;
 }
 
 function shell(inner) {
@@ -351,8 +366,7 @@ function variantA() {
         ${readerHTML('api')}
       </div>
       <div class="pipe">${svgR}</div>
-      <div class="count" style="padding-left:6px"><div class="big">${SOURCE.count}</div>
-        <div class="cap">transactions</div></div>
+      ${countHTML()}
     </div>
     <div style="font-size:12.5px;color:var(--success);font-weight:600;margin:10px 0 0">
       ★ Can run itself — ${live ? live.label.toLowerCase() : 'nothing yet'}</div>
