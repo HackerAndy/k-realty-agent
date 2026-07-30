@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+env:
+  # The version this is actually developed and run on. 3.11 was aspirational and
+  # never proved anything — the test job failed at install on every push.
+  PYTHON_VERSION: "3.14"
+
 jobs:
   portability-lint:
     name: Portability lint (core/, evals/ must stay framework-free)
@@ -13,7 +18,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ env.PYTHON_VERSION }}
+      # Deliberately installs nothing: the script is stdlib only (ast, sys,
+      # pathlib), so the portability contract is still checked even when the
+      # dependency set is broken — which is exactly the state this repo was in.
       - name: Check core/ and evals/ never import langgraph/langchain
         run: python scripts/check_portability.py
 
@@ -25,8 +33,18 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ env.PYTHON_VERSION }}
+      # Poetry, not pip. This project's metadata lives under [tool.poetry] with
+      # four top-level packages: `pip install -e ".[dev]"` fell back to setuptools,
+      # which refuses a flat layout it can't disambiguate — and there is no [dev]
+      # extra to install either, since dev dependencies are a Poetry group.
+      - name: Install Poetry
+        run: pipx install poetry
       - name: Install dependencies
-        run: pip install -e ".[dev]"
+        run: |
+          poetry env use "$(which python)"
+          poetry install --no-interaction
+      # No browser download: nothing in the suite launches Chromium — the
+      # Playwright-facing code is exercised through fakes.
       - name: Run tests
-        run: pytest
+        run: poetry run pytest

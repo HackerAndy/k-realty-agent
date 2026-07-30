@@ -16,7 +16,7 @@ agent-web = "interfaces.rest_server:main"
 agent-mcp = "interfaces.mcp_server:main"
 
 [tool.poetry.dependencies]
-python = "^3.11"
+python = "^3.14"
 pydantic = ">=2.7"
 pyyaml = ">=6.0"
 langgraph = ">=0.2"
@@ -37,6 +37,13 @@ pytest = ">=8.0"
 ruff = ">=0.5"
 reportlab = "^5.0.0"
 coverage = "^7.15.2"
+
+# Stated explicitly so nothing can guess wrong. Without it, `pip install -e .`
+# fell back to setuptools, which refuses a flat layout with four top-level
+# packages — which is why every CI run failed at install.
+[build-system]
+requires = ["poetry-core>=1.9"]
+build-backend = "poetry.core.masonry.api"
 
 [tool.ruff]
 line-length = 100

@@ -12,13 +12,12 @@
   front-end; the questionary TUI was deleted once the GUI reached parity.
   [scripts/manage_secrets.py](scripts/manage_secrets.py) remains as a CLI for key
   generation and bulk credential edits.
-- Tests: `poetry run pytest`. Portability lint (`core/`/`evals/` must stay framework-free):
-  `poetry run python scripts/check_portability.py`. Both are configured in CI
-  ([.github/workflows/ci.yml](.github/workflows/ci.yml)) but only the lint actually runs
-  there: the test job installs with `pip install -e ".[dev]"`, and this project is
-  Poetry-only (no `[build-system]`, no PEP 621 `[project]`), so pip falls back to
-  setuptools and dies on "multiple top-level packages discovered in a flat-layout".
-  Every CI run to date has failed there. Run the tests locally until that's fixed.
+- Python **3.14**, Poetry. Tests: `poetry run pytest`. Portability lint (`core/`/`evals/`
+  must stay framework-free): `poetry run python scripts/check_portability.py`. Both run in
+  CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)), which installs with Poetry —
+  `pip install -e ".[dev]"` cannot work here (metadata is `[tool.poetry]`, dev deps are a
+  Poetry group, four top-level packages defeat setuptools' flat-layout discovery) and
+  silently failed every CI run for months.
 - Architecture and the `core/`/`orchestration/`/`evals/` portability contract: see
   [README.md](README.md#architecture-portability-contract).
 - Building a new source's parser/scraper: the embedded agent does this, driven by
