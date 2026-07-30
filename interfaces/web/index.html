@@ -288,7 +288,6 @@
       <button id="nav-reporting" onclick="show('reporting')"><span class="step">3</span>Report</button>
     </div>
     <div class="right">
-      <span class="chip" id="llm">LLM …</span>
       <span class="chip" id="pending" style="display:none"></span>
       <button class="icon-btn" id="nav-settings" onclick="show('settings')" aria-label="Settings" title="Settings">&#9881;</button>
       <button class="icon-btn" id="theme-toggle" onclick="toggleTheme()" aria-label="Enable dark mode" title="Enable dark mode"><span id="theme-icon" aria-hidden="true">&#9790;</span></button>
@@ -333,23 +332,6 @@
   const sourceTxnCache = {};  // source_key -> source_transactions() result
   const sourceSettingsCache = {};  // source_key -> source_settings() result
   const svState = k => sourceView[k] || (sourceView[k] = { group: 'None', query: '' });
-
-  function llmHost(baseUrl) {
-    if (!baseUrl) return 'not set';
-    try {
-      const normalized = baseUrl.includes('://') ? baseUrl : ('http://' + baseUrl);
-      let host = new URL(normalized).hostname || '';
-      if (host.endsWith('.local')) host = host.slice(0, -6);
-      return host || 'not set';
-    } catch {
-      // Best-effort parsing for non-URL strings.
-      let host = String(baseUrl).replace(/^https?:\/\//i, '').split('/')[0].split('?')[0].split('#')[0];
-      if (host.startsWith('[') && host.includes(']')) host = host.slice(1, host.indexOf(']'));
-      else host = host.split(':')[0];
-      if (host.endsWith('.local')) host = host.slice(0, -6);
-      return host || 'not set';
-    }
-  }
 
   function toast(msg, ok) { const t = el('toast'); t.textContent = msg; t.style.display = ''; t.className = ok ? 'ok' : 'err'; }
   function clearToast() { const t = el('toast'); t.className = ''; t.style.display = 'none'; }
@@ -488,20 +470,20 @@
     setTheme(currentTheme === 'dark' ? 'light' : 'dark');
   }
 
-  // Which model, and WHERE its server is — the consent wording for sending a
-  // document's text depends on the answer, so it can't be assumed.
+  // Which model, and WHERE its server is. Not shown in the header — Settings
+  // says which model runs — but the consent wording for sending a document's
+  // text depends on where that model lives, so it can't be assumed.
   let llmInfo = null;
 
   async function loadStatus() {
     try {
       const s = await callTool('status');
       llmInfo = s.llm;
-      el('llm').textContent = 'LLM: ' + llmHost(s.llm.base_url) + (s.llm.model ? ' · ' + s.llm.model : '');
       const p = s.pending_approvals || [];
       const pe = el('pending');
       if (p.length) { pe.style.display = ''; pe.className = 'chip warn'; pe.textContent = p.length + ' approval' + (p.length > 1 ? 's' : '') + ' needed'; }
       else { pe.style.display = 'none'; }
-    } catch (e) { el('llm').textContent = 'LLM: unavailable'; }
+    } catch (e) { llmInfo = null; }
   }
 
   function renderReporting() {
@@ -1811,7 +1793,6 @@
     const sid = sourceDomId(sourceKey);
     return '<div class="upload-steps-row" id="upload-steps-row-' + sid + '"><div class="upload-steps" id="upload-steps-' + sid + '"></div></div>';
   }
-
 
   function chooseUpload(sourceKey) {
     const input = el('upload-input-' + sourceDomId(sourceKey));
