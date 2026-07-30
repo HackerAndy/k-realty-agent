@@ -13,7 +13,12 @@
   [scripts/manage_secrets.py](scripts/manage_secrets.py) remains as a CLI for key
   generation and bulk credential edits.
 - Tests: `poetry run pytest`. Portability lint (`core/`/`evals/` must stay framework-free):
-  `poetry run python scripts/check_portability.py`. Both run in CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)).
+  `poetry run python scripts/check_portability.py`. Both are configured in CI
+  ([.github/workflows/ci.yml](.github/workflows/ci.yml)) but only the lint actually runs
+  there: the test job installs with `pip install -e ".[dev]"`, and this project is
+  Poetry-only (no `[build-system]`, no PEP 621 `[project]`), so pip falls back to
+  setuptools and dies on "multiple top-level packages discovered in a flat-layout".
+  Every CI run to date has failed there. Run the tests locally until that's fixed.
 - Architecture and the `core/`/`orchestration/`/`evals/` portability contract: see
   [README.md](README.md#architecture-portability-contract).
 - Building a new source's parser/scraper: the embedded agent does this, driven by
@@ -44,6 +49,23 @@ embedded agent (`orchestration/agent.py`), working *with* the operator.
   file). The workflow (`orchestration/verify.py`) re-runs that test independently;
   a missing or failing test is NOT `ok`, and the GUI shows the pass/fail and gates
   approval on it. See `parser_builder.v1.md` / `scraper_builder.v1.md`.
+- **What the gate checks, all of it** (`orchestration/verify.py` + the `fold_*`
+  functions in `orchestration/codegen.py`). Each exists because the one before it
+  passed something broken; `verify.blockers()` turns whichever fired into the
+  sentence the operator reads, so the screen never says "the test failed" about
+  something else:
+  - the test exists and passes;
+  - the test actually EXECUTES the changed lines (`covers_changes`) — a stale
+    green test and real coverage look identical to "was a test written?";
+  - no configuration-shaped literals baked into the code (`hardcoded_options`),
+    escape hatch `# fixed: <reason>` per line;
+  - nothing in the code that does nothing (`lint`, ruff `F,E9`) — a value computed
+    and discarded is usually a setting being silently ignored;
+  - the run wrote something at all (`fold_noop`);
+  - the agent didn't end itself — `orchestration/watchdog.py` (a run gone silent,
+    budgeted against its own pace) and `orchestration/repetition.py` (the same
+    call three times gets one nudge, then the run stops).
+  The agent gets ONE automatic retry with the reason, then the operator sees it.
 
 After onboarding, the operator works with the harness (its browser GUI), not a code editor.
 
@@ -56,15 +78,31 @@ Ingesting anything is the same three questions, and the UI must keep them apart:
 2. **How do we get at it?** *Access*: a sign-in. A username+password, a portal
    login, a Google token for an inbox. Shared, reusable, secret → **Settings →
    Sign-ins**, and nothing else lives there.
-3. **What do we take, and how do we read it?** *Configuration*: which dropdown
-   and date range to scrape, which message carries the attachment (sender,
-   subject, attachment type, how far back), then the parse. Per source →
-   **Data ingestion**, on that source.
+3. **What do we take?** *Configuration*, per source → **Data ingestion**, on that
+   source: which message carries the attachment (sender, subject, attachment
+   type, how far back), which dropdown and date range to ask the portal for.
+4. **What reads it?** Getting the data and reading it are separate acts that fail
+   separately — a mailbox that won't connect and a PDF the parser can't read are
+   not the same problem — so they are separate nodes on that source's graph.
 
 The test for where a setting goes: could two sources share it? A mailbox is
 shared (access). "Subject contains Owner's Statement" is one source's business
 (configuration). Putting a search on the inbox capped a connected account at one
 source — see `Service.email_search` in `core/tools/service_manifest.py`.
+
+**Routes and readers** (`core/transports.py`, `core/readers.py`). A source has
+several ways IN — File upload, Website, Mailbox — and each has exactly ONE
+reader, named for what it is: `Parser · <name>`, `API call`, `Replays your
+clicks`, `Read by the model · <name>`, or `No reader yet`. Upload and Mailbox
+converge on the same parser, because they really do hand the document to the
+same code. Two rules the screen depends on:
+
+- **What RAN beats what is configured.** Rows a model produced must never look
+  like rows a tested parser produced, so a run reports the reader that actually
+  read it, model name and all.
+- **A count belongs to the run that produced it.** Runs are stored per route
+  (`data/parsed/<source>-<route>-<month>.json`); a route that has never run says
+  "Not run · by this route" rather than borrowing another route's number.
 
 ## Other standing rules
 
@@ -77,6 +115,17 @@ source — see `Service.email_search` in `core/tools/service_manifest.py`.
 - **Faithful data.** Preserve each source's ACTUAL columns verbatim in
   `Transaction.fields`; invent nothing. Only `date`/`amount`/`description` are
   normalized.
+- **A source declares its own options; the harness renders them.** The choices a
+  portal asks for before handing over data belong in a module-level `SETTINGS`
+  list, read at run time via `settings.values_for(SERVICE_KEY)` — never baked
+  into the code. The GUI knows none of Epic's fields; it renders whatever it
+  finds, which is why adding a source needs no UI change. Options only the portal
+  knows (the properties on an account) declare `"discovered": True` and are
+  published with `settings.record_options()` — never by writing
+  `core/policies/source_settings.yaml` directly, and never by mutating `SETTINGS`
+  at import. **A declared setting must reach the request**: reading a value and
+  not using it is worse than hardcoding, because the screen then offers a choice
+  that silently does nothing. The lint gate fails the build on it.
 - **One model choice.** Every LLM call resolves through
   `core/tools/llm_provider.resolve()` — never a hardcoded model constant, never
   `os.getenv` plus a local default. Precedence: caller argument → Settings →
