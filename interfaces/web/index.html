@@ -1594,6 +1594,12 @@
     // What it did, as a short list of acts. The model's own account of the run can
     // be tens of thousands of characters — unreadable, and it buries the outcome —
     // so the acts come from the recorded tool calls and the prose is a click away.
+    // A run that ended itself says so even when what it wrote is acceptable —
+    // "it stopped early" changes how much weight to put on the result.
+    if (v.agent_stopped) {
+      body += '<div class="notbuilt" style="margin-bottom:10px">' + esc(v.agent_stopped) + '</div>';
+    }
+
     const did = st.did || {};
     if ((did.files || []).length || (did.commands || []).length || did.reads) {
       const bits = [];

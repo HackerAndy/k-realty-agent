@@ -272,6 +272,9 @@ def blockers(verification: dict) -> list[str]:
         out.append(f"Choices the operator should be able to change are still baked into the "
                    f"code — {detail}.")
 
+    if verification.get("agent_stopped"):
+        out.append(verification["agent_stopped"])
+
     if verification.get("registered") is False:
         out.append(verification.get("registration_detail")
                    or "The module isn't registered, so nothing can call it yet.")

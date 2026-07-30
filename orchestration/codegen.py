@@ -175,6 +175,11 @@ def run_codegen_gated(
     """
     def _assess(res):
         v = fold_untested(verify(), res.tool_calls)
+        # A loop that ended ITSELF (went in circles, hit the turn cap) has to say
+        # so: the files it left behind may still be fine, but "it stopped early"
+        # changes how much weight to put on them.
+        if getattr(res, "stopped_reason", ""):
+            v["agent_stopped"] = res.stopped_reason
         if test_path and not v.get("untested_code"):
             v = fold_uncovered(v, res.tool_calls, test_path)
         v = fold_hardcoded(v, res.tool_calls)

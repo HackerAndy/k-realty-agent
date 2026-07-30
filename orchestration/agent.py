@@ -25,6 +25,7 @@ import anthropic
 
 from core.tools import llm_provider
 from orchestration import agent_tools
+from orchestration.repetition import RepetitionDetector
 
 # Which provider/model to use is decided in ONE place — core/tools/llm_provider —
 # from what the operator chose in Settings. These re-exports keep the old import
@@ -39,10 +40,15 @@ DEFAULT_MAX_TURNS = 40
 
 
 class AgentResult:
-    def __init__(self, final_text: str, turns: int, tool_calls: list[tuple[str, dict]]):
+    def __init__(self, final_text: str, turns: int, tool_calls: list[tuple[str, dict]],
+                 stopped_reason: str = ""):
         self.final_text = final_text
         self.turns = turns
         self.tool_calls = tool_calls  # (name, input) in order, for audit
+        # Set when the loop ended itself rather than the model finishing — today
+        # only "went in circles". Verification still decides whether what it wrote
+        # before that is acceptable; this only says why it stopped when it did.
+        self.stopped_reason = stopped_reason
 
 
 @dataclass
@@ -236,6 +242,10 @@ def run_agent(
     messages = adapter.init_messages(task)
     tool_calls: list[tuple[str, dict]] = []
     final_text = ""
+    # Busy is not the same as getting somewhere: this notices the agent doing the
+    # identical thing over and over, which the turn cap alone would only reveal
+    # after every turn had been spent.
+    repetition = RepetitionDetector()
 
     for turn in range(1, max_turns + 1):
         # Announced BEFORE the call, not after: this is the moment the run goes
@@ -254,17 +264,34 @@ def run_agent(
             return AgentResult(final_text, turn, tool_calls)
 
         results: list[ToolResult] = []
+        circling = None
         for tool_call in turn_result.tool_calls:
             tool_calls.append((tool_call.name, tool_call.input))
             preview = _preview(tool_call.name, tool_call.input)
             on_event(f"  → {tool_call.name}({preview})")
             result_text, is_error = agent_tools.dispatch(tool_call.name, tool_call.input)
+
+            repeat = repetition.observe(tool_call.name, tool_call.input)
+            if repeat is not None:
+                on_event(f"  [{repeat.describe()}]")
+                if repeat.verdict == "stop":
+                    circling = repeat
+                else:
+                    # The nudge rides along with the result the agent is about to
+                    # read anyway. A separate message would have to be interleaved
+                    # with tool_use blocks, which providers reject.
+                    result_text = f"{result_text}\n\n{repetition.nudge_text(repeat)}"
+
             results.append(ToolResult(id=tool_call.id, content=result_text, is_error=is_error))
+
+        if circling is not None:
+            return AgentResult(final_text, turn, tool_calls, stopped_reason=circling.describe())
 
         adapter.append_tool_results(messages, results)
 
     on_event(f"[stopped after {max_turns} turns without finishing]")
-    return AgentResult(final_text, max_turns, tool_calls)
+    return AgentResult(final_text, max_turns, tool_calls,
+                       stopped_reason=f"Hit the {max_turns}-turn cap without finishing.")
 
 
 def _build_adapter(choice: llm_provider.LLMChoice) -> LLMAdapter:
