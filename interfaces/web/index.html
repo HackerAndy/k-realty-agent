@@ -951,7 +951,6 @@
                                           login_url: p.where, captured_requests: p.requests,
                                           recorded_actions: p.actions };
       if (p.sample_path) st.sample = { sample_path: p.sample_path, filename: p.where, bytes: 0 };
-      st.expanded = true;
 
       // Read these BEFORE closing — closeWizard resets the state they live in.
       const label = wiz.label, wasNew = wiz.fork === 'new';
@@ -1015,6 +1014,8 @@
     // because most routes are never looked at.
     const route = (sourcesCache.find(x => x.key === key) || {}).transports || [];
     if (route.some(r => r.id === graphSel[key])) loadRouteTxns(key, graphSel[key]);
+    // The website node shows the sign-in, which lives with the credentials.
+    if (graphSel[key] === 'scrape' && !credCache) loadCredentials().then(renderIngest);
     renderIngest();
   }
 
@@ -1165,34 +1166,22 @@
   // single source and put ingestion settings in the credentials screen.
   const emailRouteCache = {};   // source_key -> source_email_route() result
 
-  function emailRouteHTML(s) {
+  function emailRoutePanel(s) {
     if (s.is_trigger) return '';        // an inbox doesn't arrive by email
     const route = emailRouteCache[s.key];
     if (!route) return '';
     const search = route.search;
     if (!search && !(route.inboxes || []).length) return '';   // no inbox to offer
     const sid = sourceDomId(s.key);
-    // One selection, one panel: the open panel is always the selected node's,
-    // so a route's settings can't sit open under a different route's chip.
-    const open = graphSel[s.key] === 'email';
-
-    const inbox = (route.inboxes || []).find(i => search && i.key === search.carrier);
-    const summary = !search
-      ? 'not set up'
-      : (inbox && inbox.account_email ? esc(inbox.account_email) : esc(search.carrier)) +
-        (search.from_address ? ' · from ' + esc(search.from_address) : '');
-    const head = '<div class="build-h" onclick="toggleEmailRoute(\'' + s.key + '\')">' +
-      '<span class="caret' + (open ? ' open' : '') + '">&#8250;</span>Arrives by email' +
-      '<span class="hint" style="margin-left:auto;font-weight:400">' + summary + '</span></div>';
-    if (!open) return '<div class="build collapsed">' + head + '</div>';
+    const head = panelHead('Mailbox — which message carries it');
 
     if (!(route.inboxes || []).length) {
-      return '<div class="build">' + head + '<div class="build-b">' +
+      return head + '<div class="build-b">' +
         '<p class="note" style="margin:0">No inbox is connected yet. An inbox signs in with Google ' +
         'rather than a password, so it lives in <b>Settings → Sign-ins</b> — one connected mailbox ' +
         'can carry several sources.</p>' +
         '<div class="row"><button class="btn" onclick="show(\'settings\')">Open Settings</button></div>' +
-        '</div></div>';
+        '</div>';
     }
 
     const chosen = search ? search.carrier : route.inboxes[0].key;
@@ -1204,7 +1193,7 @@
         'Settings → Sign-ins, then save this.</p>'
       : '';
 
-    return '<div class="build">' + head + '<div class="build-b">' +
+    return head + '<div class="build-b">' +
       '<p class="note" style="margin:0 0 12px">Which message carries this source’s document. ' +
       'Signing in to the mailbox is separate — that’s in Settings, and it’s shared, so several ' +
       'sources can search the same inbox for different things.</p>' + unconnected +
@@ -1226,10 +1215,8 @@
       '<div class="row"><button class="btn primary" onclick="saveEmailRoute(\'' + s.key + '\')">' +
       (search ? 'Save' : 'Set up this route') + '</button>' +
       (search ? '<button class="btn" onclick="removeEmailRoute(\'' + s.key + '\')">Stop using email</button>' : '') +
-      '</div></div></div>';
+      '</div></div>';
   }
-
-  function toggleEmailRoute(key) { selectNode(key, 'email'); }
 
   async function saveEmailRoute(key) {
     const sid = sourceDomId(key);
@@ -1266,18 +1253,11 @@
   // Nothing here names a portal's fields; the schema arrives from the source's
   // own module, so a new source with different knobs needs no UI change.
 
-  function optionsHTML(s) {
+  function optionsPanel(s) {
     const cfg = sourceSettingsCache[s.key];
     if (!cfg || !cfg.schema || !cfg.schema.length) return '';   // nothing to adjust
     const sid = sourceDomId(s.key);
     const changed = (cfg.overridden || []).length;
-    const open = graphSel[s.key] === 'scrape';
-
-    const head = '<div class="build-h" onclick="toggleOptions(\'' + s.key + '\')">' +
-      '<span class="caret' + (open ? ' open' : '') + '">&#8250;</span>Options for this pull' +
-      '<span class="hint" style="margin-left:auto;font-weight:400">' +
-      (changed ? changed + ' changed from default' : 'using defaults') + '</span></div>';
-    if (!open) return '<div class="build collapsed">' + head + '</div>';
 
     const fields = cfg.schema.map(f => {
       const v = cfg.values[f.key];
@@ -1300,15 +1280,14 @@
         (f.help ? '<span class="sub">' + esc(f.help) + '</span>' : '') + '</div>';
     }).join('');
 
-    return '<div class="build"><div class="build-b">' +
-      '<p class="note" style="margin:0 0 12px">These are the choices the portal asks for before it ' +
+    return '<div class="build-b" style="border-top:1px solid var(--border)">' +
+      '<div class="label" style="margin-bottom:6px">What the call needs</div>' +
+      '<p class="note" style="margin:0 0 12px">The choices the portal asks for before it ' +
       'hands over data. They apply to the next pull — no code change needed.</p>' + fields +
       '<div class="row"><button class="btn primary" onclick="saveOptions(\'' + s.key + '\')">Save options</button>' +
       (changed ? '<button class="btn" onclick="resetOptions(\'' + s.key + '\')">Back to defaults</button>' : '') +
-      '</div></div></div>';
+      '</div></div>';
   }
-
-  function toggleOptions(key) { selectNode(key, 'scrape'); }
 
   function readOptions(key) {
     const cfg = sourceSettingsCache[key];
@@ -1457,6 +1436,104 @@
     }
   }
 
+  // ── One slot, whatever is selected ────────────────────────────────────────
+  // There used to be three panels stacked between the graph and the data, each
+  // with its own collapsed header and its own sticky open/closed state. Three
+  // headers is three things to read before reaching the numbers, and none of
+  // them said which node they belonged to. Now the graph IS the navigation:
+  // exactly one panel, always the selected node's, and nothing at all when
+  // nothing is selected.
+
+  const panelHead = title =>
+    '<div class="build-h" style="cursor:default"><span class="caret open">&#8250;</span>' +
+    title + '</div>';
+
+  function nodePanelHTML(s) {
+    const sel = graphSel[s.key];
+    const group = readerGroups(s.transports || []).find(g => g.id === sel);
+    let inner = '';
+    if (group) inner = readerPanel(s, group);
+    else if (sel === 'email') inner = emailRoutePanel(s);
+    else if (sel === 'scrape') inner = websitePanel(s);
+    else if (sel === 'upload') inner = uploadPanel(s);
+    // Nothing selected. A build in flight, a result waiting to be approved, or a
+    // source with no code at all still has to be visible — for the last, building
+    // IS the main action, so hiding it behind a click would strand a new source.
+    else if (buildDemandsAttention(s) || (!s.has_scraper && !s.parser_built)) {
+      inner = buildPanel(s);
+    }
+    return inner ? '<div class="build">' + inner + '</div>' : '';
+  }
+
+  /** The reading node. This is where the agent lives — Andy: "when is an agent
+   *  needed? it's needed when a parsing action needs to be fixed." An API call
+   *  additionally carries the variables the call itself needs. */
+  const readerCodeKind = g => g.routes.includes('scrape') ? 'scraper' : 'parser';
+
+  function readerPanel(s, g) {
+    const rd = g.reader;
+    if (!rd.built) {
+      return panelHead(rd.label) +
+        '<div class="build-b"><p class="note" style="margin:0 0 12px">' +
+        'Nothing reads this route yet — ' + esc(rd.note) + '.</p></div>' +
+        buildPanel(s, readerCodeKind(g));
+    }
+    const what = rd.kind === 'api'
+      ? 'The agent found the request the portal fires itself, so there are no clicks to ' +
+        'replay: it signs in for cookies, takes the token, then calls the endpoint directly.'
+      : (rd.kind === 'clicks'
+          ? 'The agent drives the browser the way you demonstrated it, then reads the table.'
+          : (rd.kind === 'model'
+              ? 'A model read these rows, not committed code. There is no test behind them — ' +
+                'have the agent build a parser so the next run doesn’t need this.'
+              : 'Committed code with a test of its own; the agent wrote both and you ' +
+                'approved them. Nothing here is a setting — if the layout changed, the fix ' +
+                'is a new version of the code.'));
+    return panelHead(rd.label) +
+      '<div class="build-b" style="padding-bottom:0">' +
+      '<p class="note" style="margin:0 0 4px">' + what + '</p></div>' +
+      (rd.kind === 'api' ? optionsPanel(s) : '') +
+      buildPanel(s, readerCodeKind(g));
+  }
+
+  /** The website is the way IN — the sign-in, and nothing about reading. Shared,
+   *  so this is the same credential Settings → Websites holds; changing it in
+   *  either place changes it in both. */
+  function websitePanel(s) {
+    const head = panelHead('Website — how the harness gets in');
+    if (!credCache) return head + '<div class="build-b"><p class="note" style="margin:0">Loading the sign-in…</p></div>';
+    const c = credCache.find(x => x.key === s.key && x.kind !== 'inbox');
+    if (!c) {
+      return head + '<div class="build-b"><p class="note" style="margin:0">' +
+        'No sign-in is stored for this source yet. Add one under <b>Settings → Sign-ins</b>.</p>' +
+        '<div class="row"><button class="btn" onclick="show(\'settings\')">Open Settings</button></div>' +
+        '</div>';
+    }
+    const sid = sourceDomId(s.key);
+    return head + '<div class="build-b">' +
+      '<p class="note" style="margin:0 0 12px">The same sign-in as <b>Settings → Sign-ins</b>; ' +
+      'changing it here changes it there. It’s shared, so anything else using this portal gets ' +
+      'the change too.</p>' +
+      (c.login_url ? '<div class="field"><label>Address</label>' +
+        '<input type="text" value="' + esc(c.login_url) + '" readonly></div>' : '') +
+      '<div class="field"><label for="cu-' + sid + '">Username or email</label>' +
+      '<input type="text" id="cu-' + sid + '" value="' + esc(c.username) + '" autocomplete="off"></div>' +
+      '<div class="field"><label for="cp-' + sid + '">Password</label>' +
+      '<input type="password" id="cp-' + sid + '" autocomplete="off" placeholder="' +
+        (c.has_password ? '•••••••••••• saved' : 'not set') + '">' +
+      '<span class="sub">' + (c.has_password ? 'Leave blank to keep the saved one. ' : '') +
+      'Stored encrypted in <b>.secrets/</b> — never in the repo, never shown back to you.</span></div>' +
+      '<div class="row"><button class="btn" onclick="saveCredentials(\'' + s.key + '\')">' +
+      (c.has_username && c.has_password ? 'Update' : 'Save') + '</button></div></div>';
+  }
+
+  function uploadPanel(s) {
+    return panelHead('File upload — a document you already have') +
+      '<div class="build-b"><p class="note" style="margin:0">Nothing to set up. Press ⏵ on the ' +
+      'chip to choose a document. What happens to it afterwards belongs to the reader, one ' +
+      'stage along.</p></div>';
+  }
+
   /** Which rows belong under the graph right now.
    *
    *  Selecting a route asks a question about THAT route, so it answers with that
@@ -1500,7 +1577,7 @@
     // The model offer sits ahead of the build panel: "read it now" is the answer
     // when you need the numbers today; "build a parser" is the answer for every
     // month after that.
-    const head = actions + emailRouteHTML(s) + offerHTML(s) + optionsHTML(s) + buildHTML(s);
+    const head = actions + offerHTML(s) + nodePanelHTML(s);
     const data = selectedData(s);
     if (data && data.notRun) return head + '<div class="notbuilt">' + data.notRun + '</div>';
     if (!data) return head + '<div class="empty">Loading transactions…</div>';
@@ -1522,9 +1599,13 @@
   const buildState = {};   // source_key -> { sample, events, status, result, passed, feedback, token }
   const bs = k => buildState[k] || (buildState[k] = { sample: null, events: [], status: 'idle', feedback: '' });
 
-  /** A source that pulls from a portal is maintained as a SCRAPER; anything else
-   *  is maintained as a parser. That's the code the operator would fix. */
-  function buildKindFor(s) {
+  /** Which code the agent would work on. Normally the source's own kind — a
+   *  portal is maintained as a SCRAPER, anything else as a parser — but when the
+   *  operator has selected a reading node, that node decides: DFCU has a parser
+   *  and no scraper, so its "No scraper yet" node must offer a demonstration,
+   *  not offer to rebuild the parser it already has. */
+  function buildKindFor(s, forNode) {
+    if (forNode) return forNode;
     // Before a scraper exists, only the source itself says it's a portal — so
     // a newly added website is offered a demonstration, not a sample document.
     return (s.has_scraper || s.input_type === 'html_scrape') ? 'scraper' : 'parser';
@@ -1536,43 +1617,24 @@
     return !!(steps && steps.some(s => s.status === 'failed'));
   }
 
-  /** Only take up room when there's a reason to: an actual failure, work in
-   *  flight, a result to review, or a source with no code built yet (where
-   *  building IS the main action). Otherwise collapse to its header. */
-  function buildExpanded(s) {
+  /** Work the operator must not lose track of, whatever is selected: a build in
+   *  flight, or a result waiting to be approved. The slot shows this even with
+   *  nothing selected, because a running build that only appears when you happen
+   *  to click the right node is a build you can lose. */
+  function buildDemandsAttention(s) {
     const st = bs(s.key);
-    if (st.expanded !== undefined) return st.expanded;   // operator overrode it
-    if (st.status && st.status !== 'idle') return true;
-    if (lastActionFailed(s.key)) return true;
-    return !s.has_scraper && !s.parser_built;
+    return (st.status && st.status !== 'idle') || lastActionFailed(s.key);
   }
 
-  function toggleBuildPanel(key) {
-    const st = bs(key);
-    st.expanded = !st._expandedNow;   // flip whatever is on screen right now
-    renderIngest();
-  }
-
-  function buildHTML(s) {
+  function buildPanel(s, forNode) {
     if (s.is_trigger) return '';   // a trigger has no code of its own to build
     const st = bs(s.key);
     const sid = sourceDomId(s.key);
-    const kind = buildKindFor(s);
+    const kind = buildKindFor(s, forNode);
     st.kind = kind;
-    const expanded = buildExpanded(s);
-    st._expandedNow = expanded;
     const title = kind === 'scraper'
       ? (s.has_scraper ? 'Fix this source’s scraper' : 'Teach the harness this website')
       : (s.parser_built ? 'Rebuild' : 'Build') + ' this source’s parser';
-
-    if (!expanded) {
-      // Collapsed: one quiet line, still one click away.
-      return '<div class="build collapsed"><div class="build-h" onclick="toggleBuildPanel(\'' + s.key + '\')">' +
-        '<span class="caret">&#8250;</span>' + title +
-        '<span class="hint" style="margin-left:auto;font-weight:400">' +
-        (kind === 'scraper' ? 'the agent can fix it' : 'the agent can rebuild it') + '</span>' +
-        '</div></div>';
-    }
 
     let inner;
     if (st.status === 'running') {
@@ -1642,12 +1704,10 @@
     }
 
     const running = st.status === 'running';
-    return '<div class="build"><div class="build-h"' +
-      // Don't let it be collapsed mid-run — the stream is the only progress signal.
-      (running ? '' : ' onclick="toggleBuildPanel(\'' + s.key + '\')"') + '>' +
+    return '<div class="build-h" style="cursor:default">' +
       (running ? '<span class="spin"></span>' : '<span class="caret open">&#8250;</span>') +
       (running ? 'Agent is working on the ' + kind + '…' : title) +
-      '</div><div class="build-b" id="build-' + sid + '">' + inner + '</div></div>';
+      '</div><div class="build-b" id="build-' + sid + '">' + inner + '</div>';
   }
 
   // ── Demonstrating a portal ─────────────────────────────────────────────────
@@ -1988,7 +2048,6 @@
     const st = bs(key);
     st.status = 'idle'; st.events = []; st.result = null; st.passed = false;
     st.blockers = []; st.did = null; st.message = null;
-    st.expanded = undefined;          // back to "only show me when I'm needed"
     st.token = (st.token || 0) + 1;   // orphan any in-flight poller
     renderIngest();
   }
