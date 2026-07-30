@@ -1008,6 +1008,20 @@
     return groups;
   }
 
+  /** The ways in, re-ordered so every route feeding one reader sits together.
+   *  Without this the columns are drawn in the order the routes happen to arrive
+   *  (upload, website, mailbox) while their readers are drawn in the order they
+   *  are first needed — so Mailbox's arrow crosses Website's to reach the parser
+   *  Upload already went to. A crossing reads as "these two have something to do
+   *  with each other", which is the opposite of what it means here. Grouping the
+   *  sources of one reader makes every arrow monotonic, so none can cross. */
+  function routesByReader(routes, groups) {
+    const rank = {};
+    groups.forEach((g, i) => g.routes.forEach(id => { rank[id] = i; }));
+    // Stable, so routes sharing a reader keep the order they came in.
+    return routes.slice().sort((a, b) => rank[a.id] - rank[b.id]);
+  }
+
   function selectNode(key, id) {
     graphSel[key] = graphSel[key] === id ? null : id;
     // A route's own rows, not whichever route ran last. Fetched on demand
@@ -1054,9 +1068,9 @@
    *  ways in on the left, the reading in the middle, the rows on the right.
    *  ★ is the default — what "Get latest" runs. */
   function funnelHTML(s) {
-    const routes = s.transports || [];
-    if (!routes.length) return '';
-    const groups = readerGroups(routes);
+    if (!(s.transports || []).length) return '';
+    const groups = readerGroups(s.transports);
+    const routes = routesByReader(s.transports, groups);
     const n = routes.length, m = groups.length;
     const h = Math.max(96, n * 52, m * 52), mid = h / 2;
     // space-around puts each item in the centre of an equal slot, so these
