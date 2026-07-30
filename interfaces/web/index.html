@@ -214,6 +214,11 @@
   .door .star { font-size: 13px; width: 15px; flex: none; color: var(--accent); }
   .door .star.set { color: var(--border); cursor: pointer; }
   .door .star.set:hover { color: var(--accent); }
+  .door .rerun { flex: none; margin-left: 10px; width: 22px; height: 22px; border-radius: 6px;
+    border: 1px solid var(--border); display: flex; align-items: center; justify-content: center;
+    font-size: 13px; color: var(--muted); cursor: pointer; }
+  .door .rerun:hover { border-color: var(--accent); color: var(--accent);
+    background: color-mix(in oklab, var(--accent) 12%, var(--card)); }
   .pipe { width: 58px; display: grid; place-items: center; color: var(--muted); opacity: .6; }
   .catch { padding-left: 10px; }
   .catch .big { font-size: 24px; font-weight: 700; letter-spacing: -.02em; line-height: 1.1; }
@@ -954,14 +959,23 @@
         ? (r.id === live ? 'last used' : (r.unattended ? 'can run unattended' : 'needs you'))
         : esc(r.reason || 'not available');
       const runnable = r.available;
+      // Running is its OWN control, at the right of the chip. The box used to run
+      // the route the moment you touched it, which stopped making sense once a
+      // route had settings worth opening — a click meant to inspect started an
+      // import instead.
+      const rerun = runnable
+        ? '<span class="rerun" title="Re-run this process — ' + esc(r.detail) + '" ' +
+          'onclick="event.stopPropagation();runRoute(\'' + s.key + '\',\'' + r.id + '\')">&#9205;</span>'
+        : '';
+      const settings = routeSettingsTarget(s, r.id);
       return '<div class="door' + (isDefault ? ' on' : '') + (runnable ? ' go' : ' off') +
         (r.id === live ? ' live' : '') + '"' +
-        (runnable ? ' onclick="runRoute(\'' + s.key + '\',\'' + r.id + '\')"' +
-                    ' title="run this now — ' + esc(r.detail) + '"'
-                  : ' title="' + esc(r.reason || r.detail) + '"') + '>' +
+        (settings ? ' onclick="openRouteSettings(\'' + s.key + '\',\'' + r.id + '\')"' +
+                    ' title="' + esc(settings.hint) + '"'
+                  : ' title="' + esc(r.available ? r.detail : (r.reason || r.detail)) + '"') + '>' +
         star + '<span>' + (ROUTE_ICON[r.id] || '•') + '</span>' +
         '<span class="t">' + esc(r.label) + '</span>' +
-        '<span class="w">' + right + '</span></div>';
+        '<span class="w">' + right + '</span>' + rerun + '</div>';
     }).join('');
 
     const count = data && data.count ? data.count : 0;
@@ -1164,6 +1178,25 @@
   }
 
   /** Click the box, run that route. Upload opens the picker; the rest just go. */
+  /** What a route's box opens, if anything. Email has its search; a portal has
+   *  the options it asks for before handing over data; an upload has neither. */
+  function routeSettingsTarget(s, transport) {
+    if (transport === 'email' && emailRouteCache[s.key]) {
+      return { kind: 'email', hint: 'Open this route’s settings — which inbox, and what to look for' };
+    }
+    const cfg = sourceSettingsCache[s.key];
+    if (transport === 'scrape' && cfg && cfg.schema && cfg.schema.length) {
+      return { kind: 'options', hint: 'Open this route’s settings — what to ask the portal for' };
+    }
+    return null;
+  }
+
+  function openRouteSettings(key, transport) {
+    if (transport === 'email') emailRouteOpen[key] = true;
+    if (transport === 'scrape') optsOpen[key] = true;
+    renderIngest();
+  }
+
   function runRoute(key, transport) {
     if (transport === 'upload') return chooseUpload(key);
     if (transport === 'scrape') return act('run_scraper', { source_key: key });
@@ -1185,8 +1218,8 @@
             ' can’t run unattended</span>';
     }
 
-    // No "Get latest" button: clicking a door runs that route, so a separate
-    // button would be a second control for the same act.
+    // No "Get latest" button: each route's chip carries its own re-run icon, so a
+    // separate button would be a second control for the same act.
     let btns = '';
     if (isPending) {
       btns += '<button class="btn" onclick="act(\'activate_parser\',{source_key:\'' + s.key + '\'})">Approve the parser</button>';
