@@ -134,3 +134,167 @@ def test_extract_no_reconciliation_when_total_is_none():
 
     checks = reconcile.read("test_no_total")
     assert len(checks) == 0
+
+
+# ── The XSRF token: where every API call succeeds or 403s ────────────────────
+#
+# The token is the whole of the scraper's authorisation. Nothing about it can be
+# checked by reading the code — a renamed header or a missing cookie fails only
+# against the live portal, minutes into a run — so it is pinned here:
+#
+#   * the token is found among the other cookies a real session carries;
+#   * a session without it fails LOUDLY, with the structured record and the
+#     remediation the operator needs, rather than sending an empty token;
+#   * both calls send it as `X-XSRF-TOKEN`. Buildium rejects any other spelling,
+#     and a well-meaning rename to X-CSRF-Token would break every run;
+#   * a non-200 is an error, not an empty result — an empty ledger would look
+#     like "a quiet month" and silently under-report the books.
+
+import json as _json
+
+import pytest
+
+from core import observability
+from core.scrapers.base import ScrapeError
+from core.scrapers.epic_property_management import (
+    _extract_xsrf_token,
+    _fetch_json,
+    _get_gl_account_ids,
+    _post_json,
+)
+
+
+class _FakeResponse:
+    def __init__(self, status=200, payload=None):
+        self.status = status
+        self._payload = payload
+
+    def json(self):
+        return self._payload
+
+
+class _FakeRequest:
+    """Records what the scraper would have sent over the wire."""
+
+    def __init__(self, status=200, payload=None):
+        self.status = status
+        self.payload = payload
+        self.calls = []
+
+    def get(self, url, headers=None):
+        self.calls.append({"method": "GET", "url": url, "headers": headers or {}, "data": None})
+        return _FakeResponse(self.status, self.payload)
+
+    def post(self, url, headers=None, data=None):
+        self.calls.append({"method": "POST", "url": url, "headers": headers or {}, "data": data})
+        return _FakeResponse(self.status, self.payload)
+
+
+class _FakeContext:
+    def __init__(self, cookies):
+        self._cookies = cookies
+
+    def cookies(self):
+        return self._cookies
+
+
+class _FakePage:
+    def __init__(self, cookies=(), status=200, payload=None):
+        self.context = _FakeContext(list(cookies))
+        self.request = _FakeRequest(status, payload)
+
+
+def _log_file(tmp_path, monkeypatch):
+    monkeypatch.setattr(observability, "LOG_DIR", tmp_path / "logs")
+    monkeypatch.setattr(observability, "LOG_FILE", tmp_path / "logs" / "agent.jsonl")
+    return tmp_path / "logs" / "agent.jsonl"
+
+
+def test_the_token_is_found_among_the_other_session_cookies():
+    """A real session carries a dozen cookies; the token is one of them."""
+    page = _FakePage(cookies=[
+        {"name": "ASP.NET_SessionId", "value": "abc"},
+        {"name": "XSRF-TOKEN", "value": "the-token"},
+        {"name": "ai_user", "value": "telemetry"},
+    ])
+
+    assert _extract_xsrf_token(page) == "the-token"
+
+
+def test_a_session_without_the_token_fails_loudly_and_says_what_to_do(tmp_path, monkeypatch):
+    """The alternative is calling the API with no authorisation and reporting the
+    403 as if the portal were broken."""
+    log_file = _log_file(tmp_path, monkeypatch)
+    page = _FakePage(cookies=[{"name": "ASP.NET_SessionId", "value": "abc"}])
+
+    with pytest.raises(ScrapeError):
+        _extract_xsrf_token(page)
+
+    record = _json.loads(log_file.read_text().splitlines()[-1])
+    assert record["code"] == "XSRF_TOKEN_MISSING"
+    assert record["operation"] == "extract_xsrf_token"
+    assert "bootstrap_login" in record["remediation"], "the fix is re-establishing the session"
+    assert record["context"]["service_key"] == SERVICE_KEY
+
+
+def test_both_calls_send_the_token_in_the_header_buildium_requires():
+    """X-XSRF-TOKEN exactly. Any other spelling 403s every call, and only live."""
+    page = _FakePage(status=200, payload={"ok": True})
+
+    _fetch_json(page, "https://x/api/thing", "tok-1")
+    _post_json(page, "https://x/api/thing", {"a": 1}, "tok-2")
+
+    get_call, post_call = page.request.calls
+    assert get_call["headers"]["X-XSRF-TOKEN"] == "tok-1"
+    assert post_call["headers"]["X-XSRF-TOKEN"] == "tok-2"
+    assert get_call["headers"]["Content-Type"] == "application/json"
+    assert post_call["headers"]["Content-Type"] == "application/json"
+
+
+def test_a_posted_body_goes_as_a_json_string():
+    """Buildium reads the body as JSON; handing it a dict would send form data."""
+    page = _FakePage(payload=[])
+
+    _post_json(page, "https://x/api/thing", {"AccountIds": ["1", "2"]}, "tok")
+
+    sent = page.request.calls[0]["data"]
+    assert isinstance(sent, str)
+    assert _json.loads(sent) == {"AccountIds": ["1", "2"]}
+
+
+@pytest.mark.parametrize("status", [401, 403, 500])
+def test_a_rejected_get_is_an_error_not_an_empty_ledger(tmp_path, monkeypatch, status):
+    """Returning [] here would read as "a quiet month" and under-report the books."""
+    log_file = _log_file(tmp_path, monkeypatch)
+    page = _FakePage(status=status, payload=None)
+
+    with pytest.raises(ScrapeError):
+        _fetch_json(page, "https://x/api/thing", "tok")
+
+    record = _json.loads(log_file.read_text().splitlines()[-1])
+    assert record["code"] == "HTTP_ERROR"
+    assert record["context"]["status"] == status
+
+
+def test_a_rejected_post_is_an_error_too(tmp_path, monkeypatch):
+    log_file = _log_file(tmp_path, monkeypatch)
+    page = _FakePage(status=403, payload=None)
+
+    with pytest.raises(ScrapeError):
+        _post_json(page, "https://x/api/thing", {"a": 1}, "tok")
+
+    record = _json.loads(log_file.read_text().splitlines()[-1])
+    assert record["code"] == "HTTP_ERROR"
+    assert record["operation"] == "post_json"
+
+
+def test_the_token_reaches_the_account_lookup():
+    """The wiring between extraction and use: the account list is the first call
+    of every run, so a token that doesn't get passed through fails immediately."""
+    page = _FakePage(payload=[{"Id": 7}, {"Id": 9}])
+
+    ids = _get_gl_account_ids(page, "tok")
+
+    assert ids == ["7", "9"], "ids come back as strings — the payload wants strings"
+    assert page.request.calls[0]["headers"]["X-XSRF-TOKEN"] == "tok"
+    assert "excludeBankAccounts=true" in page.request.calls[0]["url"]
