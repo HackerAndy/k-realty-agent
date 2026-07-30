@@ -306,6 +306,11 @@ def registry(monkeypatch, sources):
                 if s.key == key:
                     sources[i] = s.model_copy(update={"email_search": search})
 
+        def update(self, key, **fields):
+            for i, s in enumerate(sources):
+                if s.key == key:
+                    sources[i] = s.model_copy(update=fields)
+
     monkeypatch.setattr(mcp_tools, "ServiceManifest", FakeManifest)
     return sources
 
@@ -320,9 +325,49 @@ def test_a_second_inbox_can_be_added(registry, no_token):
     assert st["connected"] is False, "it still has to be signed in"
 
 
-def test_a_nameless_inbox_is_refused(registry, no_token):
-    with pytest.raises(mcp_tools.ToolError, match="name"):
-        mcp_tools.add_inbox("   ")
+def test_a_mailbox_can_be_added_without_naming_it_first(registry, no_token):
+    """Being made to invent a name BEFORE signing in is busywork — the address is
+    the obvious name, and Google only tells us at consent."""
+    st = mcp_tools.add_inbox()
+
+    added = next(s for s in registry if s.key == st["source_key"])
+    assert added.input_type == "email_trigger"
+    assert st["provisional"] is True, "the screen knows the name is a placeholder"
+
+
+def test_the_address_becomes_the_name_once_it_is_known(registry, no_token):
+    st = mcp_tools.add_inbox()
+
+    renamed = mcp_tools.rename_inbox(st["source_key"], "rentals@krealtyllc.org")
+
+    assert renamed["label"] == "rentals@krealtyllc.org"
+    assert renamed["provisional"] is False
+
+
+def test_a_nickname_replaces_it_and_nothing_else_moves(registry, no_token):
+    """Renaming must not disturb the key, the token, or the sources pointed at it
+    — the label is the only thing anyone sees."""
+    st = mcp_tools.add_inbox()
+    key = st["source_key"]
+    no_token.set(f"email_oauth::{key}", refresh_token="rt", account_email="me@k.org")
+
+    mcp_tools.rename_inbox(key, "Rentals")
+
+    from core.tools import email_oauth
+    assert next(s for s in registry if s.key == key).label == "Rentals"
+    assert email_oauth.is_configured(key) is True
+
+
+def test_renaming_to_nothing_is_refused(registry, no_token):
+    st = mcp_tools.add_inbox()
+    with pytest.raises(mcp_tools.ToolError, match="needs a name"):
+        mcp_tools.rename_inbox(st["source_key"], "   ")
+
+
+def test_unnamed_mailboxes_do_not_collide(registry, no_token):
+    first = mcp_tools.add_inbox()["source_key"]
+    second = mcp_tools.add_inbox()["source_key"]
+    assert first != second
 
 
 def test_adding_an_inbox_that_is_already_here_is_refused(registry, no_token):

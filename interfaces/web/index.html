@@ -2078,30 +2078,40 @@
     return credRowHTML(c.key, c.label, badge, c.login_url ? esc(c.login_url) : '', body);
   }
 
+  /** No name asked for: signing in is the point, and the address is the obvious
+   *  name — which Google only tells us at consent. So this is one button. */
   function addInboxHTML() {
-    return '<div class="cred">' +
-      '<div class="field"><label for="new-inbox">Add another mailbox</label>' +
-      '<input type="text" id="new-inbox" placeholder="e.g. Rentals mailbox" autocomplete="off">' +
-      '<span class="sub">Name it, then sign in to it — several sources can share one mailbox, ' +
-      'and different sources can use different mailboxes.</span></div>' +
-      '<div class="row"><button class="btn" onclick="addInbox()">Add mailbox</button></div></div>';
+    return '<div class="row" style="margin-top:2px">' +
+      '<button class="btn" onclick="addInbox()">Add mailbox</button></div>';
   }
 
   async function addInbox() {
-    const node = el('new-inbox');
-    const label = node ? node.value.trim() : '';
-    if (!label) { toast('Give the mailbox a name first.', false); return; }
     clearToast();
     try {
-      const st = await callTool('add_inbox', { label });
+      const st = await callTool('add_inbox', {});
       emailCache[st.source_key] = st;
       credCache = null;
       await loadCredentials();
-      credOpen[st.source_key] = true;      // open it: signing in is the next step
-      await renderSettings();
-      toast('Added ' + label + '. Next: sign in to it.', true);
+      credOpen[st.source_key] = true;
+      startGmailSetup(st.source_key);        // straight into the walkthrough
     } catch (e) {
       toast('Couldn’t add it: ' + e.message, false);
+    }
+  }
+
+  async function renameInbox(key) {
+    const node = el('inbox-name-' + sourceDomId(key));
+    const label = node ? node.value.trim() : '';
+    if (!label) { toast('A mailbox needs a name — its address is a fine one.', false); return; }
+    clearToast();
+    try {
+      emailCache[key] = await callTool('rename_inbox', { source_key: key, label });
+      credCache = null;
+      await loadCredentials();
+      await renderSettings();
+      toast('Renamed to ' + label + '.', true);
+    } catch (e) {
+      toast('Couldn’t rename it: ' + e.message, false);
     }
   }
 
@@ -2177,7 +2187,15 @@
       return credRowHTML(c.key, c.label, badge, aside, failed + body + picker);
     }
 
-    // Connected: what it's used for, and the three things you can do to it.
+    // Connected: its name (the address by default), what it's used for, and the
+    // three things you can do to it.
+    const nameField =
+      '<div class="field"><label for="inbox-name-' + sid + '">Name</label>' +
+      '<input type="text" id="inbox-name-' + sid + '" value="' + esc(c.label) + '" autocomplete="off">' +
+      '<span class="sub">The address it signed in as, unless you give it a nickname — handy once ' +
+      'there is more than one.</span></div>' +
+      '<div class="row" style="margin-bottom:10px">' +
+      '<button class="btn" onclick="renameInbox(\'' + c.key + '\')">Save name</button></div>';
     const controls = '<div class="row">' +
       '<button class="btn" onclick="reapproveInbox(\'' + c.key + '\')">Re-approve access</button>' +
       deleteInboxButton(c, st) + '</div>' +
@@ -2185,7 +2203,7 @@
       'myaccount.google.com/permissions — the harness kept this mailbox’s OAuth client, so there is ' +
       'no file to download again.</p>';
     return credRowHTML(c.key, c.label, badge, aside,
-      failed + inboxUsersHTML(st) + controls + picker);
+      failed + inboxUsersHTML(st) + nameField + controls + picker);
   }
 
   /** Deleting a mailbox that a source still arrives through would leave that
@@ -2248,7 +2266,15 @@
   ];
 
   function startGmailSetup(key) { oauthSetup.key = key; oauthSetup.step = 0; renderSettings(); }
-  function cancelGmailSetup() { oauthSetup.key = null; oauthSetup.step = 0; renderSettings(); }
+  function cancelGmailSetup() {
+    const key = oauthSetup.key;
+    oauthSetup.key = null; oauthSetup.step = 0;
+    // A mailbox added by pressing "Add mailbox" has no name and no token yet.
+    // Backing out of the walkthrough should leave nothing behind.
+    const st = key && emailCache[key];
+    if (st && st.provisional && !st.connected) return deleteInbox(key);
+    renderSettings();
+  }
   function gmailStepBack() {
     if (oauthSetup.step === 0) return cancelGmailSetup();
     oauthSetup.step -= 1; renderSettings();
@@ -2348,6 +2374,14 @@
         ? {}
         : { status: 'failed', message: [s.message, s.remediation].filter(Boolean).join(' ') };
       await loadEmailStatus(key);
+      // Now we know the address, so an unnamed mailbox names itself. A nickname
+      // is offered on the card for anyone with more than one.
+      if (s.status === 'completed' && s.account_email && (emailCache[key] || {}).provisional) {
+        try { emailCache[key] = await callTool('rename_inbox', { source_key: key, label: s.account_email }); }
+        catch (e) { /* it stays "New mailbox"; the name field is right there */ }
+        credCache = null;
+        await loadCredentials();
+      }
       await renderSettings();
       if (s.status === 'completed') toast('Connected ' + (s.account_email || 'the inbox') + '.', true);
     };

@@ -49,6 +49,9 @@ _LOGIN_RECOVERY_META: dict[str, dict[str, str]] = {}
 _BUILD_PROCS: dict[str, subprocess.Popen] = {}
 _BUILD_META: dict[str, dict[str, str]] = {}
 
+# The label an unnamed mailbox wears until consent tells us its address.
+PROVISIONAL_INBOX_LABEL = "New mailbox"
+
 # Gmail consent blocks on a browser, so it runs out-of-process too.
 _CONSENT_PROCS: dict[str, subprocess.Popen] = {}
 _CONSENT_META: dict[str, dict[str, str]] = {}
@@ -210,6 +213,9 @@ def email_status(source_key: str) -> dict:
         "source_key": source_key,
         "label": service.label,
         "provider": service.provider or "gmail",
+        # Still wearing the placeholder name: the caller fills it in from the
+        # address once consent has told us what that is.
+        "provisional": service.label == PROVISIONAL_INBOX_LABEL,
         "connected": email_oauth.is_configured(source_key),
         "account_email": email_oauth.account_email(source_key),
         # Sources whose documents arrive through THIS inbox, with what each looks
@@ -223,23 +229,34 @@ def email_status(source_key: str) -> dict:
     }
 
 
-def add_inbox(label: str) -> dict:
+def add_inbox(label: str = "") -> dict:
     """Add another mailbox for the harness to read.
 
     An inbox is a way IN, shared by whatever sources arrive through it — so
     having several is normal (a business mailbox and a personal one, say). It
     starts unconnected; the Gmail walkthrough in Settings does the sign-in.
+
+    No name needed. Being made to invent one BEFORE signing in is busywork: the
+    address is the obvious name and Google tells us what it is at consent, so the
+    label is filled in then (rename_inbox gives it a nickname afterwards).
     """
     from core.tools.service_manifest import Service, ServiceManifestError
 
+    services = _load_services()
     label = (label or "").strip()
-    if not label:
-        raise ToolError("Give the inbox a name — it's how you'll tell it apart from the others.")
-    key = _slug(label)
-    if not key:
-        raise ToolError(f"'{label}' has no letters or digits to make a key from — try another name.")
-    if any(s.key == key for s in _load_services()):
-        raise ToolError(f"'{label}' is already here (key '{key}'). Pick a different name.")
+    if label:
+        key = _slug(label)
+        if not key:
+            raise ToolError(f"'{label}' has no letters or digits to make a key from — try another name.")
+        if any(s.key == key for s in services):
+            raise ToolError(f"'{label}' is already here (key '{key}'). Pick a different name.")
+    else:
+        # A key is an internal identifier, never shown; only the label is. So an
+        # unnamed mailbox gets a free key and a placeholder label to replace.
+        label = PROVISIONAL_INBOX_LABEL
+        taken = {s.key for s in services}
+        key = next(k for k in (f"mailbox{'' if n == 1 else f'_{n}'}" for n in range(1, 999))
+                   if k not in taken)
 
     try:
         ServiceManifest().add(Service(key=key, label=label, input_type="email_trigger",
@@ -250,6 +267,23 @@ def add_inbox(label: str) -> dict:
     log.event(operation="add_inbox", code="INBOX_ADDED",
               message=f"Added inbox '{label}'.", context={"source_key": key})
     return email_status(key)
+
+
+def rename_inbox(source_key: str, label: str) -> dict:
+    """Rename a mailbox — its address by default, or a nickname if you have
+    several. Only the label changes; the key, the token, and every source
+    pointing at it are untouched."""
+    label = (label or "").strip()
+    if not label:
+        raise ToolError("A mailbox needs a name — its address is a fine one.")
+    inbox = next((s for s in _load_services() if s.key == source_key), None)
+    if inbox is None:
+        raise ToolError(f"Unknown inbox '{source_key}'.")
+    if not source_status.is_trigger(inbox):
+        raise ToolError(f"'{inbox.label}' isn't an inbox.")
+
+    ServiceManifest().update(source_key, label=label)
+    return email_status(source_key)
 
 
 def delete_inbox(source_key: str) -> dict:
@@ -1856,6 +1890,7 @@ ACTION_TOOLS = [
     start_gmail_consent,
     gmail_consent_status,
     add_inbox,
+    rename_inbox,
     delete_inbox,
     reapprove_inbox,
     save_email_search,
