@@ -67,6 +67,13 @@ def hardcoded_options(path: str) -> list[dict]:
     An `_extract()` mapping is unaffected: its dict values are expressions over
     the response, not literals.
 
+    The SETTINGS declaration itself is exempt, and has to be: a schema entry is a
+    dict of literal strings — `{"key": ..., "label": ..., "default": ...}` — i.e.
+    exactly the shape this looks for. Without this the gate reports the very fix it
+    just demanded, the agent declares settings, gets told it hardcoded choices, and
+    goes round again. That happened: 22 findings, all of them inside a correct
+    SETTINGS block.
+
     ESCAPE HATCH: a line carrying `# fixed:` is exempt. Some values genuinely are
     protocol, not preference, and the right answer there is a written reason
     rather than silence — which is also why the exemption is per line and has to
@@ -81,9 +88,19 @@ def hardcoded_options(path: str) -> list[dict]:
 
     lines = source.splitlines()
 
+    # Every line spanned by the module-level SETTINGS assignment — the declaration
+    # is the answer, not an offence.
+    settings_lines: set[int] = set()
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+            getattr(t, "id", None) == "SETTINGS" for t in node.targets
+        ):
+            last = getattr(node, "end_lineno", node.lineno)
+            settings_lines.update(range(node.lineno, last + 1))
+
     def exempt(lineno: int) -> bool:
         line = lines[lineno - 1] if 0 < lineno <= len(lines) else ""
-        return "# fixed:" in line
+        return "# fixed:" in line or lineno in settings_lines
 
     def literal(node) -> bool:
         return isinstance(node, ast.Constant) and isinstance(node.value, (str, int, float, bool))
@@ -215,3 +232,50 @@ def covers_changes(test_path: str, code_paths: list[str], timeout: int = 300) ->
         "detail": "Every changed line ran under the test." if not uncovered else
                   "; ".join(f"{p} lines {ls}" for p, ls in uncovered.items()),
     }
+
+
+def blockers(verification: dict) -> list[str]:
+    """Why a build isn't approvable, in the operator's words, most actionable first.
+
+    The GUI used to say "its test did NOT pass" for every refusal, whatever the
+    actual reason. That is wrong most of the time and actively misleading some of
+    it: a run once failed only because the agent wrote no file on its final turn,
+    while its test passed 17/17 — and the screen sent the operator to debug a test
+    that was fine. Whatever refused the build has to be the thing that's named.
+    """
+    if not verification or verification.get("ok"):
+        return []
+
+    out: list[str] = []
+    test = verification.get("test") or {}
+    if test.get("missing"):
+        out.append("No test was written for the change, and the harness won't ship untested code.")
+    elif test and not test.get("ok"):
+        # No `ok` at all counts as failing: a refusal with test output attached and
+        # no verdict must not come out as "no reason was recorded".
+        out.append("Its test failed when the harness re-ran it independently.")
+
+    if verification.get("no_changes"):
+        out.append("The agent reported success without writing any file, so nothing changed. "
+                   "(Its earlier edits, if any, are still on disk — check the diff.)")
+
+    uncovered = verification.get("uncovered_changes") or {}
+    if uncovered:
+        detail = "; ".join(f"{path} lines {sorted(lines)}" for path, lines in uncovered.items())
+        out.append(f"The test passes but never runs the lines that changed — {detail}.")
+
+    hardcoded = verification.get("hardcoded_options") or {}
+    if hardcoded:
+        detail = "; ".join(
+            f"{path} line {item['line']} ({item['detail']})"
+            for path, found in hardcoded.items() for item in found)
+        out.append(f"Choices the operator should be able to change are still baked into the "
+                   f"code — {detail}.")
+
+    if verification.get("registered") is False:
+        out.append(verification.get("registration_detail")
+                   or "The module isn't registered, so nothing can call it yet.")
+
+    if not out:
+        out.append(verification.get("error") or "The build was refused, but no reason was recorded.")
+    return out

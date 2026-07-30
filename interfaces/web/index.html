@@ -1558,7 +1558,14 @@
     const txns = v.transactions || [];
     let verdict;
     if (!st.passed) {
-      verdict = '<div class="verdict fail">Not usable yet — the test did not pass</div>';
+      // Name what actually refused it. "The test did not pass" was shown for every
+      // refusal — including a run whose test passed 17/17 and was refused because
+      // the agent's last turn wrote no file.
+      const why = (st.blockers && st.blockers.length)
+        ? '<ul style="margin:6px 0 0 18px;padding:0">' +
+          st.blockers.map(b => '<li>' + esc(b) + '</li>').join('') + '</ul>'
+        : '';
+      verdict = '<div class="verdict fail">Not usable yet</div>' + why;
     } else if (kind === 'scraper') {
       // A scraper self-registers; the proof is its test, and then a real run.
       verdict = '<div class="verdict pass">Test passed' +
@@ -1568,7 +1575,28 @@
     }
 
     let body = verdict;
-    if (r.agent_summary) body += '<div class="label">What the agent did</div><div class="stream">' + esc(r.agent_summary) + '</div>';
+
+    // What it did, as a short list of acts. The model's own account of the run can
+    // be tens of thousands of characters — unreadable, and it buries the outcome —
+    // so the acts come from the recorded tool calls and the prose is a click away.
+    const did = st.did || {};
+    if ((did.files || []).length || (did.commands || []).length || did.reads) {
+      const bits = [];
+      if ((did.files || []).length) bits.push('<b>Wrote</b> ' + did.files.map(esc).join(', '));
+      if ((did.commands || []).length) bits.push('<b>Ran</b> ' + did.commands.length +
+        ' command' + (did.commands.length > 1 ? 's' : '') + ': ' +
+        did.commands.slice(0, 3).map(c => '<code>' + esc(c) + '</code>').join(', '));
+      if (did.reads) bits.push('Read ' + did.reads + ' file' + (did.reads > 1 ? 's' : ''));
+      if (!(did.files || []).length) bits.push('<b>Wrote no file</b>');
+      body += '<div class="label">What it did</div>' +
+        '<div class="note" style="margin:0 0 10px">' + bits.join(' · ') + '</div>';
+    }
+    if (r.agent_summary) {
+      body += '<details style="margin-bottom:10px"><summary style="cursor:pointer;font-size:12px;' +
+        'color:var(--muted)">Its own account of the run (' +
+        r.agent_summary.length.toLocaleString() + ' characters)</summary>' +
+        '<div class="stream">' + esc(r.agent_summary) + '</div></details>';
+    }
 
     // The gate: the harness re-ran the agent's own test in a clean subprocess.
     body += '<div class="label">Independent test run' + (test.ok ? ' — passed' : ' — failed') + '</div>' +
@@ -1650,7 +1678,8 @@
     if (kind === 'scraper' && demo && demo.demo_path) args.demo_path = demo.demo_path;
     try {
       await callTool('start_build', args);
-      st.status = 'running'; st.events = []; st.result = null; st.passed = false; st.message = null;
+      st.status = 'running'; st.events = []; st.result = null; st.passed = false;
+      st.blockers = []; st.did = null; st.message = null;
       st.token = (st.token || 0) + 1;
       await renderIngest();
       pollBuild(key, st.token);
@@ -1692,10 +1721,13 @@
       st.status = s.status;
       st.result = s.result || null;
       st.passed = !!s.passed;
+      st.blockers = s.blockers || [];
+      st.did = s.did || null;
       st.message = s.message || null;
       if (s.status === 'completed') {
         toast(s.passed ? 'Build finished and its test passed — review it below.'
-                       : 'Build finished, but its test did NOT pass. Not approvable.', !!s.passed);
+                       : ('Not approvable: ' + (st.blockers[0] || 'the build was refused.')),
+              !!s.passed);
       } else {
         toast('Build failed: ' + (s.message || 'unknown error'), false);
       }
@@ -1732,7 +1764,8 @@
 
   function resetBuild(key) {
     const st = bs(key);
-    st.status = 'idle'; st.events = []; st.result = null; st.passed = false; st.message = null;
+    st.status = 'idle'; st.events = []; st.result = null; st.passed = false;
+    st.blockers = []; st.did = null; st.message = null;
     st.expanded = undefined;          // back to "only show me when I'm needed"
     st.token = (st.token || 0) + 1;   // orphan any in-flight poller
     renderIngest();

@@ -239,6 +239,54 @@ def _extract(rows):
 ''')
         assert found == []
 
+    def test_the_settings_declaration_itself_is_not_an_offence(self, tmp_path, monkeypatch):
+        """The gate demanded a SETTINGS list, then reported the SETTINGS list as
+        hardcoded choices — a schema entry is literally a dict of literal strings.
+        A real run produced 22 findings, every one of them inside a correct
+        declaration, so the agent could never satisfy the gate it was answering."""
+        found = self._scan(tmp_path, monkeypatch, '''
+SETTINGS = [
+    {
+        "key": "lookback_days",
+        "label": "Lookback days",
+        "type": "number",
+        "default": 30,
+        "help": "Number of days before today to include.",
+    },
+    {
+        "key": "accounting_basis",
+        "label": "Accounting basis",
+        "type": "choice",
+        "default": "cash",
+        "options": [
+            {"value": "accrual", "label": "Accrual"},
+            {"value": "cash", "label": "Cash"},
+        ],
+    },
+]
+''')
+        assert found == []
+
+    def test_a_frozen_payload_is_still_caught_alongside_a_settings_block(self, tmp_path, monkeypatch):
+        """The exemption is the declaration, not the file: declaring some options
+        must not buy silence about the ones still baked in."""
+        found = self._scan(tmp_path, monkeypatch, '''
+SETTINGS = [
+    {"key": "lookback_days", "label": "Lookback days", "type": "number", "default": 30},
+]
+
+def retrieve():
+    body = {
+        "PropertySelectionType": "AllProperties",
+        "AccountingBasis": 1,
+        "IncludeFundType": True,
+    }
+    return body
+''')
+        details = {f["detail"] for f in found}
+        assert "IncludeFundType=True" in details
+        assert not any("lookback_days" in d or "Lookback days" in d for d in details)
+
     def test_a_fixed_line_can_be_exempted_with_a_stated_reason(self, tmp_path, monkeypatch):
         """Some values really are protocol. The escape hatch is per line and has
         to say something, so the justification is visible in review."""

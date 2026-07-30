@@ -1827,9 +1827,17 @@ def build_status(source_key: str, event_offset: int = 0) -> dict:
         ]
         return payload
 
+    from orchestration import verify as _verify
+
     verification = (result or {}).get("verification") or {}
     payload["result"] = result
     payload["passed"] = bool(verification.get("ok"))
+    # WHY it was refused, named specifically. "Its test did NOT pass" was reported
+    # for every refusal, including runs whose test passed.
+    payload["blockers"] = _verify.blockers(verification)
+    # WHAT it did, as files and commands. The agent's own prose can run to tens of
+    # thousands of characters; the list of files it wrote cannot.
+    payload["did"] = _what_it_did(result or {})
 
     # The agent just rewrote this source's module on disk, but THIS process still
     # has the version it imported at startup — so without a reload the operator
@@ -1839,14 +1847,38 @@ def build_status(source_key: str, event_offset: int = 0) -> dict:
         payload["reload"] = hot_reload.reload_source_code(kind, source_key)
         meta["reloaded"] = True
     if not payload["passed"]:
-        # Ran, but the code isn't acceptable — say so plainly instead of implying success.
+        # Ran, but the code isn't acceptable — say so plainly instead of implying
+        # success, and put the REASON on the step rather than the test output (which
+        # may well read "17 passed" and send the operator the wrong way).
+        reason = "; ".join(payload["blockers"]) or "The build was refused."
         payload["steps"] = [
-            {**s, "status": "failed",
-             "error": (verification.get("test") or {}).get("output", "")[-2000:] or verification.get("error", "")}
-            if s["key"] == "verify" else s
+            {**s, "status": "failed", "error": reason} if s["key"] == "verify" else s
             for s in payload["steps"]
         ]
     return payload
+
+
+def _what_it_did(result: dict) -> dict:
+    """The agent's run as a short list of acts: files written, commands run, files
+    read. Derived from the recorded tool calls, so it can't drift from what it
+    actually did — and it stays readable however long the model's prose gets."""
+    files: list[str] = []
+    commands: list[str] = []
+    reads = 0
+    for call in result.get("tool_calls") or []:
+        try:
+            name, args = call[0], call[1] or {}
+        except (IndexError, TypeError):
+            continue
+        if name == "write_file":
+            path = str(args.get("path") or "")
+            if path and path not in files:
+                files.append(path)
+        elif name == "run_command":
+            commands.append(str(args.get("command") or ""))
+        else:
+            reads += 1
+    return {"files": files, "commands": commands, "reads": reads}
 
 
 def activate_parser(source_key: str) -> dict:

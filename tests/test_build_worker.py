@@ -225,7 +225,9 @@ def test_build_status_completed_but_test_failed_is_not_passed(tmp_path, monkeypa
     assert st["status"] == "completed"
     assert st["passed"] is False
     verify = next(s for s in st["steps"] if s["key"] == "verify")
-    assert verify["status"] == "failed" and "1 failed" in verify["error"]
+    assert verify["status"] == "failed"
+    assert "test failed" in verify["error"], "the step says WHICH gate refused it"
+    assert st["blockers"] == ["Its test failed when the harness re-ran it independently."]
 
 
 def test_build_status_untested_code_is_not_passed(tmp_path, monkeypatch):
@@ -263,3 +265,51 @@ def test_build_status_nonzero_exit_without_a_result_is_failed(tmp_path, monkeypa
     """A killed worker (no result, no failed line) must not read as completed."""
     _seed(tmp_path, monkeypatch, [{"type": "event", "text": "started"}], exit_code=-9)
     assert mcp_tools.build_status("k")["status"] == "failed"
+
+
+def test_a_refusal_names_the_gate_that_refused_it_not_the_test(tmp_path, monkeypatch):
+    """THE misreport, from a real run: verification failed because the agent's last
+    turn wrote no file, while its test passed 17/17 — and the screen said "its test
+    did NOT pass", sending the operator to debug a test that was fine."""
+    _seed(tmp_path, monkeypatch, [
+        {"type": "result", "result": {
+            "verification": {"ok": False, "no_changes": True,
+                             "test": {"ok": True, "output": "17 passed"}},
+            "tool_calls": [["read_file", {"path": "core/scrapers/x.py"}],
+                           ["read_file", {"path": "core/settings.py"}]],
+        }},
+    ], exit_code=0)
+
+    st = mcp_tools.build_status("k")
+
+    assert st["passed"] is False
+    assert st["blockers"], "a refusal always says why"
+    assert "without writing any file" in st["blockers"][0]
+    assert not any("test" in b and "failed" in b for b in st["blockers"]), \
+        "the test passed; nothing may claim otherwise"
+    verify = next(s for s in st["steps"] if s["key"] == "verify")
+    assert "17 passed" not in verify["error"], "passing output is not an error message"
+
+
+def test_a_run_reports_what_it_did_as_acts_not_prose(tmp_path, monkeypatch):
+    """The model's own account of a run reached 82,000 characters — unreadable, and
+    it buried the outcome. What it DID is a short list, taken from its tool calls."""
+    _seed(tmp_path, monkeypatch, [
+        {"type": "result", "result": {
+            "verification": {"ok": True, "test": {"ok": True}},
+            "agent_summary": "x" * 50_000,
+            "tool_calls": [
+                ["read_file", {"path": "core/scrapers/x.py"}],
+                ["write_file", {"path": "core/scrapers/x.py"}],
+                ["write_file", {"path": "core/scrapers/x.py"}],
+                ["write_file", {"path": "tests/test_scraper_x.py"}],
+                ["run_command", {"command": "poetry run pytest tests/test_scraper_x.py"}],
+            ],
+        }},
+    ], exit_code=0)
+
+    did = mcp_tools.build_status("k")["did"]
+
+    assert did["files"] == ["core/scrapers/x.py", "tests/test_scraper_x.py"], "written once each"
+    assert did["commands"] == ["poetry run pytest tests/test_scraper_x.py"]
+    assert did["reads"] == 1
