@@ -101,6 +101,32 @@ Prefer the **API** path, fall back to **replaying clicks**:
    declare what the operator would plausibly change; leave genuinely fixed
    protocol details (endpoint paths, header names) as code.
 
+   **A setting you declare must actually reach the request.** Reading a value
+   and then not using it is worse than hardcoding, because the screen offers a
+   choice that silently does nothing. The build fails on it: a value you compute
+   and never use is reported back to you as an unconnected wire.
+
+   **Choices only the portal knows** — the properties on an account, the
+   accounts in a ledger — are declared `"discovered": True` with whatever
+   catch-all exists before any run, and published once the portal has answered:
+
+   ```python
+   SETTINGS = [
+       {"key": "property_id", "label": "Property", "type": "choice", "default": "all",
+        "options": [{"value": "all", "label": "All properties"}], "discovered": True},
+   ]
+
+   def retrieve() -> list[Transaction]:
+       ...
+       settings.record_options(SERVICE_KEY, "property_id",
+                               [{"value": p["Id"], "label": p["Name"]} for p in props])
+   ```
+
+   Use `settings.record_options` and nothing else for this. Do NOT write to
+   `core/policies/source_settings.yaml` yourself, and do NOT modify `SETTINGS`
+   at import time — a module that rewrites its own declaration as a side effect
+   of being imported makes the schema depend on import order.
+
 5. **Record the source's own control totals — do this whenever the source
    publishes any.** Most financial sources state their own arithmetic: a
    per-account `Total`, a balance line, a row count, an ending balance. Compare

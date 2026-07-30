@@ -985,6 +985,10 @@ def source_settings(source_key: str) -> dict:
         "schema": schema,
         "values": settings.values_for(source_key),
         "overridden": sorted(settings.stored_for(source_key)),
+        # A choice the portal has stopped offering — a property removed from the
+        # account. Left unsaid, the next run quietly falls back to everything and
+        # the numbers change with no explanation.
+        "stale": settings.stale_values(source_key),
     }
 
 

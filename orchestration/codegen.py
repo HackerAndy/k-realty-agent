@@ -18,7 +18,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from orchestration.agent import AgentResult, run_agent
-from orchestration.verify import covers_changes, hardcoded_options
+from orchestration.verify import covers_changes, hardcoded_options, lint
 
 # Prepended to EVERY code-gen system prompt — the rules that apply to ALL code the
 # embedded agent writes, regardless of the specific task.
@@ -133,6 +133,23 @@ def fold_hardcoded(verification: dict, tool_calls: list[tuple[str, dict]]) -> di
     return verification
 
 
+def fold_lint(verification: dict, tool_calls: list[tuple[str, dict]]) -> dict:
+    """Code that reads as if it works and doesn't.
+
+    Epic's scraper computed a property filter from the operator's selection and
+    then never used it, so choosing a property silently did nothing. Every other
+    gate was green: the settings were declared, read at run time, and the test
+    passed — because the tests checked the declaration's SHAPE and nothing checked
+    that a chosen value reached the request. A dead store is that bug, and ruff
+    names it for free.
+    """
+    findings = lint(files_written(tool_calls))
+    if findings:
+        verification["lint"] = findings
+        verification["ok"] = False
+    return verification
+
+
 def fold_noop(verification: dict, tool_calls: list[tuple[str, dict]]) -> dict:
     """A fix that changed NOTHING is not a success, however green the tests look.
 
@@ -183,6 +200,7 @@ def run_codegen_gated(
         if test_path and not v.get("untested_code"):
             v = fold_uncovered(v, res.tool_calls, test_path)
         v = fold_hardcoded(v, res.tool_calls)
+        v = fold_lint(v, res.tool_calls)
         if require_changes:
             v = fold_noop(v, res.tool_calls)
         return v
@@ -219,6 +237,16 @@ def run_codegen_gated(
                 "demonstration as the DEFAULTS so behaviour is unchanged. If a value genuinely is "
                 "fixed protocol rather than a preference, leave it and add a `# fixed: <reason>` "
                 "comment on that line saying why."
+            )
+        if verification.get("lint"):
+            detail = "; ".join(
+                f"{f['path']} line {f['line']} {f['code']} {f['detail']}"
+                for f in verification["lint"])
+            reasons.append(
+                "Your code contains something that does nothing — " + detail + ". A value you "
+                "compute and never use is usually a wire you forgot to connect: if it came from "
+                "the operator's settings, the setting is silently being ignored. Either use it, "
+                "or delete it and say why it isn't needed."
             )
         if verification.get("no_changes"):
             reasons.append(

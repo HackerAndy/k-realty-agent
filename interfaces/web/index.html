@@ -1280,10 +1280,18 @@
         (f.help ? '<span class="sub">' + esc(f.help) + '</span>' : '') + '</div>';
     }).join('');
 
+    // A choice the portal has stopped offering. Silence here means the next run
+    // quietly falls back to "everything" and the numbers move for no visible
+    // reason, so it's said plainly and the field is left for the operator to re-pick.
+    const stale = (cfg.stale || []).map(f =>
+      '<p class="note" style="color:var(--danger);margin:0 0 10px">' +
+      '<b>' + esc(f.label) + '</b> is set to something the portal no longer offers (' +
+      esc(f.value) + '). Pick again, or the next pull will ignore it.</p>').join('');
+
     return '<div class="build-b" style="border-top:1px solid var(--border)">' +
       '<div class="label" style="margin-bottom:6px">What the call needs</div>' +
       '<p class="note" style="margin:0 0 12px">The choices the portal asks for before it ' +
-      'hands over data. They apply to the next pull — no code change needed.</p>' + fields +
+      'hands over data. They apply to the next pull — no code change needed.</p>' + stale + fields +
       '<div class="row"><button class="btn primary" onclick="saveOptions(\'' + s.key + '\')">Save options</button>' +
       (changed ? '<button class="btn" onclick="resetOptions(\'' + s.key + '\')">Back to defaults</button>' : '') +
       '</div></div>';

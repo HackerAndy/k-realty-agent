@@ -13,6 +13,7 @@ from __future__ import annotations
 import ast
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -130,6 +131,65 @@ def hardcoded_options(path: str) -> list[dict]:
                     add(value, "payload_literal", f"{key.value}={value.value!r}")
 
     return findings
+
+
+# Pyflakes plus the runtime-error checks — the rules that catch code which does
+# not do what it appears to do. Cosmetic rules are deliberately excluded: a gate
+# that blocks a build over line length teaches the agent to fight the formatter.
+LINT_RULES = "F,E9"
+
+
+def lint(paths: list[str], timeout: int = 60) -> list[dict]:
+    """Code that reads as if it works and doesn't.
+
+    The case that put this here: a scraper computed `property_filter` from the
+    operator's chosen property and then never used it, so the request always
+    asked for every property. Every other gate passed — the settings were
+    declared, read at run time, and the test was green — because the tests
+    checked the SHAPE of the declaration and nothing checked that the value
+    reached the request. Picking a property silently did nothing.
+
+    A dead store is exactly that failure, and it is free to detect: `ruff
+    --select F` names it F841. The gate already refuses untested code; refusing
+    code that discards its own inputs is the same principle.
+
+    Returns [] when ruff itself can't run — a missing linter is a reason to say
+    so, not a reason to fail every build.
+    """
+    # Only what is actually on disk. A path the agent reported writing but never
+    # wrote is a real problem — and one the no-changes and untested-code gates
+    # already name properly; letting ruff report it as "no such file" would bury
+    # that behind a linter error about a file, which explains nothing.
+    targets = [p for p in paths if p.endswith(".py") and (REPO_ROOT / p).is_file()]
+    if not targets:
+        return []
+    try:
+        # Run ruff as a module of THIS interpreter rather than through `poetry
+        # run`: the tool is then found from the environment already in use, not
+        # from whatever directory the check happens to run in.
+        proc = subprocess.run(
+            [sys.executable, "-m", "ruff", "check", f"--select={LINT_RULES}",
+             "--output-format=json", *[str(REPO_ROOT / p) for p in targets]],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    try:
+        import json
+        findings = json.loads(proc.stdout or "[]")
+    except (ValueError, TypeError):
+        return []
+
+    out: list[dict] = []
+    for item in findings:
+        location = item.get("location") or {}
+        out.append({
+            "path": item.get("filename", "").replace(str(REPO_ROOT) + "/", ""),
+            "line": location.get("row"),
+            "code": item.get("code"),
+            "detail": item.get("message", ""),
+        })
+    return out
 
 
 def declares_settings(path: str) -> bool:
@@ -271,6 +331,13 @@ def blockers(verification: dict) -> list[str]:
             for path, found in hardcoded.items() for item in found)
         out.append(f"Choices the operator should be able to change are still baked into the "
                    f"code — {detail}.")
+
+    findings = verification.get("lint") or []
+    if findings:
+        detail = "; ".join(
+            f"{f['path']} line {f['line']} ({f['detail']})" for f in findings)
+        out.append(f"The code contains something that does nothing, which usually means a wire "
+                   f"was left unconnected — {detail}.")
 
     if verification.get("agent_stopped"):
         out.append(verification["agent_stopped"])
