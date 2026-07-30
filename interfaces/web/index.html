@@ -338,6 +338,30 @@
   const sourceSettingsCache = {};  // source_key -> source_settings() result
   const svState = k => sourceView[k] || (sourceView[k] = { group: 'None', query: '' });
 
+  // ── Re-rendering a panel must not move the operator ───────────────────────
+  // Every button re-renders its whole panel, which replaces the DOM under the
+  // cursor. When the replacement is SHORTER — a "Loading…" placeholder is one
+  // line — the page shrinks, the browser clamps the scroll position to the top,
+  // and the operator is thrown back to the header after every click. Two rules
+  // fix it: never collapse a panel that is already showing this view, and put
+  // the scroll position back after the swap.
+  let panelShowing = null;      // which view the panel currently holds
+
+  function setPanel(html, view) {
+    const y = window.scrollY;
+    el('panel').innerHTML = html;
+    if (view) panelShowing = view;
+    // Only meaningful if the new content is tall enough to hold that position;
+    // if it isn't, the browser has already clamped and there is nothing to keep.
+    if (window.scrollY !== y) window.scrollTo(0, y);
+  }
+
+  /** A placeholder is a first paint only. Re-rendering a view the panel already
+   *  holds keeps the old content on screen until the new HTML is ready. */
+  function setPanelLoading(html, view) {
+    if (panelShowing !== view) setPanel(html, view);
+  }
+
   function toast(msg, ok) { const t = el('toast'); t.textContent = msg; t.style.display = ''; t.className = ok ? 'ok' : 'err'; }
   function clearToast() { const t = el('toast'); t.className = ''; t.style.display = 'none'; }
   function sourceDomId(sourceKey) { return String(sourceKey || '').replace(/[^a-zA-Z0-9_-]/g, '_'); }
@@ -492,14 +516,14 @@
   }
 
   function renderReporting() {
-    el('panel').innerHTML = '<div class="empty">Reporting — cross-source summaries, P&amp;L, and Schedule&nbsp;E — isn’t built yet. ' +
-      'It’s the third pillar, after ingested data has been processed. For now, validate each source’s data under <b>Ingest</b>.</div>';
+    setPanel('<div class="empty">Reporting — cross-source summaries, P&amp;L, and Schedule&nbsp;E — isn’t built yet. ' +
+      'It’s the third pillar, after ingested data has been processed. For now, validate each source’s data under <b>Ingest</b>.</div>', 'reporting');
   }
 
   function esc(v) { return String(v == null ? '' : v).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
   async function renderIngest() {
-    el('panel').innerHTML = '<div class="empty">Loading sources…</div>';
+    setPanelLoading('<div class="empty">Loading sources…</div>', 'ingest');
     const [sourcesRes, pendingRes] = await Promise.allSettled([
       callTool('list_sources'),
       callTool('pending_approvals')
@@ -507,7 +531,7 @@
 
     if (sourcesRes.status !== 'fulfilled') {
       const msg = (sourcesRes.reason && sourcesRes.reason.message) ? sourcesRes.reason.message : 'unknown error';
-      el('panel').innerHTML = '<div class="empty">Could not load sources: ' + msg + '</div>';
+      setPanel('<div class="empty">Could not load sources: ' + msg + '</div>', 'ingest');
       toast('Failed to load sources: ' + msg, false);
       return;
     }
@@ -524,7 +548,7 @@
     }
     const pendingKeys = new Set(pending.map(p => p.key));
 
-    if (!sources.length) { el('panel').innerHTML = '<div class="empty">No sources.</div>'; return; }
+    if (!sources.length) { setPanel('<div class="empty">No sources.</div>', 'ingest'); return; }
 
     // Load transactions for the open source before rendering its body.
     const openKey = ingestOpen.key;
@@ -567,7 +591,7 @@
     }
     html += '</div>';
     html += addSourceHTML(sources);
-    el('panel').innerHTML = html;
+    setPanel(html, 'ingest');
 
     // Rehydrate the open source's action step timeline + wire its file input.
     if (openKey) {
@@ -1933,15 +1957,15 @@
   }
 
   function renderProcess() {
-    el('panel').innerHTML = '<div class="empty">Data processing — categorization, reconciliation, and P&amp;L — isn’t built yet. ' +
-      'It’s deliberately deferred: ingested transactions are stored faithfully first.</div>';
+    setPanel('<div class="empty">Data processing — categorization, reconciliation, and P&amp;L — isn’t built yet. ' +
+      'It’s deliberately deferred: ingested transactions are stored faithfully first.</div>', 'process');
   }
 
   // ── Settings: which LLM the harness drives. Stored encrypted in .secrets/. ──
   const llmForm = { provider: null, models: [] };
 
   async function renderSettings() {
-    el('panel').innerHTML = '<div class="empty">Loading settings…</div>';
+    setPanelLoading('<div class="empty">Loading settings…</div>', 'settings');
     let cfg = {};
     try { cfg = await callTool('llm_status'); } catch (e) { cfg = { error: e.message }; }
     if (!credCache) await loadCredentials();
@@ -2004,12 +2028,12 @@
           esc(sameProvider && cfg.model ? cfg.model : '') + '" placeholder="type it exactly, or list them above"></div>');
     }
 
-    el('panel').innerHTML =
+    setPanel(
       '<div class="setting"><h2>LLM provider</h2>' +
       '<p class="note">Which model the harness uses to build parsers/scrapers and extract data.</p>' +
       '<div class="kv">' + currently + '</div>' + seg + form +
       '<div class="row"><button class="btn" onclick="saveLlmProvider()">Save provider</button></div></div>' +
-      credentialsHTML();
+      credentialsHTML(), 'settings');
   }
 
   // ── The sign-ins, grouped by TYPE and collapsed like the data sources ─────
@@ -2788,6 +2812,9 @@
   };
 
   function show(section) {
+    // A different view IS a different page: start at the top. Within a view,
+    // setPanel keeps the operator's position (see above).
+    if (current !== section) { panelShowing = null; window.scrollTo(0, 0); }
     current = section;
     for (const s of ['reporting', 'ingest', 'process']) el('nav-' + s).classList.toggle('on', s === section);
     el('nav-settings').classList.toggle('on', section === 'settings');
