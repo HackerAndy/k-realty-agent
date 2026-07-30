@@ -1815,6 +1815,19 @@ def build_status(source_key: str, event_offset: int = 0) -> dict:
         "steps": _build_steps(kind, mode, status),
     }
     if status == "running":
+        # A spinner cannot tell "thinking" from "wedged". The run file's mtime is
+        # exactly when the worker last said anything, so the screen can show the
+        # silence and its own last words instead of leaving the operator guessing.
+        try:
+            idle = max(0.0, time.time() - run_file.stat().st_mtime)
+        except OSError:
+            idle = 0.0
+        payload["idle_seconds"] = round(idle, 1)
+        payload["last_event"] = events[-1] if events else ""
+        # A local model can legitimately go quiet for ~3 minutes (measured); past
+        # that, say so out loud rather than implying all is well. The worker's own
+        # watchdog is what eventually ends it.
+        payload["stalled"] = idle > 180
         return payload
 
     if status == "failed":
@@ -1881,6 +1894,49 @@ def _what_it_did(result: dict) -> dict:
     return {"files": files, "commands": commands, "reads": reads}
 
 
+def stop_build(source_key: str) -> dict:
+    """Stop a running build.
+
+    There was no way to do this from the app: a build that wedged holding a socket
+    to the model could only be killed from a terminal, which is exactly the black
+    box this project forbids. Whatever the agent already wrote stays on disk — the
+    files are the point, and the operator can look at the diff.
+    """
+    proc = _BUILD_PROCS.get(source_key)
+    meta = _BUILD_META.get(source_key, {})
+    if proc is None or not meta:
+        raise ToolError(f"No build is running for '{source_key}'.")
+    if proc.poll() is not None:
+        return {"source_key": source_key, "stopped": False,
+                "message": "That build had already finished."}
+
+    proc.terminate()
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()          # blocked in a syscall; terminate alone won't land
+
+    # Record it in the run file ourselves: the worker may die before it can, and a
+    # bare non-zero exit would read as a crash rather than a decision.
+    run_file = Path(meta.get("run_file", ""))
+    if run_file.name:
+        try:
+            with run_file.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps({
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "type": "failed",
+                    "error": "You stopped this build. Anything it had already written is still on disk.",
+                }) + "\n")
+        except OSError:
+            pass
+
+    log.event(operation="stop_build", code="BUILD_STOPPED",
+              message=f"Operator stopped the build for '{source_key}'.",
+              context={"source_key": source_key, "pid": proc.pid})
+    return {"source_key": source_key, "stopped": True,
+            "message": "Stopped. Anything it already wrote is still on disk."}
+
+
 def activate_parser(source_key: str) -> dict:
     """Approve a built parser — activate it so the source uses it automatically."""
     if not source_status.parser_built(source_key):
@@ -1912,6 +1968,7 @@ ACTION_TOOLS = [
     list_llm_models,
     set_llm_provider,
     start_build,
+    stop_build,
     build_status,
     set_default_transport,
     get_latest,

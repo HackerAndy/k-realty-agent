@@ -313,3 +313,156 @@ def test_a_run_reports_what_it_did_as_acts_not_prose(tmp_path, monkeypatch):
     assert did["files"] == ["core/scrapers/x.py", "tests/test_scraper_x.py"], "written once each"
     assert did["commands"] == ["poetry run pytest tests/test_scraper_x.py"]
     assert did["reads"] == 1
+
+
+# --- a run that stops making progress ---------------------------------------
+#
+# The field failure: a build held an open socket to the operator's model for 21
+# minutes, emitting nothing. The screen showed a spinner the whole time, and there
+# was no way to stop it from the app — only `kill` in a terminal, which is the
+# black box this project forbids.
+
+class _StoppableProc:
+    """A process that reports running until it is terminated."""
+
+    pid = 4242
+
+    def __init__(self, stubborn=False):
+        self._code = None
+        self.stubborn = stubborn      # ignores terminate(), like a blocked syscall
+        self.terminated = False
+        self.killed = False
+
+    def poll(self):
+        return self._code
+
+    def terminate(self):
+        self.terminated = True
+        if not self.stubborn:
+            self._code = -15
+
+    def wait(self, timeout=None):
+        if self._code is None:
+            import subprocess
+            raise subprocess.TimeoutExpired("build", timeout or 0)
+        return self._code
+
+    def kill(self):
+        self.killed = True
+        self._code = -9
+
+
+def _seed_running(tmp_path, monkeypatch, lines, proc):
+    run_file = tmp_path / "run.jsonl"
+    run_file.write_text("".join(json.dumps(x) + "\n" for x in lines))
+    monkeypatch.setitem(mcp_tools._BUILD_PROCS, "k", proc)
+    monkeypatch.setitem(mcp_tools._BUILD_META, "k", {
+        "kind": "scraper", "mode": "revise",
+        "run_file": str(run_file), "log_path": str(tmp_path / "run.log"),
+    })
+    return run_file
+
+
+def test_a_running_build_reports_how_long_it_has_been_quiet(tmp_path, monkeypatch):
+    """"Working" and "wedged" look identical without this."""
+    import os, time
+
+    run_file = _seed_running(tmp_path, monkeypatch,
+                             [{"type": "event", "text": "Asking the model (turn 12 of 40)…"}],
+                             _StoppableProc())
+    old = time.time() - 600
+    os.utime(run_file, (old, old))
+
+    st = mcp_tools.build_status("k")
+
+    assert st["status"] == "running"
+    assert st["idle_seconds"] >= 590
+    assert st["stalled"] is True
+    assert st["last_event"] == "Asking the model (turn 12 of 40)…", "what it was doing when it went quiet"
+
+
+def test_a_normal_gap_is_not_called_stalled(tmp_path, monkeypatch):
+    """A local model legitimately goes quiet for ~3 minutes; measured max was 178s."""
+    import os, time
+
+    run_file = _seed_running(tmp_path, monkeypatch, [{"type": "event", "text": "thinking"}],
+                             _StoppableProc())
+    old = time.time() - 120
+    os.utime(run_file, (old, old))
+
+    st = mcp_tools.build_status("k")
+
+    assert st["stalled"] is False
+    assert 110 <= st["idle_seconds"] <= 130
+
+
+def test_the_operator_can_stop_a_build_from_the_app(tmp_path, monkeypatch):
+    proc = _StoppableProc()
+    run_file = _seed_running(tmp_path, monkeypatch, [{"type": "event", "text": "working"}], proc)
+
+    result = mcp_tools.stop_build("k")
+
+    assert result["stopped"] is True
+    assert proc.terminated is True
+    # Recorded as a decision, not a crash: the worker may die before it can say so.
+    last = _lines(run_file)[-1]
+    assert last["type"] == "failed" and "You stopped this build" in last["error"]
+    assert "still on disk" in last["error"], "what it already wrote is kept"
+
+
+def test_a_build_blocked_in_a_syscall_is_killed(tmp_path, monkeypatch):
+    """terminate() alone doesn't land on a process stuck in a socket read — which
+    is exactly the state the wedged build was in."""
+    proc = _StoppableProc(stubborn=True)
+    _seed_running(tmp_path, monkeypatch, [{"type": "event", "text": "working"}], proc)
+
+    mcp_tools.stop_build("k")
+
+    assert proc.terminated and proc.killed
+
+
+def test_stopping_a_finished_build_says_so_instead_of_failing(tmp_path, monkeypatch):
+    proc = _StoppableProc()
+    proc._code = 0
+    _seed_running(tmp_path, monkeypatch, [], proc)
+
+    result = mcp_tools.stop_build("k")
+
+    assert result["stopped"] is False and "already finished" in result["message"]
+
+
+def test_stopping_when_nothing_runs_is_refused():
+    mcp_tools._BUILD_PROCS.pop("nobody", None)
+    with pytest.raises(mcp_tools.ToolError, match="No build is running"):
+        mcp_tools.stop_build("nobody")
+
+
+def test_the_worker_arms_a_watchdog_and_feeds_it_every_event(tmp_path, monkeypatch):
+    """The watchdog can only work if the events reach it, so pin the wiring."""
+    beats: list[str] = []
+
+    class _Dog:
+        def __init__(self, on_stall, **kw):
+            self.on_stall = on_stall
+        def beat(self, event=""):
+            beats.append(event)
+        def start(self):
+            beats.append("<started>")
+        def stop(self):
+            beats.append("<stopped>")
+
+    monkeypatch.setattr(build_worker, "ProgressWatchdog", _Dog)
+
+    def fake_revise(source_key, feedback, on_event=print):
+        on_event("reading the failure logs")
+        on_event("wrote the fix")
+        return {"source_key": source_key, "verification": {"ok": True}}
+
+    monkeypatch.setattr("orchestration.build_scraper.revise_scraper_for_source", fake_revise)
+
+    rc = build_worker.run("scraper", "revise", "epic", tmp_path / "run.jsonl", feedback="fix it")
+
+    assert rc == 0
+    assert beats[0] == "<started>"
+    assert "reading the failure logs" in beats and "wrote the fix" in beats
+    assert beats[-1] == "<stopped>", "and disarmed when the run ends"

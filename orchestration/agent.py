@@ -238,6 +238,10 @@ def run_agent(
     final_text = ""
 
     for turn in range(1, max_turns + 1):
+        # Announced BEFORE the call, not after: this is the moment the run goes
+        # quiet, sometimes for minutes on a local model, and both the operator and
+        # the watchdog need to know what the silence is for.
+        on_event(f"Asking the model (turn {turn} of {max_turns})…")
         turn_result = adapter.next_turn(messages=messages, system=system)
 
         for text in turn_result.text_blocks:

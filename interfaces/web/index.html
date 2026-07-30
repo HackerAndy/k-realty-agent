@@ -1404,12 +1404,27 @@
     let inner;
     if (st.status === 'running') {
       const shown = st.events.slice(-40);
+      // A spinner says "something is happening", which is exactly what an operator
+      // watching a wedged build for 21 minutes was told. So say how long it has
+      // been quiet, and what it was doing when it went quiet.
+      const idle = st.idle_seconds || 0;
+      const quiet = idle >= 20
+        ? '<div class="' + (st.stalled ? 'notbuilt' : 'note') + '" style="margin-top:10px">' +
+          (st.stalled ? '<b>Nothing for ' + fmtIdle(idle) + '.</b> A local model can go quiet for a ' +
+                        'couple of minutes; longer than that and it may be stuck. It will be given up ' +
+                        'on automatically, or you can stop it now.'
+                      : 'Quiet for ' + fmtIdle(idle) + ' — waiting on the model.') +
+          (st.last_event ? '<div class="sub" style="margin-top:4px">Last: ' + esc(st.last_event) + '</div>' : '') +
+          '</div>'
+        : '';
       inner = '<div class="stream" id="stream-' + sid + '">' +
         (shown.length ? shown.map((e, i) =>
           '<span class="' + (i === shown.length - 1 ? 'last' : '') + '">' + esc(e) + '</span>').join('\n')
-          : 'Starting the agent…') + '</div>' +
-        '<div class="row" style="margin-top:12px"><span class="hint">This takes a few minutes. ' +
-        'You can leave this page open; progress keeps streaming.</span></div>';
+          : 'Starting the agent…') + '</div>' + quiet +
+        '<div class="row" style="margin-top:12px">' +
+        '<button class="btn" onclick="stopBuild(\'' + s.key + '\')">Stop this build</button>' +
+        '<span class="hint">This takes a few minutes. You can leave this page open; ' +
+        'progress keeps streaming.</span></div>';
     } else if (st.status === 'completed' || st.status === 'failed') {
       inner = buildResultHTML(s, st);
     } else if (kind === 'scraper' && !s.has_scraper) {
@@ -1703,6 +1718,7 @@
       if (st.token !== token) return;
       if (s.events && s.events.length) st.events = st.events.concat(s.events);
 
+      const wasStalled = !!st.stalled, wasQuiet = (st.idle_seconds || 0) >= 20;
       if (s.status === 'running') {
         // Update only the stream so typing/scroll elsewhere isn't disturbed.
         const host = el('stream-' + sourceDomId(key));
@@ -1714,6 +1730,13 @@
         } else {
           await renderIngest();
         }
+        st.idle_seconds = s.idle_seconds || 0;
+        st.stalled = !!s.stalled;
+        st.last_event = s.last_event || '';
+        // The quiet notice lives outside the stream, so it needs a re-render to
+        // appear — but only when its state actually changed, or typing would be
+        // interrupted every two seconds.
+        if (st.stalled !== wasStalled || (st.idle_seconds >= 20) !== wasQuiet) await renderIngest();
         setTimeout(tick, 2000);
         return;
       }
@@ -1736,6 +1759,26 @@
       await renderIngest();
     };
     setTimeout(tick, 1500);
+  }
+
+  function fmtIdle(seconds) {
+    const s = Math.round(seconds);
+    if (s < 60) return s + 's';
+    const m = Math.floor(s / 60);
+    return m + 'm' + (s % 60 ? ' ' + (s % 60) + 's' : '');
+  }
+
+  /** The escape hatch that didn't exist: a wedged build could only be killed from
+   *  a terminal. Whatever it already wrote stays on disk. */
+  async function stopBuild(key) {
+    clearToast();
+    try {
+      const r = await callTool('stop_build', { source_key: key });
+      toast(r.message || 'Stopped.', true);
+      await renderIngest();
+    } catch (e) {
+      toast('Couldn’t stop it: ' + e.message, false);
+    }
   }
 
   function readFeedback(key) {

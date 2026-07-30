@@ -14,6 +14,12 @@ Run-file protocol (one JSON object per line, append-only):
     {"type": "result", "ts": ..., "result": {...}}  the workflow's return value
     {"type": "failed", "ts": ..., "error": "...", "traceback": "..."}
 
+A build that stops making progress is ended by orchestration/watchdog.py rather
+than left to hang: one sat for 21 minutes holding an open socket to the operator's
+model with nothing arriving, and the app had no way to stop it. Every event feeds
+the watchdog, so the allowance follows the run's own pace instead of a constant
+that is wrong for a slow model in one direction and a wedged one in the other.
+
 Exit code 0 means the build RAN, not that it passed — whether the code is
 acceptable is the `verification.ok` flag in the result, which the operator
 reviews and approves. Activation stays the human's call.
@@ -24,11 +30,15 @@ Lives in orchestration/ because it drives the agent layer.
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import json
+import os
 import sys
 import traceback
 from datetime import UTC, datetime
 from pathlib import Path
+
+from orchestration.watchdog import ProgressWatchdog, Stall
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RUN_DIR = Path("data/logs/builds")
@@ -56,9 +66,37 @@ def run(kind: str, mode: str, source_key: str, run_file: Path,
     from orchestration.build_parser import build_parser_for_source, revise_parser_for_source
     from orchestration.build_scraper import build_scraper_for_source, revise_scraper_for_source
 
+    def on_stall(stall: Stall) -> None:
+        """Called on the watchdog's thread, because the working thread is the one
+        that's stuck. Record WHERE it was stuck before exiting: a hang's stack is
+        the one thing that can't be recovered afterwards, and the last one was
+        lost because the process died before anyone could look."""
+        stacks = run_file.with_suffix(".stacks.txt")
+        try:
+            with stacks.open("w", encoding="utf-8") as fh:
+                fh.write(f"{stall.describe()}\n\n")
+                faulthandler.dump_traceback(file=fh, all_threads=True)
+        except Exception:
+            pass
+        _emit(run_file, {
+            "type": "failed",
+            "error": stall.describe(),
+            "stall": {"reason": stall.reason, "idle_s": round(stall.idle_s, 1),
+                      "budget_s": round(stall.budget_s, 1),
+                      "elapsed_s": round(stall.elapsed_s, 1),
+                      "stacks": str(stacks)},
+        })
+        # The main thread is blocked in a syscall — a normal exit would join it and
+        # hang exactly as before, so leave hard. The run file is already flushed.
+        os._exit(2)
+
+    watchdog = ProgressWatchdog(on_stall=on_stall)
+
     def on_event(text: str) -> None:
+        watchdog.beat(str(text))
         _emit(run_file, {"type": "event", "text": str(text)})
 
+    watchdog.start()
     try:
         if kind == "parser":
             if not sample_path:
@@ -85,6 +123,8 @@ def run(kind: str, mode: str, source_key: str, run_file: Path,
     except Exception as exc:
         _emit(run_file, {"type": "failed", "error": str(exc), "traceback": traceback.format_exc()})
         return 1
+    finally:
+        watchdog.stop()
 
     _emit(run_file, {"type": "result", "result": result})
     return 0
