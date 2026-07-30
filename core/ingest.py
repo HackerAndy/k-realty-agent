@@ -46,9 +46,21 @@ def _dump_debug_text(source_key: str, extracted_text: str) -> Path:
     return dump_path
 
 
+def _transport_of(run: dict) -> str:
+    """Which route delivered a run.
+
+    Recorded on the run itself since routes became first-class. Runs written
+    before that are inferred from how they were read, which is enough: the portal
+    scrape had its own extraction method, and everything else arrived as a file.
+    """
+    return run.get("transport") or (
+        "scrape" if run.get("extraction_method") == "portal_scrape" else "upload")
+
+
 def _persist(source_key: str, transactions: list[Transaction], input_path: Path, method: str,
              parser: str | None, transport: str | None = None, model: str | None = None) -> dict:
     month_key = f"{transactions[0].date:%Y-%m}" if transactions else "unknown"
+    route = transport or _transport_of({"extraction_method": method})
     run = {
         "parsed_at": datetime.now(UTC).isoformat(),
         "source_key": source_key,
@@ -58,7 +70,7 @@ def _persist(source_key: str, transactions: list[Transaction], input_path: Path,
         # WHICH ROUTE delivered this data (upload | scrape | email). The funnel
         # draws the route the current data actually arrived by as a solid line,
         # so this has to be recorded rather than guessed from the parser used.
-        "transport": transport,
+        "transport": route,
         # WHICH MODEL read it, when a model did. Rows a model produced are only
         # as trustworthy as the model that produced them, so the run says which
         # one rather than leaving the operator to infer it from Settings today.
@@ -68,7 +80,10 @@ def _persist(source_key: str, transactions: list[Transaction], input_path: Path,
         "transactions": [t.model_dump(mode="json") for t in transactions],
     }
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    run_path = DATA_DIR / f"{source_key}-{month_key}.json"
+    # Keyed by ROUTE as well as month: one file per source-month meant a scrape
+    # silently destroyed the rows an upload of the same month had produced, so
+    # only ever one route's results existed and the others could say nothing.
+    run_path = DATA_DIR / f"{source_key}-{route}-{month_key}.json"
     run_path.write_text(json.dumps(run, indent=2))
     run["run_path"] = str(run_path)
     return run
@@ -157,33 +172,74 @@ def ingest_via_llm(
                     model=choice.describe())
 
 
-def load_latest_parsed() -> dict | None:
-    """Most recent persisted parse across all sources, or None."""
-    if not DATA_DIR.exists():
-        return None
-    runs = sorted(DATA_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime)
-    if not runs:
-        return None
-    data = json.loads(runs[-1].read_text())
-    data["run_path"] = str(runs[-1])
-    return data
+def _runs_newest_first():
+    """Every persisted run, newest first, skipping anything unreadable.
 
-
-def load_latest_parsed_for(source_key: str) -> dict | None:
-    """Most recent persisted parse for ONE source, or None. Matches on the run's
-    stored source_key (not the filename) so key prefixes can't collide."""
+    Ordered by the run's OWN parsed_at, not the file's mtime — two scrapes half a
+    minute apart land in different month files, and which of them is the later run
+    is a fact about the run, not about when the file was last touched. Reads the
+    run's own source_key for the same reason: key prefixes can't collide, and
+    files written under the older naming still load.
+    """
     if not DATA_DIR.exists():
-        return None
-    runs = sorted(DATA_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-    for path in runs:
+        return
+    runs = []
+    for path in DATA_DIR.glob("*.json"):
         try:
             data = json.loads(path.read_text())
         except (OSError, json.JSONDecodeError):
             continue
-        if data.get("source_key") == source_key:
-            data["run_path"] = str(path)
-            return data
+        data["run_path"] = str(path)
+        runs.append((data.get("parsed_at") or "", path.stat().st_mtime, data))
+    for _, _, data in sorted(runs, key=lambda r: (r[0], r[1]), reverse=True):
+        yield data
+
+
+def load_latest_parsed() -> dict | None:
+    """Most recent persisted parse across all sources, or None."""
+    return next(_runs_newest_first(), None)
+
+
+def load_latest_parsed_for(source_key: str, transport: str | None = None) -> dict | None:
+    """Most recent persisted parse for ONE source, or None.
+
+    With a transport, the most recent one THAT ROUTE produced — which is how a
+    route can show its own rows instead of whichever route happened to run last.
+    """
+    for run in _runs_newest_first():
+        if run.get("source_key") != source_key:
+            continue
+        if transport is not None and _transport_of(run) != transport:
+            continue
+        return run
     return None
+
+
+def runs_by_transport(source_key: str) -> dict[str, dict]:
+    """The latest run each route produced for this source, keyed by route.
+
+    Transactions are left out — this answers "what has this route ever done",
+    which the graph asks for every route at once. A route missing from the map
+    has never run, and says so rather than borrowing another route's count.
+    """
+    latest: dict[str, dict] = {}
+    for run in _runs_newest_first():
+        if run.get("source_key") != source_key:
+            continue
+        route = _transport_of(run)
+        if route in latest:
+            continue                    # newest first, so the first one wins
+        latest[route] = {
+            "transport": route,
+            "count": run.get("transaction_count", 0),
+            "month": run.get("month"),
+            "parsed_at": run.get("parsed_at"),
+            "extraction_method": run.get("extraction_method"),
+            "parser": run.get("parser"),
+            "model": run.get("model"),
+            "run_path": run.get("run_path"),
+        }
+    return latest
 
 
 def transactions_from_run(run: dict) -> list[Transaction]:

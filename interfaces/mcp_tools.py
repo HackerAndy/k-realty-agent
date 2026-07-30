@@ -18,7 +18,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from core import hot_reload, progress, reconcile, settings, source_status, transports
+from core import hot_reload, progress, readers, reconcile, settings, source_status, transports
 from core.transports import EMAIL, SCRAPE
 from core.observability import get_logger
 from core.fetch_ingest import fetch_and_ingest, persist_scraped
@@ -26,10 +26,12 @@ from core.ingest import (
     ingest_source,
     load_latest_parsed,
     load_latest_parsed_for,
+    runs_by_transport,
     transactions_from_run,
 )
 from core.models import Transaction
 from core.scrapers import get_scraper, has_scraper
+from core.scrapers import method_of as scraper_method
 from core.tools import llm_provider
 from core.tools.browser_session import reset_profile
 from core.tools.service_manifest import ServiceManifest, ServiceManifestError
@@ -122,6 +124,25 @@ def _inbox_account(carrier_key: str) -> str | None:
         return None
 
 
+def _attach_reader_and_run(service, routes: list[dict]) -> None:
+    """Give every route its own reader and its own last run.
+
+    Getting the data and reading it are separate acts, so the graph draws them as
+    separate nodes — and each route reports what IT has done, never what some
+    other route did. A route with no run of its own carries `last_run: None`,
+    which is what the screen prints as "Not run"; borrowing a sibling's count
+    would put a number under a route that has never produced one.
+    """
+    history = runs_by_transport(service.key)
+    for route in routes:
+        run = history.get(route["id"])
+        route["last_run"] = run
+        route["reader"] = readers.reader_for(
+            route["id"], service,
+            has_scraper=has_scraper, scraper_method=scraper_method, run=run,
+        )
+
+
 def list_sources(include_carriers: bool = False) -> list[dict]:
     """Every financial SOURCE, with the transports its data can arrive by.
 
@@ -138,6 +159,7 @@ def list_sources(include_carriers: bool = False) -> list[dict]:
             s, services, has_scraper=has_scraper, parser_built=source_status.parser_built,
             carrier_ready=_inbox_connected,
         )
+        _attach_reader_and_run(s, routes)
         default_id = transports.default_transport(s, routes)
         out.append({
             "key": s.key,
@@ -1043,13 +1065,20 @@ def latest_transactions(limit: int = 200) -> dict:
             **_summary(txns), "transactions": _rows(txns, limit)}
 
 
-def source_transactions(source_key: str, limit: int = 500) -> dict:
+def source_transactions(source_key: str, limit: int = 500, transport: str = "") -> dict:
     """The most recent ingested transactions for ONE source, with money-in/out
     totals. Powers the per-source input-validation view. Empty (not an error) when
-    the source has no persisted run yet."""
-    run = load_latest_parsed_for(source_key)
+    the source has no persisted run yet.
+
+    With a transport, the rows THAT ROUTE last produced — so selecting a route in
+    the graph shows its own data rather than whichever route happened to run last.
+    An empty result then means that route has never run, which the screen says
+    outright instead of showing another route's rows under it.
+    """
+    run = load_latest_parsed_for(source_key, transport or None)
     if run is None:
-        return {"source_key": source_key, "count": 0, "money_in": 0, "money_out": 0, "transactions": []}
+        return {"source_key": source_key, "count": 0, "money_in": 0, "money_out": 0,
+                "transactions": [], "transport": transport or None, "never_run": True}
     txns = transactions_from_run(run)
     return {"source_key": run.get("source_key"), "month": run.get("month"),
             "parsed_at": run.get("parsed_at"), "run_path": run.get("run_path"),

@@ -58,6 +58,11 @@ Prefer the **API** path, fall back to **replaying clicks**:
    Factor the parsing into a pure `_extract(raw) -> list[Transaction]` you can
    test against the captured data without logging in.
 
+   **Say which of the two you built**, as a module-level constant beside your
+   imports — `METHOD = "api"` or `METHOD = "clicks"`. The screen names the
+   reader it is about to run, and the two fail differently: an endpoint that
+   moves and a button that moved are not the same problem to the operator.
+
 3. **Faithful transactions.** Read `core/models.py`. `date`, `amount`,
    `description` are the only normalized fields (amount is one signed float,
    **+ money in, − money out**). Put the source's ACTUAL columns verbatim in

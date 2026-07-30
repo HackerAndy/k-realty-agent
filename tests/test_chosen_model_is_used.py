@@ -12,6 +12,7 @@ So: one resolver, and every caller uses it. These tests pin that at each site.
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -120,7 +121,7 @@ def test_the_run_records_which_model_read_it(local_server, calls, tmp_path, monk
     run = ingest.ingest_via_llm("fresh", tmp_path / "doc.pdf", manifest=FakeManifest())
 
     assert "qwen-30b" in run["model"]
-    assert json.loads((tmp_path / "parsed" / "fresh-2026-05.json").read_text())["model"]
+    assert json.loads(Path(run["run_path"]).read_text())["model"]
 
 
 # --- naming / the new-source preview ----------------------------------------
