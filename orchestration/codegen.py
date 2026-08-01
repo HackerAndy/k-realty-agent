@@ -354,7 +354,10 @@ def run_codegen_gated(
                 "Your code contains something that does nothing — " + detail + ". A value you "
                 "compute and never use is usually a wire you forgot to connect: if it came from "
                 "the operator's settings, the setting is silently being ignored. Either use it, "
-                "or delete it and say why it isn't needed."
+                "or delete it and say why it isn't needed. If it is a caught exception you never "
+                "read (`except X as e`), put it in the log.failure record or in the error you "
+                "raise — an error caught and recorded nowhere is the failure this harness exists "
+                "to prevent — or drop the binding and write `except X:`."
             )
         if verification.get("wholesale_rewrite"):
             detail = "; ".join(

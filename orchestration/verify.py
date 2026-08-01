@@ -161,13 +161,18 @@ ADVISORY_RULES: dict[str, str] = {
             "not a disconnected wire",
 }
 
-# F841 covers two different things under one code, which is why it needs a case
-# of its own rather than an entry above: `lookback = opts[...]` never used is
-# exactly the bug this gate exists for, while `except ValueError as e` with an
-# unused `e` is a naming choice. Ruff reports the latter on the `except` line,
-# so the AST can tell them apart — verified against ruff, not assumed.
-UNUSED_EXCEPTION_BINDING = ("an unused `except ... as` binding is a naming choice, not a "
-                            "discarded computation — no setting is being ignored")
+# An unused `except ... as e` binding was briefly listed above, and should not be.
+# It looked like the same shape of complaint as F401 — a linter being fussy about
+# a name — but it is not tidiness: this project logs every deterministic failure
+# as a structured record, so a caught exception is meant to end up IN one. A
+# binding nobody uses means an error was caught and nothing was recorded, which
+# is the silent failure the observability standard exists to prevent.
+#
+# Forgiving it also cost more than it saved. Telling F841 apart from itself meant
+# joining ruff's reported line number to an AST node — an inference ruff does not
+# actually export, in a gate whose whole point is that findings are classified by
+# what they MEAN. The contracts now say to bind the exception only when it is
+# used, which is always satisfiable, so the case mostly stops arising.
 
 
 def lint(paths: list[str], timeout: int = 60) -> list[dict]:
@@ -212,13 +217,12 @@ def lint(paths: list[str], timeout: int = 60) -> list[dict]:
         return []
 
     out: list[dict] = []
-    handlers: dict[str, set[int]] = {}
     for item in findings:
         location = item.get("location") or {}
         path = item.get("filename", "").replace(str(REPO_ROOT) + "/", "")
         code = item.get("code") or ""
         line = location.get("row")
-        advice = _advisory_reason(code, path, line, handlers)
+        advice = ADVISORY_RULES.get(code)
         out.append({
             "path": path,
             "line": line,
@@ -237,35 +241,6 @@ def blocking(findings: list[dict]) -> list[dict]:
     return [f for f in findings if f.get("blocking", True)]
 
 
-def _advisory_reason(code: str, path: str, line: int | None,
-                     handlers: dict[str, set[int]]) -> str | None:
-    """Why this finding does NOT fail the build, or None if it does.
-
-    Defaults to None — blocking — so an unclassified rule stops a build rather
-    than passing unnoticed.
-    """
-    if code in ADVISORY_RULES:
-        return ADVISORY_RULES[code]
-    if code == "F841":
-        if path not in handlers:
-            handlers[path] = _exception_binding_lines(REPO_ROOT / path)
-        if line in handlers[path]:
-            return UNUSED_EXCEPTION_BINDING
-    return None
-
-
-def _exception_binding_lines(full: Path) -> set[int]:
-    """Lines carrying an `except ... as <name>:` handler.
-
-    Ruff reports an unused exception binding as F841 against the `except` line,
-    so the line number is enough to tell it apart from a discarded computation.
-    """
-    try:
-        tree = ast.parse(full.read_text(encoding="utf-8"))
-    except (OSError, SyntaxError, UnicodeDecodeError, ValueError):
-        return set()
-    return {node.lineno for node in ast.walk(tree)
-            if isinstance(node, ast.ExceptHandler) and node.name}
 
 
 def declares_settings(path: str) -> bool:

@@ -165,8 +165,18 @@ def test_a_file_the_agent_never_actually_wrote_is_left_to_the_other_gates(tmp_pa
 # the rule — and that loses the finding for everyone, forever. Twice in one
 # session that was nearly the answer. Findings are classified instead.
 
-def test_an_unused_exception_binding_does_not_fail_a_build(tmp_path, monkeypatch):
-    """F841 covers two different things; only one of them is this gate's business."""
+def test_an_unused_exception_binding_fails_the_build(tmp_path, monkeypatch):
+    """Briefly exempted, and that was wrong.
+
+    This project logs every deterministic failure as a structured record, so a
+    caught exception is meant to end up IN one. A binding nobody reads means an
+    error was caught and nothing about it was recorded — the silent failure the
+    logging standard exists to prevent, not a naming quibble.
+
+    Exempting it also required telling F841 apart from itself by joining ruff's
+    reported line to an AST node, an inference ruff does not export. The
+    contracts now say to bind only what you use, which is always satisfiable.
+    """
     path = _write(tmp_path, monkeypatch,
                   "def go():\n"
                   "    try:\n"
@@ -174,28 +184,30 @@ def test_an_unused_exception_binding_does_not_fail_a_build(tmp_path, monkeypatch
                   "    except ValueError as e:\n"
                   "        raise RuntimeError('boom')\n")
 
-    findings = verify.lint([path])
-
-    assert any(f["code"] == "F841" for f in findings), "still reported"
-    assert verify.blocking(findings) == []
-    assert "naming choice" in findings[0]["advice"]
-
-
-def test_a_discarded_value_in_the_same_file_still_blocks(tmp_path, monkeypatch):
-    """The two F841s must not be confused: one is the bug the gate exists for."""
-    path = _write(tmp_path, monkeypatch,
-                  "def go(opts):\n"
-                  "    try:\n"
-                  "        pass\n"
-                  "    except ValueError as e:\n"
-                  "        raise RuntimeError('boom')\n"
-                  "    lookback = opts['lookback_days']\n"
-                  "    return {'range': 'fixed'}\n")
-
     blocking = verify.blocking(verify.lint([path]))
 
-    assert len(blocking) == 1
-    assert "lookback" in blocking[0]["detail"]
+    assert len(blocking) == 1 and blocking[0]["code"] == "F841"
+
+
+def test_an_exception_that_is_used_is_fine(tmp_path, monkeypatch):
+    """The rule is satisfiable, which is what makes prevention realistic: bind it
+    when it goes into the record, leave it unbound when it does not."""
+    used = _write(tmp_path, monkeypatch,
+                  "def go():\n"
+                  "    try:\n"
+                  "        pass\n"
+                  "    except ValueError as exc:\n"
+                  "        raise RuntimeError(str(exc))\n")
+    assert verify.blocking(verify.lint([used])) == []
+
+    unbound = _write(tmp_path, monkeypatch,
+                     "def go():\n"
+                     "    try:\n"
+                     "        pass\n"
+                     "    except ValueError:\n"
+                     "        raise RuntimeError('boom')\n",
+                     name="core/scrapers/other.py")
+    assert verify.blocking(verify.lint([unbound])) == []
 
 
 def test_an_unclassified_rule_blocks_by_default(tmp_path, monkeypatch):

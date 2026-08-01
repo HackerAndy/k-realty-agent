@@ -173,3 +173,10 @@ re-states what you already said is trimmed and counts against the run.
   lint. Run `poetry run python scripts/check_portability.py` before finishing.
 - Log failures via the project standard (`core/observability.py`,
   `log.failure(...)`).
+
+  **Bind a caught exception only if you use it.** Write `except ValueError as
+  exc:` when `exc` goes into the `log.failure(...)` record or into the error you
+  raise, and plain `except ValueError:` when it does not. A binding nobody reads
+  means an error was caught and nothing about it was recorded, which is exactly
+  the silent failure the logging standard exists to prevent — and the build gate
+  refuses it as a value computed and discarded.
