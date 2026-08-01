@@ -20,16 +20,20 @@ already on disk. Nothing here asks you to re-derive them.
    read other sources' parsers — a whole-file read costs more context than the
    fix.
 
-3. **Change the least that fixes it. THE BUILD FAILS IF YOU REWRITE A FILE.**
-   Read the file as it is on disk, change only the lines the problem is in, and
-   write it back with everything else byte for byte. Keep the source key, the
-   registration, and the source's real columns exactly as they are unless the
-   feedback IS about one of those.
+3. **Change the least that fixes it — edit with `str_replace`.** Read the lines
+   the problem is in, then replace exactly those. `write_file` cannot overwrite
+   an existing file at all, and that is deliberate: rewriting from scratch
+   silently drops work that was already there and already passing, and every
+   other check looks only at what the new file contains, so nothing else can see
+   what went missing. Keep the source key, the registration, and the source's
+   real columns exactly as they are unless the feedback IS about one of those.
 
-   This is checked, not merely asked: if less than 40% of a file's lines survive
-   your write, the build is rejected. Rewriting from scratch silently drops work
-   that was already there and already passing, and every other check looks only
-   at what the new file contains — so nothing else can see what went missing.
+   `old_str` must match the file exactly and appear exactly once. Copy it from
+   `read_file` output rather than from memory, and include three to five lines
+   either side so it is unique. If the edit is refused, the message says whether
+   it matched nothing or matched in several places — fix that and try again
+   rather than reaching for a bigger rewrite. Use `insert` for something you are
+   purely adding, like a new import or registry entry.
 
    **DELETING A TEST FAILS THE BUILD TOO**, and it is checked by name. Every test
    that existed before your edit must still exist after it. A test you think is

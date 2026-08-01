@@ -77,7 +77,7 @@ def untested_code_files(tool_calls: list[tuple[str, dict]]) -> list[str]:
     written = [
         inp.get("path", "")
         for name, inp in tool_calls
-        if name == "write_file" and isinstance(inp, dict)
+        if name in agent_tools.WRITE_TOOLS and isinstance(inp, dict)
     ]
     code = [p for p in written if _is_code_file(p)]
     wrote_test = any(p.startswith("tests/") for p in written)
@@ -85,10 +85,17 @@ def untested_code_files(tool_calls: list[tuple[str, dict]]) -> list[str]:
 
 
 def files_written(tool_calls: list[tuple[str, dict]]) -> list[str]:
+    """Every path the agent changed, by whichever tool it used.
+
+    Keyed off `agent_tools.WRITE_TOOLS` rather than the name of one tool: this
+    list is what every gate downstream means by "the change", so a write tool it
+    doesn't recognise doesn't get a test required, coverage checked or lint run,
+    and the run scores as a no-op that touched nothing.
+    """
     return [
         inp.get("path", "")
         for name, inp in tool_calls
-        if name == "write_file" and isinstance(inp, dict) and inp.get("path")
+        if name in agent_tools.WRITE_TOOLS and isinstance(inp, dict) and inp.get("path")
     ]
 
 

@@ -38,6 +38,14 @@ ruff = ">=0.5"
 reportlab = "^5.0.0"
 coverage = "^7.15.2"
 
+[tool.pytest.ini_options]
+# The codegen bench copies the parser and test the agent wrote into
+# orchestration/bench/results/ so a bad run can be read afterwards. Those are
+# real pytest files importing modules that only ever existed inside a throwaway
+# worktree, so collecting them breaks the whole suite on a collection error.
+# Gitignored is not the same as invisible to pytest.
+addopts = ["--ignore=orchestration/bench/results"]
+
 # Stated explicitly so nothing can guess wrong. Without it, `pip install -e .`
 # fell back to setuptools, which refuses a flat layout with four top-level
 # packages — which is why every CI run failed at install.

@@ -468,6 +468,13 @@ def _preview(name: str, arguments: dict) -> str:
         return arguments["path"]
     if name == "write_file":
         return arguments.get("path", "")
+    # The operator is watching this scroll past; an edit should say WHERE, since
+    # "str_replace(core/parsers/x.py)" three times running looks like a loop and
+    # three different line numbers do not.
+    if name == "str_replace":
+        return arguments.get("path", "")
+    if name == "insert":
+        return f"{arguments.get('path', '')} after line {arguments.get('insert_line', '?')}"
     if name == "run_command":
         cmd = arguments.get("command", "")
         return cmd if len(cmd) <= 80 else cmd[:77] + "..."

@@ -15,6 +15,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from orchestration import file_editor
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 # Was 20,000. Three reads at that size are ~15,000 tokens — most of a local
 # model's usable context spent before it has done anything. The cap is a backstop
@@ -230,19 +232,75 @@ def forget_originals() -> None:
     _ORIGINALS.clear()
 
 
+def _remember_original(path: str, p: Path) -> None:
+    """Capture what a file looked like BEFORE this run first changed it.
+
+    Only the first time: later writes in the same run are the agent iterating,
+    and the run's "before" is what it started from.
+    """
+    if path in _ORIGINALS or not p.exists():
+        return
+    try:
+        _ORIGINALS[path] = p.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        pass
+
+
 def write_file(path: str, content: str) -> str:
+    """Create a file. Refuses to overwrite — that is `str_replace`'s job.
+
+    Whole-file writes are how work already on disk gets silently dropped: the
+    agent re-emits a file from memory, a function it never looked at doesn't come
+    back, and every other check sees only what the new file contains. Making the
+    tool unable to do it is worth more than asking the model not to, which is
+    what the prompts did for months while `fold_rewrite` counted the casualties.
+    """
     p = _resolve(path)
+    if p.exists():
+        raise ToolError(
+            f"{path} already exists, and write_file only creates new files. To change "
+            "it, read the lines you mean and edit them with str_replace (or insert). "
+            "Rewriting a file wholesale drops whatever you didn't happen to include.")
     p.parent.mkdir(parents=True, exist_ok=True)
-    existed = p.exists()
-    # Capture BEFORE the write, and only the first time — later writes in the same
-    # run are the agent iterating, and the run's "before" is what it started from.
-    if existed and path not in _ORIGINALS:
-        try:
-            _ORIGINALS[path] = p.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            pass
     p.write_text(content)
-    return f"{'Overwrote' if existed else 'Created'} {p.relative_to(REPO_ROOT)} ({len(content)} chars)."
+    return f"Created {p.relative_to(REPO_ROOT)} ({len(content)} chars)."
+
+
+def str_replace(path: str, old_str: str, new_str: str = "") -> str:
+    """Replace one exact, unique occurrence of `old_str` with `new_str`."""
+    p = _resolve(path)
+    if not p.is_file():
+        raise ToolError(f"{path} does not exist, so there is nothing to edit. "
+                        "Use write_file to create it.")
+    before = p.read_text(encoding="utf-8")
+    try:
+        edit = file_editor.replace_once(before, old_str, new_str)
+    except file_editor.EditError as exc:
+        raise ToolError(f"{path}: {exc}") from exc
+
+    _remember_original(path, p)
+    p.write_text(edit.content)
+    return (f"Edited {p.relative_to(REPO_ROOT)} at line {edit.line}. The file now reads:\n"
+            f"{file_editor.snippet(edit.content, edit.line, edit.span)}")
+
+
+def insert(path: str, insert_line: int, new_str: str) -> str:
+    """Insert `new_str` after line `insert_line` (0 = the top of the file)."""
+    p = _resolve(path)
+    if not p.is_file():
+        raise ToolError(f"{path} does not exist, so there is nothing to insert into. "
+                        "Use write_file to create it.")
+    before = p.read_text(encoding="utf-8")
+    try:
+        edit = file_editor.insert_at(before, insert_line, new_str)
+    except file_editor.EditError as exc:
+        raise ToolError(f"{path}: {exc}") from exc
+
+    _remember_original(path, p)
+    p.write_text(edit.content)
+    return (f"Inserted into {p.relative_to(REPO_ROOT)} after line {insert_line}. "
+            f"The file now reads:\n"
+            f"{file_editor.snippet(edit.content, edit.line, edit.span)}")
 
 
 def no_change_needed(reason: str) -> str:
@@ -430,14 +488,55 @@ TOOL_SCHEMAS = [
     },
     {
         "name": "write_file",
-        "description": "Create or overwrite a repository file with the given content.",
+        "description": "Create a NEW repository file. Fails if the path already exists — to "
+        "change an existing file use str_replace, which edits the lines you name and leaves "
+        "the rest untouched.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Repo-relative path that does "
+                         "not exist yet."},
+                "content": {"type": "string", "description": "Full contents of the new file."},
+            },
+            "required": ["path", "content"],
+        },
+    },
+    {
+        "name": "str_replace",
+        "description": "Edit an existing file by replacing an exact block of text. This is how "
+        "you change code: it touches only the lines you name and leaves the rest of the file "
+        "byte for byte, so nothing you didn't look at can go missing.\n"
+        "old_str must match the file EXACTLY — every space, every blank line — and must match "
+        "in exactly ONE place, or nothing is changed and you are told why. Include three to "
+        "five lines either side of your change to make it unique. Copy old_str from read_file "
+        "output rather than from memory. On success you get the edited region back, so you do "
+        "not need to re-read the file to check it.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "path": {"type": "string", "description": "Repo-relative path."},
-                "content": {"type": "string", "description": "Full file contents."},
+                "old_str": {"type": "string", "description": "The exact text to replace, "
+                            "unique within the file."},
+                "new_str": {"type": "string", "description": "What to put in its place. "
+                            "Omit or pass \"\" to delete the block."},
             },
-            "required": ["path", "content"],
+            "required": ["path", "old_str"],
+        },
+    },
+    {
+        "name": "insert",
+        "description": "Insert text into an existing file after a given line, for an addition "
+        "that replaces nothing — a new import, a new function, a new registry entry. Use "
+        "str_replace when you are changing text that is already there.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Repo-relative path."},
+                "insert_line": {"type": "integer", "description": "Insert AFTER this 1-based "
+                                "line. 0 inserts at the top of the file."},
+                "new_str": {"type": "string", "description": "The text to insert."},
+            },
+            "required": ["path", "insert_line", "new_str"],
         },
     },
     {
@@ -498,11 +597,23 @@ TOOL_SCHEMAS = [
     },
 ]
 
+# Every tool that changes a file on disk, in one place.
+#
+# The gates decide what the agent touched by reading its tool calls back —
+# `codegen.files_written` and `untested_code_files` — so a write tool missing
+# from this set is invisible to all of them at once: no test required, no
+# coverage checked, no lint, and a run that rewrote a parser scored as a no-op.
+# When a new way to change a file is added, it goes here or it may as well not
+# exist as far as the harness is concerned.
+WRITE_TOOLS = frozenset({"write_file", "str_replace", "insert"})
+
 _DISPATCH = {
     "read_file": read_file,
     "outline": outline,
     "search_files": search_files,
     "write_file": write_file,
+    "str_replace": str_replace,
+    "insert": insert,
     "list_directory": list_directory,
     "no_change_needed": no_change_needed,
     "run_command": run_command,

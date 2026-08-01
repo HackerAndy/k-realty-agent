@@ -21,18 +21,22 @@ are fixing happened after it.
    to CALL. Do not re-read modules you are not changing, and do not read other
    sources' scrapers — a whole-file read costs more context than the fix.
 
-3. **Change the least that fixes it. THE BUILD FAILS IF YOU REWRITE A FILE.**
-   Read the file as it is on disk, change only the lines the problem is in, and
-   write it back with everything else byte for byte. Keep the source key, the
-   registration, `METHOD`, and the source's real columns exactly as they are
+3. **Change the least that fixes it — edit with `str_replace`.** Read the lines
+   the problem is in, then replace exactly those. `write_file` cannot overwrite
+   an existing file at all, and that is deliberate: rewriting from scratch
+   silently drops work that was already there and already passing — a rewrite
+   asked to fix one undefined name deleted a whole class of reconciliation
+   tests, and nothing else the harness checks could see them go, because every
+   other check looks only at what the new file contains. Keep the source key,
+   the registration, `METHOD`, and the source's real columns exactly as they are
    unless the failure IS one of those.
 
-   This is checked, not merely asked: if less than 40% of a file's lines survive
-   your write, the build is rejected. Rewriting from scratch silently drops work
-   that was already there and already passing — a rewrite asked to fix one
-   undefined name deleted a whole class of reconciliation tests, and nothing else
-   the harness checks could see them go, because every other check looks only at
-   what the new file contains.
+   `old_str` must match the file exactly and appear exactly once. Copy it from
+   `read_file` output rather than from memory, and include three to five lines
+   either side so it is unique. If the edit is refused, the message says whether
+   it matched nothing or matched in several places — fix that and try again
+   rather than reaching for a bigger rewrite. Use `insert` for something you are
+   purely adding, like a new import or a new `SETTINGS` entry.
 
    If a test is long, that is not a reason to regenerate it. Change the assertion
    that is wrong and leave the other twenty-five alone.

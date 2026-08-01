@@ -539,6 +539,18 @@ def _suite_file(tmp_path, monkeypatch, body):
     return "tests/test_thing.py"
 
 
+def _replace_contents(rel, body):
+    """Swap a whole file's contents through the agent's own editing tool.
+
+    `write_file` cannot overwrite any more, so an agent that replaces a file
+    does it as one enormous str_replace — which is exactly what these gates have
+    to keep catching. Going through the tool rather than writing the path
+    directly is the point: it is what exercises the `_ORIGINALS` capture.
+    """
+    current = (codegen.agent_tools.REPO_ROOT / rel).read_text()
+    return codegen.agent_tools.str_replace(rel, current, body)
+
+
 def test_a_deleted_test_is_caught(tmp_path, monkeypatch):
     rel = _suite_file(tmp_path, monkeypatch, _suite(27))
     before = _verify.snapshot_files([rel])
@@ -649,8 +661,8 @@ def test_a_third_file_the_agent_damages_is_still_caught(monkeypatch, tmp_path):
 
     def fake(task, system, on_event=print, **kw):
         # Touches the watched file legitimately, and quietly guts another.
-        codegen.agent_tools.write_file(watched, _suite(6))
-        codegen.agent_tools.write_file("tests/test_unrelated.py", _suite(2, extra_class=False))
+        _replace_contents(watched, _suite(6))
+        _replace_contents("tests/test_unrelated.py", _suite(2, extra_class=False))
         return _Result(_wrote(watched, "tests/test_unrelated.py"))
     monkeypatch.setattr(codegen, "run_agent", fake)
 
@@ -668,7 +680,7 @@ def test_originals_do_not_leak_between_runs(monkeypatch, tmp_path):
     (tmp_path / "tests").mkdir(parents=True, exist_ok=True)
     (tmp_path / "tests" / "test_x.py").write_text(_suite(5))
 
-    codegen.agent_tools.write_file("tests/test_x.py", _suite(1))
+    _replace_contents("tests/test_x.py", _suite(1))
     assert codegen.agent_tools.originals()
 
     codegen.agent_tools.forget_originals()
@@ -682,8 +694,8 @@ def test_only_the_first_overwrite_of_a_run_is_the_baseline(monkeypatch, tmp_path
     (tmp_path / "tests" / "test_x.py").write_text("ORIGINAL")
     codegen.agent_tools.forget_originals()
 
-    codegen.agent_tools.write_file("tests/test_x.py", "second")
-    codegen.agent_tools.write_file("tests/test_x.py", "third")
+    _replace_contents("tests/test_x.py", "second")
+    _replace_contents("tests/test_x.py", "third")
     assert codegen.agent_tools.originals()["tests/test_x.py"] == "ORIGINAL"
 
 

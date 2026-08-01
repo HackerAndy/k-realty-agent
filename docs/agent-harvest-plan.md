@@ -51,21 +51,55 @@ guessing. **Do not add an LLM critic.** Their good one
 
 ## Phase 0 — a baseline number
 
-- [ ] Not started
+- [x] Done. `poetry run python -m orchestration.bench` — see
+      [orchestration/bench/README.md](../orchestration/bench/README.md).
 
-Nothing below is verifiable without one. Run `build_parser_for_source` against
-3–4 saved sample documents; record ok/not-ok, rounds used, tokens consumed.
+Three synthetic documents, scored two ways: `gate` (what `verify.py` approved,
+i.e. what the operator sees) and `correct` (the rows against an answer key the
+agent never sees). The gap between them is the number that matters, and a
+blocker histogram says which gate refused.
 
-**Where it lives:** `orchestration/bench/`. **Not** `evals/` — the portability
-contract forbids `evals/` importing `orchestration/`, and a codegen benchmark
-must drive the agent.
+Isolation is a git worktree at the measured ref, which is why it needs no
+production-code change: `agent_tools.REPO_ROOT` and `verify.REPO_ROOT` come from
+`__file__`, so running *inside* a throwaway checkout is what redirects them.
 
-**Done when:** one command prints a build success rate we can quote before and
-after each phase.
+**Two things it caught immediately, both of which would have produced confident
+wrong numbers:**
+
+- A worktree has only what git tracks, so `.secrets/` was missing and the run
+  silently resolved the built-in default model instead of the one chosen in
+  Settings. There is now a preflight that refuses to start unless the worktree
+  resolves the same model this repo does.
+- `.gitignore` spells the exclusions `.venv/` and `.secrets/` — trailing slash,
+  so they match directories. The links the bench adds are *symlinks*, which git
+  treats as untracked files the pattern misses, so `git clean` in the between-case
+  reset deleted both. The first full run therefore used the wrong model *and* a
+  fallback interpreter, and looked fine doing it.
+
+**Cost:** it measures a commit, not the working tree. Commit before measuring.
 
 ## Phase 1 — `str_replace` editing
 
-- [ ] Not started
+- [x] Done. `orchestration/file_editor.py` (pure logic) +
+      `agent_tools.str_replace` / `insert`; `write_file` is create-only.
+
+**Three things came out differently from the plan below, and the plan was
+wrong, not the implementation:**
+
+1. **`fold_rewrite` is NOT retired.** The claim further down that it becomes
+   "structurally unreachable" is false: an agent can still replace a whole file
+   by passing its entire contents as `old_str`. Harder to do by accident,
+   still worth catching, still enforced.
+2. **`undo_edit` was deliberately skipped.** It is not what causes broken code,
+   it needs per-run history state, and every extra tool costs context. Revisit
+   only if a bench run shows the agent stuck on an edit it wants to take back.
+3. **The gates nearly stopped working, silently.** `codegen.files_written` and
+   `untested_code_files` decided what the agent changed by matching the literal
+   tool name `write_file`. Adding a second write tool without touching them
+   would have meant every gate — test required, coverage, lint, no-op, rewrite —
+   quietly stopped firing on any run that used it. There is now one
+   `agent_tools.WRITE_TOOLS` set that both read, and a parametrised test that
+   asserts each write tool still trips them.
 
 **Why first.** `write_file(path, content)` is the agent's only write tool, so
 every edit is a whole-file regeneration — hundreds of lines re-emitted perfectly
