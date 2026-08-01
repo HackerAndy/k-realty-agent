@@ -37,6 +37,7 @@ from orchestration.bench.cases import BY_KEY, CASES, score
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 RESULTS_ROOT = Path(__file__).resolve().parent / "results"
 VENV = REPO_ROOT / ".venv"
+SECRETS = REPO_ROOT / ".secrets"
 
 
 def _git(*args: str, cwd: Path = REPO_ROOT) -> str:
@@ -47,17 +48,31 @@ def _git(*args: str, cwd: Path = REPO_ROOT) -> str:
 
 
 def _make_worktree(ref: str, parent: Path) -> tuple[Path, str]:
-    """A throwaway checkout of `ref`, with the project venv linked in.
+    """A throwaway checkout of `ref`, with the two gitignored directories a run
+    needs linked in.
 
-    The symlink is what makes `poetry run` work in there: Poetry is configured
-    for an in-project virtualenv, and a fresh worktree has no `.venv`. Linking
-    rather than installing keeps a run to seconds instead of minutes, and the
-    packages are identical because it is literally the same venv.
+    Both links are load-bearing, and both are needed because a fresh worktree
+    contains only what git tracks:
+
+    - `.venv` is what makes `poetry run` work in there. Poetry is configured for
+      an in-project virtualenv. Linking rather than installing keeps setup to
+      seconds, and the packages are identical because it is the same venv.
+    - `.secrets` is what makes the run use the model the operator actually
+      chose. `CredentialStore` reads `REPO_ROOT/.secrets`, so without this the
+      inner run finds no stored credential, falls back to the built-in default
+      provider, and benchmarks a different model than the one you asked about —
+      quietly, if that provider happens to have a key in the environment.
+
+    Links, not copies: no secret material is written into the temp directory,
+    and both disappear with the worktree. `_reset` uses `git clean` without
+    `-x`, so neither link is swept between cases.
     """
     path = parent / "worktree"
     _git("worktree", "add", "--detach", str(path), ref)
     sha = _git("rev-parse", "HEAD", cwd=path)
     (path / ".venv").symlink_to(VENV)
+    if SECRETS.is_dir():
+        (path / ".secrets").symlink_to(SECRETS)
     return path, sha
 
 
@@ -189,6 +204,15 @@ def main(argv: list[str] | None = None) -> int:
                         out_json.write_text(json.dumps(record, indent=2), encoding="utf-8")
                     else:
                         record = json.loads(out_json.read_text(encoding="utf-8"))
+
+                    # The run is only a measurement of the harness if it ran the
+                    # model the harness would have run. A worktree missing the
+                    # credential store resolves the built-in default instead,
+                    # and every number below would silently be about that.
+                    ran = (record.get("model") or "").removeprefix("[model] ").strip()
+                    if ran and ran != choice.describe():
+                        print(f"[bench] WARNING: this run used {ran}, not "
+                              f"{choice.describe()}. The result is not comparable.")
 
                     outcome = score(case, record.get("verification") or {})
                     rows.append({
