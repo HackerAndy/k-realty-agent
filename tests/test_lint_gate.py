@@ -48,19 +48,21 @@ def retrieve(opts, properties):
     assert verify.lint([path]) == []
 
 
-def test_an_unused_import_does_not_fail_a_build(tmp_path, monkeypatch):
-    """It used to, and it was the single most common reason a build was refused.
+def test_an_unused_import_is_reported_but_does_not_fail_a_build(tmp_path, monkeypatch):
+    """It used to fail one, and was the most common refusal on the codegen bench —
+    including the sole complaint against a parser the bench scored CORRECT.
 
-    Measured on the codegen bench: F401 blocked all but one build in a run, and
-    on the case the bench scored CORRECT it was the only thing wrong — an unused
-    `pytest` import in the generated test file. This gate's claim is that a value
-    computed and discarded means a wire was left unconnected, which is F841. An
-    unused import is tidiness, and refusing correct work over it costs a full
-    rebuild and teaches nothing.
+    Note it is still REPORTED. The first attempt at this deleted the rule, which
+    also deleted the finding: nobody was told again, ever. Advisory means "not
+    worth a rebuild", not "not worth knowing".
     """
     path = _write(tmp_path, monkeypatch, "from datetime import UTC, date\n\nx = date.today()\n")
 
-    assert verify.lint([path]) == []
+    findings = verify.lint([path])
+
+    assert any(f["code"] == "F401" for f in findings), "still seen"
+    assert verify.blocking(findings) == [], "just not fatal"
+    assert "tidiness" in next(f for f in findings if f["code"] == "F401")["advice"]
 
 
 def test_a_value_computed_and_discarded_is_still_caught(tmp_path, monkeypatch):
@@ -74,14 +76,14 @@ def test_a_value_computed_and_discarded_is_still_caught(tmp_path, monkeypatch):
                   '    lookback = opts["lookback_days"]\n'
                   '    return {"range": "fixed"}\n')
 
-    assert any(f["code"] == "F841" for f in verify.lint([path]))
+    assert any(f["code"] == "F841" for f in verify.blocking(verify.lint([path])))
 
 
 def test_a_name_that_does_not_exist_is_caught(tmp_path, monkeypatch):
     """The one that would crash at run time rather than merely do nothing."""
     path = _write(tmp_path, monkeypatch, "def go():\n    return undefined_helper()\n")
 
-    assert any(f["code"] == "F821" for f in verify.lint([path]))
+    assert any(f["code"] == "F821" for f in verify.blocking(verify.lint([path])))
 
 
 def test_style_is_not_the_gate_s_business(tmp_path, monkeypatch):
@@ -154,3 +156,77 @@ def test_a_file_the_agent_never_actually_wrote_is_left_to_the_other_gates(tmp_pa
     monkeypatch.setattr(verify, "REPO_ROOT", tmp_path)
 
     assert verify.lint(["core/parsers/never_written.py"]) == []
+
+
+# --- classification, not filtering ------------------------------------------
+#
+# The gate used to have one knob: a rule was selected or it did not exist. So
+# the only way to stop it refusing correct work over a triviality was to delete
+# the rule — and that loses the finding for everyone, forever. Twice in one
+# session that was nearly the answer. Findings are classified instead.
+
+def test_an_unused_exception_binding_does_not_fail_a_build(tmp_path, monkeypatch):
+    """F841 covers two different things; only one of them is this gate's business."""
+    path = _write(tmp_path, monkeypatch,
+                  "def go():\n"
+                  "    try:\n"
+                  "        pass\n"
+                  "    except ValueError as e:\n"
+                  "        raise RuntimeError('boom')\n")
+
+    findings = verify.lint([path])
+
+    assert any(f["code"] == "F841" for f in findings), "still reported"
+    assert verify.blocking(findings) == []
+    assert "naming choice" in findings[0]["advice"]
+
+
+def test_a_discarded_value_in_the_same_file_still_blocks(tmp_path, monkeypatch):
+    """The two F841s must not be confused: one is the bug the gate exists for."""
+    path = _write(tmp_path, monkeypatch,
+                  "def go(opts):\n"
+                  "    try:\n"
+                  "        pass\n"
+                  "    except ValueError as e:\n"
+                  "        raise RuntimeError('boom')\n"
+                  "    lookback = opts['lookback_days']\n"
+                  "    return {'range': 'fixed'}\n")
+
+    blocking = verify.blocking(verify.lint([path]))
+
+    assert len(blocking) == 1
+    assert "lookback" in blocking[0]["detail"]
+
+
+def test_an_unclassified_rule_blocks_by_default(tmp_path, monkeypatch):
+    """The list fails CLOSED. A rule nobody has ruled on stops a build rather
+    than slipping through because it was never considered."""
+    path = _write(tmp_path, monkeypatch, "x = 1 is 1\n")  # F632
+
+    blocking = verify.blocking(verify.lint([path]))
+
+    assert blocking and blocking[0]["code"] not in verify.ADVISORY_RULES
+
+
+def test_advisory_findings_are_recorded_on_the_verification(tmp_path, monkeypatch):
+    """Kept where the operator can reach them, rather than vanishing."""
+    path = _write(tmp_path, monkeypatch, "import os\n\nx = 1\n")
+
+    v = codegen.fold_lint({"ok": True}, [("write_file", {"path": path})])
+
+    assert v["ok"] is True, "tidiness does not fail a build"
+    assert "lint" not in v, "and is not offered as a reason it failed"
+    assert any(f["code"] == "F401" for f in v["lint_advisory"])
+
+
+def test_the_operator_is_shown_what_was_noticed_but_not_fatal():
+    """An advisory finding nobody renders is the same as one nobody recorded."""
+    v = {"ok": True, "lint_advisory": [
+        {"path": "core/parsers/x.py", "line": 3, "code": "F401",
+         "detail": "`os` imported but unused", "advice": "tidiness, not a disconnected wire"}]}
+
+    said = verify.notes(v)
+
+    assert said and "core/parsers/x.py line 3" in said[0]
+    assert "tidiness" in said[0]
+    assert verify.blockers(v) == [], "a note is not a refusal"

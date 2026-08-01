@@ -511,3 +511,25 @@ def test_the_worker_arms_a_watchdog_and_feeds_it_every_event(tmp_path, monkeypat
     assert beats[0] == "<started>"
     assert "reading the failure logs" in beats and "wrote the fix" in beats
     assert beats[-1] == "<stopped>", "and disarmed when the run ends"
+
+
+def test_an_advisory_finding_reaches_the_screen(tmp_path, monkeypatch):
+    """Classifying a finding as advisory only beats deleting the rule if the
+    operator still sees it. Otherwise both roads end at nobody being told."""
+    _seed(tmp_path, monkeypatch, [
+        {"type": "result", "result": {
+            "verification": {
+                "ok": True, "test": {"ok": True}, "transactions": [{"amount": 1.0}],
+                "lint_advisory": [{"path": "core/parsers/x.py", "line": 3, "code": "F401",
+                                   "detail": "`os` imported but unused",
+                                   "advice": "tidiness, not a disconnected wire"}],
+            },
+            "agent_summary": "done", "tool_calls": [],
+        }},
+    ], exit_code=0)
+
+    payload = mcp_tools.build_status("k")
+
+    assert payload["passed"] is True
+    assert payload["blockers"] == []
+    assert any("`os` imported but unused" in n for n in payload["notes"])

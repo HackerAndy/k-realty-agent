@@ -138,19 +138,36 @@ def hardcoded_options(path: str) -> list[dict]:
 # that blocks a build over line length teaches the agent to fight the formatter.
 LINT_RULES = "F,E9"
 
-# F401 (imported but unused) is excluded, and it is the one exclusion inside an
-# otherwise-included family, so it needs its reason written down.
+# Which findings actually fail a build.
 #
-# This gate exists for a specific claim: a value computed and then discarded is
-# usually a wire left unconnected — if it came from the operator's settings, the
-# setting is silently being ignored. That is F841, and F821 (an undefined name)
-# is a plain runtime crash. Both must keep failing builds.
+# The gate used to have one knob: a rule was selected or it did not exist. So the
+# only way to stop it refusing correct work over a triviality was to delete the
+# whole rule, and deleting a rule loses the finding entirely — nobody is told
+# again, ever. That happened once with F401 and was about to happen to F841,
+# which on the same bench run was catching a genuinely broken parser.
 #
-# An unused import is neither. It is tidiness, and measured on the bench it was
-# the sole reason a parser that read its document correctly was refused — twice,
-# both times for an import in the generated *test* file. Refusing correct work
-# over it costs a whole rebuild and teaches nothing.
-LINT_IGNORE = "F401"
+# So findings are CLASSIFIED instead of filtered. Everything ruff reports is
+# kept; a finding blocks unless it is listed below as advisory, with a reason.
+# Note the direction: this list fails CLOSED. A rule ruff gains tomorrow blocks a
+# build until someone decides otherwise in writing, rather than slipping through
+# because nobody thought about it.
+#
+# The gate's claim, which decides what belongs here: a value computed and then
+# discarded is usually a wire left unconnected — if it came from the operator's
+# settings, the setting is silently being ignored. Anything that isn't that, and
+# doesn't change behaviour, is advisory.
+ADVISORY_RULES: dict[str, str] = {
+    "F401": "an unused import changes no behaviour and hides no setting — tidiness, "
+            "not a disconnected wire",
+}
+
+# F841 covers two different things under one code, which is why it needs a case
+# of its own rather than an entry above: `lookback = opts[...]` never used is
+# exactly the bug this gate exists for, while `except ValueError as e` with an
+# unused `e` is a naming choice. Ruff reports the latter on the `except` line,
+# so the AST can tell them apart — verified against ruff, not assumed.
+UNUSED_EXCEPTION_BINDING = ("an unused `except ... as` binding is a naming choice, not a "
+                            "discarded computation — no setting is being ignored")
 
 
 def lint(paths: list[str], timeout: int = 60) -> list[dict]:
@@ -183,7 +200,6 @@ def lint(paths: list[str], timeout: int = 60) -> list[dict]:
         # from whatever directory the check happens to run in.
         proc = subprocess.run(
             [sys.executable, "-m", "ruff", "check", f"--select={LINT_RULES}",
-             f"--ignore={LINT_IGNORE}",
              "--output-format=json", *[str(REPO_ROOT / p) for p in targets]],
             cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=timeout,
         )
@@ -196,15 +212,60 @@ def lint(paths: list[str], timeout: int = 60) -> list[dict]:
         return []
 
     out: list[dict] = []
+    handlers: dict[str, set[int]] = {}
     for item in findings:
         location = item.get("location") or {}
+        path = item.get("filename", "").replace(str(REPO_ROOT) + "/", "")
+        code = item.get("code") or ""
+        line = location.get("row")
+        advice = _advisory_reason(code, path, line, handlers)
         out.append({
-            "path": item.get("filename", "").replace(str(REPO_ROOT) + "/", ""),
-            "line": location.get("row"),
-            "code": item.get("code"),
+            "path": path,
+            "line": line,
+            "code": code,
             "detail": item.get("message", ""),
+            # Kept whatever the verdict: a finding that doesn't block is still a
+            # finding, and dropping it is how the last two of these went missing.
+            "blocking": advice is None,
+            "advice": advice or "",
         })
     return out
+
+
+def blocking(findings: list[dict]) -> list[dict]:
+    """The findings that fail a build. Everything else is advisory and kept."""
+    return [f for f in findings if f.get("blocking", True)]
+
+
+def _advisory_reason(code: str, path: str, line: int | None,
+                     handlers: dict[str, set[int]]) -> str | None:
+    """Why this finding does NOT fail the build, or None if it does.
+
+    Defaults to None — blocking — so an unclassified rule stops a build rather
+    than passing unnoticed.
+    """
+    if code in ADVISORY_RULES:
+        return ADVISORY_RULES[code]
+    if code == "F841":
+        if path not in handlers:
+            handlers[path] = _exception_binding_lines(REPO_ROOT / path)
+        if line in handlers[path]:
+            return UNUSED_EXCEPTION_BINDING
+    return None
+
+
+def _exception_binding_lines(full: Path) -> set[int]:
+    """Lines carrying an `except ... as <name>:` handler.
+
+    Ruff reports an unused exception binding as F841 against the `except` line,
+    so the line number is enough to tell it apart from a discarded computation.
+    """
+    try:
+        tree = ast.parse(full.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, UnicodeDecodeError, ValueError):
+        return set()
+    return {node.lineno for node in ast.walk(tree)
+            if isinstance(node, ast.ExceptHandler) and node.name}
 
 
 def declares_settings(path: str) -> bool:
@@ -476,6 +537,22 @@ def covers_changes(test_path: str, code_paths: list[str], timeout: int = 300) ->
         "detail": "Every changed line ran under the test." if not uncovered else
                   "; ".join(f"{p} lines {ls}" for p, ls in uncovered.items()),
     }
+
+
+def notes(verification: dict) -> list[str]:
+    """What was seen but did not refuse the build, in the operator's words.
+
+    The counterpart to `blockers`, and the reason findings are classified rather
+    than filtered. Deleting a rule to stop it refusing correct work also deletes
+    the finding — nobody is ever told again. Advisory means "not worth a
+    rebuild", not "not worth knowing", and that is only true if it reaches the
+    screen.
+    """
+    out: list[str] = []
+    for finding in verification.get("lint_advisory") or []:
+        where = f"{finding.get('path')} line {finding.get('line')}"
+        out.append(f"{where}: {finding.get('detail')} — {finding.get('advice')}.")
+    return out
 
 
 def blockers(verification: dict) -> list[str]:

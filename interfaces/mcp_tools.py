@@ -1844,6 +1844,11 @@ def build_status(source_key: str, event_offset: int = 0) -> dict:
     # WHY it was refused, named specifically. "Its test did NOT pass" was reported
     # for every refusal, including runs whose test passed.
     payload["blockers"] = _verify.blockers(verification)
+    # What was seen and deliberately not treated as fatal. Shown because the
+    # alternative to classifying a finding as advisory is deleting the rule, and
+    # that makes it invisible to everyone forever — which is the masking this
+    # project doesn't do.
+    payload["notes"] = _verify.notes(verification)
     payload["no_change_reason"] = verification.get("no_change_reason") or ""
     # WHAT it did, as files and commands. The agent's own prose can run to tens of
     # thousands of characters; the list of files it wrote cannot.

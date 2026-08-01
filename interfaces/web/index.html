@@ -1858,6 +1858,14 @@
     const v = r.verification || {};
     const test = v.test || {};
     const txns = v.transactions || [];
+    // Seen, and deliberately not fatal. Shown on a PASSING build too — an
+    // advisory finding nobody renders is the same as one nobody recorded, and
+    // making findings disappear is what classifying them replaced.
+    const noted = (st.notes && st.notes.length)
+      ? '<div class="muted" style="margin-top:8px">Also noticed, not blocking:' +
+        '<ul style="margin:4px 0 0 18px;padding:0">' +
+        st.notes.map(n => '<li>' + esc(n) + '</li>').join('') + '</ul></div>'
+      : '';
     let verdict;
     if (!st.passed) {
       // Name what actually refused it. "The test did not pass" was shown for every
@@ -1867,13 +1875,14 @@
         ? '<ul style="margin:6px 0 0 18px;padding:0">' +
           st.blockers.map(b => '<li>' + esc(b) + '</li>').join('') + '</ul>'
         : '';
-      verdict = '<div class="verdict fail">Not usable yet</div>' + why;
+      verdict = '<div class="verdict fail">Not usable yet</div>' + why + noted;
     } else if (kind === 'scraper') {
       // A scraper self-registers; the proof is its test, and then a real run.
       verdict = '<div class="verdict pass">Test passed' +
-        (v.registered ? ' — scraper registered' : '') + '</div>';
+        (v.registered ? ' — scraper registered' : '') + '</div>' + noted;
     } else {
-      verdict = '<div class="verdict pass">Test passed — ' + txns.length + ' transactions parsed</div>';
+      verdict = '<div class="verdict pass">Test passed — ' + txns.length +
+        ' transactions parsed</div>' + noted;
     }
 
     let body = verdict;
@@ -1994,7 +2003,7 @@
     try {
       await callTool('start_build', args);
       st.status = 'running'; st.events = []; st.result = null; st.passed = false;
-      st.blockers = []; st.did = null; st.message = null;
+      st.blockers = []; st.notes = []; st.did = null; st.message = null;
       st.token = (st.token || 0) + 1;
       await renderIngest();
       pollBuild(key, st.token);
@@ -2045,6 +2054,7 @@
       st.result = s.result || null;
       st.passed = !!s.passed;
       st.blockers = s.blockers || [];
+      st.notes = s.notes || [];
       st.did = s.did || null;
       st.message = s.message || null;
       if (s.status === 'completed') {
@@ -2108,7 +2118,7 @@
   function resetBuild(key) {
     const st = bs(key);
     st.status = 'idle'; st.events = []; st.result = null; st.passed = false;
-    st.blockers = []; st.did = null; st.message = null;
+    st.blockers = []; st.notes = []; st.did = null; st.message = null;
     st.token = (st.token || 0) + 1;   // orphan any in-flight poller
     renderIngest();
   }

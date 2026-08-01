@@ -161,9 +161,17 @@ def fold_lint(verification: dict, tool_calls: list[tuple[str, dict]]) -> dict:
     names it for free.
     """
     findings = lint(files_written(tool_calls))
-    if findings:
-        verification["lint"] = findings
+    blocking = [f for f in findings if f.get("blocking", True)]
+    advisory = [f for f in findings if not f.get("blocking", True)]
+    if blocking:
+        verification["lint"] = blocking
         verification["ok"] = False
+    # Recorded even though it changes nothing, because the alternative — dropping
+    # the rule so the finding never appears — is how F401 stopped being visible
+    # to anyone at all. Advisory means "not worth a rebuild", not "not worth
+    # knowing".
+    if advisory:
+        verification["lint_advisory"] = advisory
     return verification
 
 
