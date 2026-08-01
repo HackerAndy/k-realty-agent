@@ -36,6 +36,21 @@ KEEP_LAST_RESULTS = 6
 # Below this a result is left alone: collapsing it saves nothing worth the loss.
 MIN_COLLAPSE_CHARS = 300
 
+# Don't trim at all until the conversation is this big, then trim hard.
+#
+# The first version trimmed every turn it could, and that is the expensive way
+# to do it: trimming rewrites OLD messages, which is exactly the prefix a server
+# keeps in its KV cache, so each one plausibly forces a full re-prefill. It fired
+# on 30 of one run's 47 turns and that run took 2.4x as long as the same case
+# before trimming existed.
+#
+# Waiting until there is a reason keeps the prefix byte-identical across most
+# turns, and collapsing everything at once when the moment comes buys enough
+# room that the next trim is many turns away. 48,000 chars is ~12k tokens: well
+# clear of the ~33k where a local model started refusing prompts, and high enough
+# that a short run never trims at all.
+TRIM_ABOVE_CHARS = 48_000
+
 # Turns trimming off. Spelled as a keep-count larger than any run rather than a
 # flag, so there is exactly one knob and no second code path to get wrong.
 # Note 0 is NOT this: 0 means keep none, i.e. trim everything the agent is not
@@ -141,14 +156,23 @@ def collapse_stale_results(
     ledger: Ledger,
     keep_last: int = KEEP_LAST_RESULTS,
     min_chars: int = MIN_COLLAPSE_CHARS,
+    trim_above: int = TRIM_ABOVE_CHARS,
 ) -> int:
     """Replace the text of old, large tool results with a stub. Returns chars saved.
+
+    Does nothing until the conversation exceeds `trim_above` characters — see
+    that constant for why waiting is worth more than trimming early.
 
     `tool_by_id` maps a tool_use/tool_call id to the tool's name, so the stub can
     say which tool it is standing in for. A result whose id is unknown is still
     collapsed — under a generic name rather than being left alone, since being
     unable to name it is not a reason to keep 8,000 characters of it.
     """
+    # `<`, not `<=`, so trim_above=0 means "always" rather than "never on an
+    # empty conversation" — the degenerate case the tests lean on.
+    if ledger.live_total < trim_above:
+        return 0
+
     slots = list(_result_slots(messages))
     stale = slots[:-keep_last] if keep_last else slots
 

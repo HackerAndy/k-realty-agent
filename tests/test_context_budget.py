@@ -61,7 +61,7 @@ def test_trimming_is_subtracted_from_the_live_total():
     ledger.note_result("run_command", "z" * 5000)
     messages = [_anthropic([("a", "z" * 5000)])]
 
-    collapse_stale_results(messages, {"a": "run_command"}, ledger, keep_last=0)
+    collapse_stale_results(messages, {"a": "run_command"}, ledger, trim_above=0, keep_last=0)
 
     assert ledger.live_total < 500
     assert ledger.trimmed_count == 1
@@ -73,7 +73,7 @@ def test_an_old_result_is_replaced_in_the_anthropic_shape():
     messages = [_anthropic([("a", "out" * 500), ("b", "recent" * 200)])]
 
     collapse_stale_results(messages, {"a": "run_command", "b": "read_file"},
-                           Ledger(), keep_last=1)
+                           Ledger(), trim_above=0, keep_last=1)
 
     blocks = messages[0]["content"]
     assert TRIM_MARKER in blocks[0]["content"]
@@ -85,7 +85,7 @@ def test_an_old_result_is_replaced_in_the_openai_shape():
     messages = _openai([("a", "out" * 500), ("b", "recent" * 200)])
 
     collapse_stale_results(messages, {"a": "run_command", "b": "read_file"},
-                           Ledger(), keep_last=1)
+                           Ledger(), trim_above=0, keep_last=1)
 
     assert TRIM_MARKER in messages[0]["content"]
     assert messages[1]["content"].startswith("recent")
@@ -97,7 +97,7 @@ def test_no_message_is_ever_removed():
     messages = _openai([(str(i), "out" * 500) for i in range(5)])
     before = len(messages)
 
-    collapse_stale_results(messages, {}, Ledger(), keep_last=0)
+    collapse_stale_results(messages, {}, Ledger(), trim_above=0, keep_last=0)
 
     assert len(messages) == before
     assert all(m["role"] == "tool" and m["tool_call_id"] for m in messages)
@@ -108,7 +108,7 @@ def test_the_assistant_payload_is_not_touched():
     assistant = {"role": "assistant", "content": "I will run the tests" * 100}
     messages = [assistant, *_openai([("a", "out" * 500)])]
 
-    collapse_stale_results(messages, {}, Ledger(), keep_last=0)
+    collapse_stale_results(messages, {}, Ledger(), trim_above=0, keep_last=0)
 
     assert assistant["content"].startswith("I will run the tests")
 
@@ -121,7 +121,7 @@ def test_objects_that_are_not_dicts_are_stepped_over():
     messages = [{"role": "assistant", "content": [_SdkBlock()]},
                 *_openai([("a", "out" * 500)])]
 
-    collapse_stale_results(messages, {}, Ledger(), keep_last=0)  # must not raise
+    collapse_stale_results(messages, {}, Ledger(), trim_above=0, keep_last=0)  # must not raise
 
     assert TRIM_MARKER in messages[1]["content"]
 
@@ -131,7 +131,7 @@ def test_objects_that_are_not_dicts_are_stepped_over():
 def test_recent_results_are_kept_verbatim():
     messages = _openai([(str(i), f"result-{i}" + "x" * 500) for i in range(8)])
 
-    collapse_stale_results(messages, {}, Ledger(), keep_last=3)
+    collapse_stale_results(messages, {}, Ledger(), trim_above=0, keep_last=3)
 
     assert all(TRIM_MARKER in m["content"] for m in messages[:5])
     assert all(TRIM_MARKER not in m["content"] for m in messages[5:])
@@ -141,7 +141,7 @@ def test_zero_means_keep_none_not_keep_everything():
     """The reading that caught out the first draft of the bench flag."""
     messages = _openai([(str(i), "x" * 5000) for i in range(3)])
 
-    collapse_stale_results(messages, {}, Ledger(), keep_last=0)
+    collapse_stale_results(messages, {}, Ledger(), trim_above=0, keep_last=0)
 
     assert all(TRIM_MARKER in m["content"] for m in messages)
 
@@ -149,7 +149,7 @@ def test_zero_means_keep_none_not_keep_everything():
 def test_a_small_result_is_not_worth_collapsing():
     messages = _openai([("a", "ok"), ("b", "x" * 5000)])
 
-    collapse_stale_results(messages, {}, Ledger(), keep_last=0)
+    collapse_stale_results(messages, {}, Ledger(), trim_above=0, keep_last=0)
 
     assert messages[0]["content"] == "ok"
 
@@ -159,7 +159,7 @@ def test_keeping_everything_is_available_for_comparison():
     from orchestration.context_budget import KEEP_ALL
     messages = _openai([(str(i), "x" * 5000) for i in range(4)])
 
-    saved = collapse_stale_results(messages, {}, Ledger(), keep_last=KEEP_ALL)
+    saved = collapse_stale_results(messages, {}, Ledger(), trim_above=0, keep_last=KEEP_ALL)
 
     assert saved == 0
     assert all(m["content"] == "x" * 5000 for m in messages)
@@ -169,8 +169,8 @@ def test_collapsing_twice_does_not_collapse_the_collapse():
     messages = _openai([("a", "x" * 5000), ("b", "y" * 5000)])
     ledger = Ledger()
 
-    first = collapse_stale_results(messages, {}, ledger, keep_last=0)
-    second = collapse_stale_results(messages, {}, ledger, keep_last=0)
+    first = collapse_stale_results(messages, {}, ledger, trim_above=0, keep_last=0)
+    second = collapse_stale_results(messages, {}, ledger, trim_above=0, keep_last=0)
 
     assert first > 0 and second == 0
     assert ledger.trimmed_count == 2
@@ -180,7 +180,7 @@ def test_an_unknown_id_is_still_collapsed():
     """Being unable to name the tool is not a reason to keep 8,000 characters."""
     messages = _openai([("mystery", "x" * 5000)])
 
-    collapse_stale_results(messages, {}, Ledger(), keep_last=0)
+    collapse_stale_results(messages, {}, Ledger(), trim_above=0, keep_last=0)
 
     assert TRIM_MARKER in messages[0]["content"]
 
@@ -250,7 +250,7 @@ def test_the_loop_fills_the_ledger(monkeypatch):
 
 def test_the_loop_trims_before_the_request_that_has_to_fit(monkeypatch):
     adapter, result, _ = _run(monkeypatch, [_cmd_turn(str(i)) for i in range(6)],
-                              keep_last_results=2)
+                              keep_last_results=2, trim_above_chars=0)
 
     final = adapter.messages_seen[-1]
     trimmed = [m for m in final if TRIM_MARKER in str(m.get("content", ""))]
@@ -303,3 +303,43 @@ def test_a_request_that_raises_still_reports_the_breakdown(monkeypatch):
 
     assert any("where it went" in e for e in events)
     assert any("run_command results" in e for e in events)
+
+
+# --- when trimming happens --------------------------------------------------
+
+def test_a_short_conversation_is_left_completely_alone():
+    """Trimming rewrites old messages, which is the prefix a server caches. Doing
+    it before there is a reason costs a re-prefill and buys nothing."""
+    ledger = Ledger()
+    ledger.note_result("run_command", "x" * 5000)
+    messages = _openai([("a", "x" * 5000), ("b", "y" * 5000)])
+
+    saved = collapse_stale_results(messages, {}, ledger, keep_last=0, trim_above=48_000)
+
+    assert saved == 0
+    assert all(m["content"].startswith(("x", "y")) for m in messages)
+
+
+def test_crossing_the_threshold_trims_hard():
+    """One big collapse buys many quiet turns; drip-feeding buys another re-prefill."""
+    ledger = Ledger()
+    ledger.note_result("run_command", "x" * 60_000)
+    messages = _openai([(str(i), "x" * 6000) for i in range(10)])
+
+    saved = collapse_stale_results(messages, {}, ledger, keep_last=2, trim_above=48_000)
+
+    assert saved > 40_000, "should reclaim most of it in one go"
+    assert sum(TRIM_MARKER in m["content"] for m in messages) == 8
+
+
+def test_the_threshold_is_measured_on_what_is_still_live():
+    """Already-trimmed characters must not keep the conversation over the line,
+    or every subsequent turn trims again for nothing."""
+    ledger = Ledger()
+    ledger.note_result("run_command", "x" * 60_000)
+    ledger.trimmed_chars = 55_000
+
+    saved = collapse_stale_results(_openai([("a", "x" * 6000)]), {}, ledger,
+                                   keep_last=0, trim_above=48_000)
+
+    assert saved == 0

@@ -48,10 +48,33 @@ def retrieve(opts, properties):
     assert verify.lint([path]) == []
 
 
-def test_an_unused_import_is_caught_too(tmp_path, monkeypatch):
+def test_an_unused_import_does_not_fail_a_build(tmp_path, monkeypatch):
+    """It used to, and it was the single most common reason a build was refused.
+
+    Measured on the codegen bench: F401 blocked all but one build in a run, and
+    on the case the bench scored CORRECT it was the only thing wrong — an unused
+    `pytest` import in the generated test file. This gate's claim is that a value
+    computed and discarded means a wire was left unconnected, which is F841. An
+    unused import is tidiness, and refusing correct work over it costs a full
+    rebuild and teaches nothing.
+    """
     path = _write(tmp_path, monkeypatch, "from datetime import UTC, date\n\nx = date.today()\n")
 
-    assert any(f["code"] == "F401" for f in verify.lint([path]))
+    assert verify.lint([path]) == []
+
+
+def test_a_value_computed_and_discarded_is_still_caught(tmp_path, monkeypatch):
+    """The rule the gate actually exists for — dropping F401 must not drop this.
+
+    A setting read and then not used is worse than one hardcoded, because the
+    screen offers a choice that silently does nothing.
+    """
+    path = _write(tmp_path, monkeypatch,
+                  'def retrieve(opts):\n'
+                  '    lookback = opts["lookback_days"]\n'
+                  '    return {"range": "fixed"}\n')
+
+    assert any(f["code"] == "F841" for f in verify.lint([path]))
 
 
 def test_a_name_that_does_not_exist_is_caught(tmp_path, monkeypatch):

@@ -331,18 +331,23 @@ def run_agent(
     model: str | None = None,
     api_url: str | None = None,
     keep_last_results: int = -1,
+    trim_above_chars: int = -1,
 ) -> AgentResult:
     """Run the tool-use loop until the model stops calling tools (or the turn
     cap is hit). `on_event` receives human-readable progress lines.
 
     `keep_last_results` is how many recent tool results stay verbatim; older
-    large ones are replaced by a stub. -1 takes the default;
+    large ones are replaced by a stub, but only once the conversation exceeds
+    `trim_above_chars`. Both take -1 for the default.
     `context_budget.KEEP_ALL` turns trimming off, which is how the bench
     measures what it is worth. Note 0 means keep NONE, not keep everything.
     """
     if keep_last_results < 0:
         keep_last_results = int(os.getenv("AGENT_KEEP_LAST_RESULTS",
                                           str(context_budget.KEEP_LAST_RESULTS)))
+    if trim_above_chars < 0:
+        trim_above_chars = int(os.getenv("AGENT_TRIM_ABOVE_CHARS",
+                                         str(context_budget.TRIM_ABOVE_CHARS)))
     choice = llm_provider.resolve(provider=provider, model=model, base_url=api_url)
     # Say which model is about to do the work. The operator picks one in
     # Settings; a run that silently used a different one would be unauditable.
@@ -371,7 +376,8 @@ def run_agent(
         # fit. Results the agent has already acted on become a one-line stub —
         # nothing is removed, so tool_use/tool_result pairing is untouched.
         freed = context_budget.collapse_stale_results(messages, tool_by_id, ledger,
-                                                      keep_last=keep_last_results)
+                                                      keep_last=keep_last_results,
+                                                      trim_above=trim_above_chars)
         if freed:
             on_event(f"  [trimmed ~{freed // context_budget.CHARS_PER_TOKEN:,} tokens of "
                      f"tool output the agent had finished with]")

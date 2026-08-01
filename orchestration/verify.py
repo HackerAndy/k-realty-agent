@@ -138,6 +138,20 @@ def hardcoded_options(path: str) -> list[dict]:
 # that blocks a build over line length teaches the agent to fight the formatter.
 LINT_RULES = "F,E9"
 
+# F401 (imported but unused) is excluded, and it is the one exclusion inside an
+# otherwise-included family, so it needs its reason written down.
+#
+# This gate exists for a specific claim: a value computed and then discarded is
+# usually a wire left unconnected — if it came from the operator's settings, the
+# setting is silently being ignored. That is F841, and F821 (an undefined name)
+# is a plain runtime crash. Both must keep failing builds.
+#
+# An unused import is neither. It is tidiness, and measured on the bench it was
+# the sole reason a parser that read its document correctly was refused — twice,
+# both times for an import in the generated *test* file. Refusing correct work
+# over it costs a whole rebuild and teaches nothing.
+LINT_IGNORE = "F401"
+
 
 def lint(paths: list[str], timeout: int = 60) -> list[dict]:
     """Code that reads as if it works and doesn't.
@@ -169,6 +183,7 @@ def lint(paths: list[str], timeout: int = 60) -> list[dict]:
         # from whatever directory the check happens to run in.
         proc = subprocess.run(
             [sys.executable, "-m", "ruff", "check", f"--select={LINT_RULES}",
+             f"--ignore={LINT_IGNORE}",
              "--output-format=json", *[str(REPO_ROOT / p) for p in targets]],
             cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=timeout,
         )
