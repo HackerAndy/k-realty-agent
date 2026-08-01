@@ -206,6 +206,45 @@ Everything else reported here as a result sits inside run-to-run variance. Use
 `--repeat 3` for any comparison that matters, and read the per-case gate column
 as noise unless it moves the same way repeatedly.
 
+### The n=3 re-baseline, `5b59f43` — and a claim it retracts
+
+Nine builds, three per case. **gate 5/9 (56%), correct 2/9 (22%).**
+
+| case | gate | correct | note |
+|---|---|---|---|
+| riverbend | 2/3 | **2/3** | the third died on `IncompleteRead`, a transport fault, not code |
+| summit | 2/3 | **0/3** | sign inversion, all three |
+| harbor | 1/3 | **0/3** | never correct in ~9 attempts total |
+
+**Retraction: the sign-convention contracts did not fix summit.** This document
+said they had, on the strength of two consecutive correct runs. At n=3 it is
+0/3, and 2/5 across every run since the change — indistinguishable from the
+coin-flip it looked like a fix for. The lesson about n=1 applied to the one
+result claimed as robust, which is exactly where it was least welcome.
+
+**No OOM in nine builds.** That signal does hold: the prefill refusals that
+killed two cases four times over are gone, across three times the sample.
+
+**The real problem is now the false-pass rate: 3 of 9 approved while wrong.**
+One of those approved harbor having extracted **1 transaction out of 6**. The
+empty-extraction gate catches nothing-at-all and cannot see a partial read.
+
+What would: **reconciliation, which parsers are not required to do.** The
+scraper contract makes it mandatory — `reconcile.record(...)` against the
+source's own totals, or an explicit `NO_CONTROL_TOTALS`, and the build fails
+without it. The parser contract only suggests it "if the document shows totals".
+Every bench document publishes one: riverbend a Totals row and a running
+balance, summit a New Balance, harbor per-property subtotals and a net line.
+Harbor's 1-of-6 would have failed on arithmetic alone.
+
+That is parity with a rule this project already argues for in its own words —
+*the ONLY signal that answers "did we pull everything"* — and it is the shortest
+path to the failure that matters most for financial data.
+
+**Turn exhaustion is the joint-top blocker**: "hit the 40-turn cap" in 3 of 9,
+all on summit and harbor, which matches the observed habit of debugging by
+re-running `python -c` with print statements instead of reading the failure.
+
 ### What that changes
 
 **Phase 3 (condensation) moves ahead of Phase 2 (more loop rounds).** The two
