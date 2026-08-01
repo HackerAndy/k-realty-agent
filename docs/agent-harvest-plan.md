@@ -307,9 +307,13 @@ early when it stops improving, and says which of the three ways it ended.
 
 ## Phase 3 — condensation
 
-- [ ] Not started. **Promoted ahead of Phase 2** — this is now the binding
-      constraint, measured, not predicted. Start with 3a; it needs no LLM call
-      and targets the whole-file reads that dominate.
+- [x] **3a done** (`20267d0`) — context accounting, then collapsing stale tool
+      results. Measured: the OOM deaths are gone; live context peaks at ~19.3k
+      tokens where runs used to die at 33.8k–35.1k.
+- [ ] 3a follow-up: trim on a size threshold instead of on every turn, so the
+      cacheable prefix stops being rewritten. See "The cost 3a introduced".
+- [ ] 3b (LLM summarisation) — not started, and possibly unnecessary: 3a alone
+      got every case under the ceiling. Revisit only if runs start dying again.
 
 We have none: messages grow monotonically until the local model's fixed window
 blows. More rounds from Phase 2 makes this urgent. `degeneration.collapse` trims
