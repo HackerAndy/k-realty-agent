@@ -21,6 +21,10 @@ _googleEmail/
 # Coverage data written by the code-gen gate (orchestration/verify.py)
 .coverage*
 
+# Codegen bench output — logs, and the parsers the agent wrote during a run.
+# Scratch for diagnosis; headline numbers belong in docs/agent-harvest-plan.md.
+orchestration/bench/results/
+
 # Agent worktrees — full working copies of this repo (hundreds of MB), created
 # per background task. The skills beside them (.claude/skills) ARE tracked.
 .claude/worktrees/

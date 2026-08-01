@@ -1,0 +1,13 @@
+Riverbend Credit Union - Transaction Export
+Account 8841 - Generated 3/31/2026
+
+Account,Posted,Description,Type,Amount,Running Balance
+8841,03/02/2026,Payroll ACH - RIVERBEND MFG,Deposit,"2,450.00","4,450.00"
+8841,03/05/2026,Hardware store #221,Debit Card,(128.45),"4,321.55"
+8841,03/09/2026,Mortgage payment,Transfer,"(1,340.00)","2,981.55"
+8841,03/12/2026,Refund - Oak Supply,Credit,62.10,"3,043.65"
+8841,03/15/2026,Utility - City Water,ACH,(86.20),"2,957.45"
+8841,03/19/2026,Insurance premium,ACH,(212.00),"2,745.45"
+8841,03/24/2026,Rent received - 12 Elm,Deposit,"1,150.00","3,895.45"
+8841,03/28/2026,Maintenance - Ace Plumbing,Check,(475.00),"3,420.45"
+,,Totals,,"1,420.45","3,420.45"
