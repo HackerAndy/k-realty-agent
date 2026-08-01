@@ -25,7 +25,20 @@ from orchestration.codegen import run_codegen_gated
 from orchestration.verify import run_test_file, test_path_for
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SYSTEM_PROMPT_PATH = REPO_ROOT / "core" / "prompts" / "scraper_builder.v1.md"
+PROMPTS = REPO_ROOT / "core" / "prompts"
+# The invariants both jobs share, plus the half that applies to the job at hand.
+# Building and fixing want genuinely different instructions: how to read a
+# demonstration is the bulk of the build prompt and is dead weight on a revise —
+# the demonstration isn't even the source of truth there, since the failure being
+# fixed happened after it. Sending it anyway spent context on advice the agent had
+# to read past, on the runs least able to afford it.
+CONTRACT_PATH = PROMPTS / "scraper_contract.v1.md"
+SYSTEM_PROMPT_PATH = PROMPTS / "scraper_builder.v1.md"
+REVISE_PROMPT_PATH = PROMPTS / "scraper_reviser.v1.md"
+
+
+def _system(job: Path) -> str:
+    return CONTRACT_PATH.read_text() + "\n\n" + job.read_text()
 
 
 def build_scraper_for_source(
@@ -46,7 +59,7 @@ def build_scraper_for_source(
     else:
         on_event(f"Reusing your captured demonstration → {demo_path}. The agent will now write the scraper.\n")
 
-    system = SYSTEM_PROMPT_PATH.read_text()
+    system = _system(SYSTEM_PROMPT_PATH)
     task = (
         f"Build a portal scraper for the source '{source_key}'"
         + (f" ({source_label})" if source_label else "")
@@ -61,7 +74,9 @@ def build_scraper_for_source(
     )
 
     result, verification = run_codegen_gated(
-        task, system, lambda: verify_scraper(source_key), on_event=on_event, test_path=test_path_for("scraper", source_key)
+        task, system, lambda: verify_scraper(source_key), on_event=on_event,
+        test_path=test_path_for("scraper", source_key),
+        reconcile_path=f"core/scrapers/{source_key}.py",
     )
     return {
         "source_key": source_key,
@@ -82,7 +97,7 @@ def revise_scraper_for_source(
     reads its own failure logs (read_logs) plus any operator feedback, fixes
     core/scrapers/<source_key>.py, and re-verifies. Used both when the operator
     requests changes and when a build fails verification."""
-    system = SYSTEM_PROMPT_PATH.read_text()
+    system = _system(REVISE_PROMPT_PATH)
     task = (
         f"The scraper at core/scrapers/{source_key}.py needs fixing.\n\n"
         "First call read_logs to see the harness's own recent failure records — the actual "
@@ -92,12 +107,16 @@ def revise_scraper_for_source(
         + f"\nRead the current scraper first, keep it registered under '{source_key}', preserve "
         f"the source's real columns in Transaction.fields, UPDATE the test at "
         f"{test_path_for('scraper', source_key)} to cover the fix and run it — it MUST pass "
-        "(the harness re-runs it). Say what you changed."
+        "(the harness re-runs it). Say what you changed.\n"
+        "If you find the code is ALREADY correct — the reported problem was fixed on an "
+        "earlier run — call no_change_needed with what you checked, and stop. Do not invent "
+        "an edit to satisfy the gate."
     )
     result, verification = run_codegen_gated(
         task, system, lambda: verify_scraper(source_key),
         on_event=on_event, require_changes=True,
         test_path=test_path_for("scraper", source_key),
+        reconcile_path=f"core/scrapers/{source_key}.py",
     )
     return {
         "source_key": source_key,

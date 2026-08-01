@@ -23,9 +23,12 @@ from collections.abc import Callable
 
 import anthropic
 
+from core.observability import get_logger
 from core.tools import llm_provider
-from orchestration import agent_tools
+from orchestration import agent_tools, degeneration
 from orchestration.repetition import RepetitionDetector
+
+log = get_logger("orchestration.agent")
 
 # Which provider/model to use is decided in ONE place — core/tools/llm_provider —
 # from what the operator chose in Settings. These re-exports keep the old import
@@ -70,6 +73,11 @@ class ProviderTurn:
     assistant_payload: object
     text_blocks: list[str]
     tool_calls: list[ToolCall]
+    # Set when this turn's prose was a loop and got trimmed before it entered the
+    # conversation. Trimming has to happen HERE, in the adapter, because the
+    # assistant payload is provider-shaped and this is the last place its text is
+    # still separable from its tool calls.
+    looped: degeneration.Degeneration | None = None
 
 
 class LLMAdapter:
@@ -84,6 +92,28 @@ class LLMAdapter:
 
     def append_tool_results(self, messages: list[dict], results: list[ToolResult]) -> None:
         raise NotImplementedError
+
+
+def _collapse_anthropic_content(content: list) -> tuple[list, degeneration.Degeneration | None]:
+    """Trim a looping text block in place, leaving tool_use blocks untouched.
+
+    The SDK's blocks are objects, not dicts, so a trimmed text block is rebuilt as
+    the plain dict the API also accepts — the assistant payload is only ever sent
+    back, never re-read as an SDK object.
+    """
+    found = None
+    out = []
+    for block in content:
+        if getattr(block, "type", None) != "text":
+            out.append(block)
+            continue
+        kept, looped = degeneration.collapse(block.text)
+        if looped is None:
+            out.append(block)
+            continue
+        found = found or looped
+        out.append({"type": "text", "text": kept})
+    return out, found
 
 
 class AnthropicAdapter(LLMAdapter):
@@ -109,13 +139,15 @@ class AnthropicAdapter(LLMAdapter):
         ) as stream:
             message = stream.get_final_message()
 
-        text_blocks = [block.text.strip() for block in message.content if block.type == "text" and block.text.strip()]
+        content, looped = _collapse_anthropic_content(message.content)
+        text_blocks = [block.text.strip() for block in content if block.type == "text" and block.text.strip()]
         tool_calls = [
             ToolCall(id=block.id, name=block.name, input=block.input)
-            for block in message.content
+            for block in content
             if block.type == "tool_use"
         ]
-        return ProviderTurn(assistant_payload=message.content, text_blocks=text_blocks, tool_calls=tool_calls)
+        return ProviderTurn(assistant_payload=content, text_blocks=text_blocks,
+                            tool_calls=tool_calls, looped=looped)
 
     def append_assistant(self, messages: list[dict], assistant_payload: object) -> None:
         messages.append({"role": "assistant", "content": assistant_payload})
@@ -135,6 +167,65 @@ class AnthropicAdapter(LLMAdapter):
                 ],
             }
         )
+
+
+def _first_choice(raw: object, model: str, base_url: str) -> dict:
+    """The first choice from an OpenAI-compatible response, or a usable error.
+
+    `raw["choices"][0]` assumed a shape and got another: a build died on
+    `KeyError: 'choices'`, which reached the operator as the complete sentence
+    "Build failed: 'choices'". The server had answered HTTP 200 — so the error
+    handling one layer down, which only covers non-200 — and put whatever it
+    wanted to say in the body. Servers do this: a 200 carrying `{"error": ...}`,
+    a rate-limit notice, an empty object when a request is refused.
+
+    Whatever came back, say so. The operator cannot fix an unmet expectation
+    they can't see, and neither can the agent reading the log.
+    """
+    if isinstance(raw, dict):
+        choices = raw.get("choices")
+        if isinstance(choices, list) and choices:
+            return choices[0]
+        # Servers commonly put the real reason here while still answering 200.
+        err = raw.get("error")
+        if err:
+            detail = err.get("message") if isinstance(err, dict) else str(err)
+            raise RuntimeError(log.failure(
+                operation="llm_turn",
+                code="LLM_ERROR_IN_BODY",
+                message=f"{model} at {base_url} returned an error instead of a reply: {detail}",
+                remediation="This came from the model server, not the harness. Check the "
+                            "server's own logs, and whether the request exceeded a limit "
+                            "it enforces (context length, tokens, rate).",
+                context={"model": model, "base_url": base_url,
+                         "error": str(detail)[:500],
+                         "response_keys": sorted(raw)},
+            ))
+        # The keys it DID send go in the message, not only the structured
+        # context: the message is what reaches the screen, and those keys are the
+        # only clue to what the server actually replied with.
+        keys = ", ".join(sorted(raw)) or "nothing at all"
+        raise RuntimeError(log.failure(
+            operation="llm_turn",
+            code="LLM_NO_CHOICES",
+            message=f"{model} at {base_url} answered without any 'choices' — nothing to "
+                    f"read as a reply. What it did send: {keys}.",
+            remediation="The server answered successfully but not in OpenAI-compatible "
+                        "shape. Check that the base URL points at an OpenAI-compatible "
+                        "/chat/completions endpoint, and look at the server's own logs.",
+            context={"model": model, "base_url": base_url,
+                     "response_keys": sorted(raw),
+                     "response_sample": json.dumps(raw)[:500]},
+        ))
+    raise RuntimeError(log.failure(
+        operation="llm_turn",
+        code="LLM_BAD_RESPONSE",
+        message=f"{model} at {base_url} answered with {type(raw).__name__}, not a JSON "
+                f"object: {str(raw)[:120]}",
+        remediation="Check that the base URL points at an OpenAI-compatible "
+                    "/chat/completions endpoint.",
+        context={"model": model, "base_url": base_url, "response_sample": str(raw)[:500]},
+    ))
 
 
 class OpenAICompatibleAdapter(LLMAdapter):
@@ -176,10 +267,10 @@ class OpenAICompatibleAdapter(LLMAdapter):
             "temperature": self.temperature,
         }
         raw = _openai_chat_completion(self.base_url, self.api_key, payload)
-        choice = raw["choices"][0]
+        choice = _first_choice(raw, self.model, self.base_url)
         message = choice.get("message", {})
 
-        text = (message.get("content") or "").strip()
+        text, looped = degeneration.collapse((message.get("content") or "").strip())
         text_blocks = [text] if text else []
 
         tool_calls: list[ToolCall] = []
@@ -200,13 +291,17 @@ class OpenAICompatibleAdapter(LLMAdapter):
 
         assistant_payload = {
             "role": "assistant",
-            "content": message.get("content"),
+            # The TRIMMED text, not the original: this is the copy that goes back
+            # in the conversation on every subsequent turn, so a loop left here is
+            # paid for again at each one.
+            "content": text or message.get("content"),
             "tool_calls": message.get("tool_calls") or [],
         }
         return ProviderTurn(
             assistant_payload=assistant_payload,
             text_blocks=text_blocks,
             tool_calls=[c for c in tool_calls if c.id and c.name],
+            looped=looped,
         )
 
     def append_assistant(self, messages: list[dict], assistant_payload: object) -> None:
@@ -246,6 +341,10 @@ def run_agent(
     # identical thing over and over, which the turn cap alone would only reveal
     # after every turn had been spent.
     repetition = RepetitionDetector()
+    # The same failure as `looped`, spread across turns instead of inside one
+    # message — three turns that each re-derive the same analysis rather than act.
+    restating = degeneration.Restatement()
+    loops = 0
 
     for turn in range(1, max_turns + 1):
         # Announced BEFORE the call, not after: this is the moment the run goes
@@ -258,6 +357,26 @@ def run_agent(
             on_event(text)
 
         adapter.append_assistant(messages, turn_result.assistant_payload)
+
+        # A model that spends a whole turn repeating one paragraph has stopped
+        # reasoning. The first time is trimmed and called out; a second time ends
+        # the run, because the remaining turns would only buy more of the same —
+        # and each one still costs the context the next turn has to fit into.
+        if turn_result.looped is not None:
+            loops += 1
+            on_event(f"  [{turn_result.looped.describe()}]")
+            if loops >= 2:
+                return AgentResult(
+                    final_text, turn, tool_calls,
+                    stopped_reason="The model got stuck repeating itself and was not "
+                                   "making progress, so the run was ended.",
+                )
+
+        repeating_itself = restating.observe(
+            turn_result.text_blocks[0] if turn_result.text_blocks else "")
+        if repeating_itself:
+            on_event("  [Three turns in a row have opened with the same analysis — "
+                     "saying so, since re-deriving it is not progress.]")
 
         if not turn_result.tool_calls:
             final_text = turn_result.text_blocks[0] if turn_result.text_blocks else ""
@@ -286,6 +405,21 @@ def run_agent(
 
         if circling is not None:
             return AgentResult(final_text, turn, tool_calls, stopped_reason=circling.describe())
+
+        # Same delivery as the repetition nudge: ride along with a result the agent
+        # is about to read. A standalone message can't be interleaved with tool_use
+        # blocks — providers reject it.
+        nudges = [
+            degeneration.LOOP_WARNING if turn_result.looped is not None else "",
+            degeneration.RESTATEMENT_WARNING if repeating_itself else "",
+        ]
+        nudge = "\n\n".join(n for n in nudges if n)
+        if nudge and results:
+            results[0] = ToolResult(
+                id=results[0].id,
+                content=f"{results[0].content}\n\n{nudge}",
+                is_error=results[0].is_error,
+            )
 
         adapter.append_tool_results(messages, results)
 
@@ -322,7 +456,15 @@ _openai_chat_completion = llm_provider.chat_completion
 
 
 def _preview(name: str, arguments: dict) -> str:
-    if name in ("read_file", "list_directory") and "path" in arguments:
+    if name == "read_file" and "path" in arguments:
+        span = ""
+        if arguments.get("start_line") or arguments.get("end_line"):
+            span = f":{arguments.get('start_line') or 1}-{arguments.get('end_line') or ''}"
+        return f"{arguments['path']}{span}"
+    if name == "search_files":
+        where = arguments.get("path") or "."
+        return f"{arguments.get('pattern', '')!r} in {where}"
+    if name == "list_directory" and "path" in arguments:
         return arguments["path"]
     if name == "write_file":
         return arguments.get("path", "")

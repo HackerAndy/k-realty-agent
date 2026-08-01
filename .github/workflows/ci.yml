@@ -44,7 +44,15 @@ jobs:
         run: |
           poetry env use "$(which python)"
           poetry install --no-interaction
-      # No browser download: nothing in the suite launches Chromium — the
-      # Playwright-facing code is exercised through fakes.
+      # The suite used to launch no browser, and said so here — the
+      # Playwright-facing code was all exercised through fakes. That is fine for
+      # the code that DRIVES a browser and useless for the code that RUNS INSIDE
+      # one: the demo recorder's injected listener passed its fake-backed tests
+      # for months while never having been installed even once, because a fake
+      # `page.evaluate` answers whether or not anything was ever injected. The
+      # tests that catch that need a real DOM. They skip cleanly without one, so
+      # removing this step loses the coverage silently — leave it.
+      - name: Install Chromium
+        run: poetry run playwright install --with-deps chromium
       - name: Run tests
         run: poetry run pytest

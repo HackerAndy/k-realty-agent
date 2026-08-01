@@ -33,7 +33,7 @@ _yaml.preserve_quotes = True
 _yaml.width = 4096  # don't hard-wrap long note lines
 
 _FIELD_ORDER = ["key", "label", "login_url", "notes", "input_type", "access", "provider",
-                "parser", "status", "default_transport", "email_search"]
+                "parser", "status", "email_search"]
 
 
 class EmailSearch(BaseModel):
@@ -86,10 +86,11 @@ class Service(BaseModel):
     # An inbox is a way IN, not a body of data — it has no parser of its own.
     provider: str | None = None
 
-    # Which transport "Get latest" runs for this source (upload | scrape | email).
-    # See core/transports.py — a source can arrive by several routes; this pins
-    # the preferred one. Automation, when enabled, runs this same route.
-    default_transport: str | None = None
+    # No pinned transport. A source can arrive by several routes and the harness
+    # derives the preferred one from what those routes can do (core/transports.py).
+    # A stored pin was a second answer to the same question, and it went stale
+    # silently: Epic's pin said "file upload" long after its website had taken
+    # over, so the screen reported "needs you" about a source running itself.
 
     # Set when this source's document ARRIVES BY EMAIL — which inbox to search
     # and what to look for. See EmailSearch: the inbox itself only holds access.

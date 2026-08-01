@@ -1,8 +1,20 @@
 # Operator-adjustable options per source — edited from the app, not by hand.
 # The available fields are declared by each source's own module (SETTINGS);
 # see core/settings.py. Values here override those declared defaults.
+#
+# `discovered` holds choices a source learned from its portal on the last
+# run (the properties on the account, say). Written by the harness, not by
+# you, and kept apart from your values on purpose: one is what the portal
+# offers, the other is what you chose.
 sources:
   epic_property_management:
     lookback_days: 60
     accounting_basis: cash
     property_id: all
+discovered:
+  epic_property_management:
+    property_id:
+    - value: '174936'
+      label: 1029 E. Granet Ave. *EPM*
+    - value: '175619'
+      label: 8095 Prospect Ave. *EPM*

@@ -34,7 +34,6 @@ services:
   access: email_attachment
   parser: buildium_owner_statement
   status: implemented
-  default_transport: scrape
   # How to find this source's statement in the 'email' inbox.
   email_search:
     carrier: email
@@ -44,7 +43,12 @@ services:
     newer_than_days: 45
 - key: dfcu_financial_bank
   label: DFCU Financial bank
-  login_url: https://dfcufinancial.com
+  # Where you SIGN IN, not where the data is. The banking app at
+  # online.dfcufinancial.com serves no sign-in form at all — routed to #/login it
+  # renders zero inputs — because DFCU's credentials widget lives on the marketing
+  # site and relays into the app. Login recovery opens this URL, so pointing it at
+  # the app left the operator on a blank page with nothing to type into.
+  login_url: https://www.dfcufinancial.com/
   notes: Bank transactions (mortgage payments + other business activity). CSV export; parser walks the running-balance chain to the penny.
   input_type: csv_export
   access: portal_login

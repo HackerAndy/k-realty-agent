@@ -17,12 +17,10 @@ This module must stay framework-free (no langgraph/langchain imports).
 from __future__ import annotations
 
 import json
-from datetime import UTC, date, datetime, timedelta
-from io import StringIO
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from playwright.sync_api import Page
-from ruamel.yaml import YAML
 
 from core import progress, reconcile, settings
 from core.models import Transaction
@@ -37,6 +35,12 @@ SERVICE_KEY = "epic_property_management"
 # ── configurable settings (dropdown values from the portal UI) ───────────
 # These mirror the dropdowns the operator selects on the General Ledger page.
 # Defaults match what was demonstrated so the first run reproduces that result.
+
+# Buildium's PROPERTY_FILTER_STRING_VALUES, the two members this report uses.
+# Protocol constants, not operator choices: they name a shape of request, and
+# WHICH of them is sent is exactly what the property setting decides.
+ALL_PROPERTIES = "AllProperties"
+SINGLE_RENTAL = "Rental"
 
 SETTINGS = [
     {
@@ -67,48 +71,15 @@ SETTINGS = [
         "options": [
             {"value": "all", "label": "All Properties"},
         ],
+        # Only the portal knows which properties exist on this account, so the
+        # list is filled in by a run (settings.record_options) rather than
+        # declared here. Without this flag record_options refuses the field —
+        # which is what drove an earlier version to write the settings file by
+        # hand, under a key nothing declared and nothing rendered.
+        "discovered": True,
         "help": "Select a specific property or all properties. Options are populated from the portal.",
     },
 ]
-
-# ── internal YAML helper for storing properties (not a declared setting) ─
-_yaml = YAML()
-_yaml.preserve_quotes = True
-_yaml.width = 4096
-
-
-def _write_properties_to_settings(props: list[dict]) -> None:
-    """Write property list to the settings YAML file directly.
-
-    'properties' is not a declared setting key, so we can't use
-    settings.save_for(). Instead we write directly to the YAML file.
-    """
-    from pathlib import Path
-
-    SETTINGS_PATH = Path("core/policies/source_settings.yaml")
-    data = settings._load_all()  # type: ignore[attr-defined]
-
-    # Merge properties into the existing source entry
-    entry = data.get(SERVICE_KEY, {})
-    entry["properties"] = props
-    data[SERVICE_KEY] = entry
-
-    SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    buf = StringIO()
-    _yaml.dump({"sources": data}, buf)
-    SETTINGS_PATH.write_text(
-        "# Operator-adjustable options per source — edited from the app, not by hand.\n"
-        "# The available fields are declared by each source's own module (SETTINGS);\n"
-        "# see core/settings.py. Values here override those declared defaults.\n"
-        + buf.getvalue()
-    )
-
-    log.event(
-        operation="properties_synced",
-        code="PROPERTIES_SYNCED",
-        message=f"Synced {len(props)} properties to settings.",
-        context={"source_key": SERVICE_KEY},
-    )
 
 
 # ── helpers ──────────────────────────────────────────────────────────
@@ -187,87 +158,175 @@ def _get_gl_account_ids(page: Page, xsrf_token: str) -> list[str]:
     return [str(a["Id"]) for a in accounts]
 
 
+def _property_rows(payload: Any) -> list[dict] | None:
+    """The list of property records inside whatever the endpoint returned.
+
+    The endpoint answers 200 but is not in the recorded demonstration (the
+    operator never opened the property dropdown), so its envelope is not known
+    from evidence. It was assumed to be a bare list, and it is not: iterating
+    the dict that actually came back yielded its KEYS, and `p["Id"]` on a string
+    raised `string indices must be integers` on every run — swallowed as a
+    warning, which is why the dropdown has been empty this whole time.
+
+    So handle the two shapes an API can take — a bare list, or a list wrapped in
+    an envelope — and return None for anything else rather than guessing at a
+    third. The caller reports what it actually saw.
+    """
+    if isinstance(payload, list):
+        rows = payload
+    elif isinstance(payload, dict):
+        rows = next(
+            (
+                value
+                for value in payload.values()
+                if isinstance(value, list)
+                and value
+                and all(isinstance(item, dict) for item in value)
+            ),
+            None,
+        )
+        if rows is None:
+            return None
+    else:
+        return None
+    return rows if all(isinstance(row, dict) for row in rows) else None
+
+
 def _fetch_properties(page: Page, xsrf_token: str) -> list[dict]:
     """Fetch all properties from the Buildium API.
 
     Returns a list of dicts with 'id' and 'name' keys.
     """
     url = f"{BASE_URL}/manager/api/properties"
-    props = _fetch_json(page, url, xsrf_token)
-    return [{"id": str(p["Id"]), "name": p.get("Name", "")} for p in props]
+    payload = _fetch_json(page, url, xsrf_token)
+    rows = _property_rows(payload)
+    if rows is None:
+        raise ScrapeError(
+            log.failure(
+                operation="fetch_properties",
+                code="PROPERTIES_SHAPE_UNKNOWN",
+                message=(
+                    "The properties endpoint returned a shape this scraper cannot read."
+                ),
+                # Say what came back. The previous version reported only the
+                # exception text, which named a Python error and not one fact
+                # about the response — so seven identical failures taught nobody
+                # what the endpoint actually sends.
+                remediation=(
+                    "Open the property dropdown during a fresh demonstration so the "
+                    "response is recorded, then have the agent revise this parser."
+                ),
+                context={
+                    "service_key": SERVICE_KEY,
+                    "url": url,
+                    "payload_type": type(payload).__name__,
+                    "payload_keys": (
+                        sorted(payload)[:20] if isinstance(payload, dict) else None
+                    ),
+                    "payload_sample": str(payload)[:500],
+                },
+            )
+        )
+    # Id/Name are Buildium's spelling throughout this module's other endpoints.
+    return [
+        {"id": str(row["Id"]), "name": str(row.get("Name") or "")}
+        for row in rows
+        if row.get("Id") is not None
+    ]
+
+
+def _property_selection(
+    property_id: str, properties: list[dict]
+) -> tuple[int | None, str]:
+    """Turn the operator's chosen property into what the GL request expects.
+
+    Buildium's own report form builds this pair, and its bundle is where these
+    values come from rather than a guess::
+
+        PropertySelectionEntityId: k(selectedProperty.filter)   // AllProperties -> null,
+                                                                // otherwise parseInt(EntityId)
+        PropertySelectionType:     selectedProperty.filter.Type // PROPERTY_FILTER_STRING_VALUES
+
+    The version this replaces looked the property up, assigned its NAME to a
+    local, and then sent `AllProperties` regardless — so the dropdown on the
+    settings screen changed nothing at all, and the run silently returned every
+    property's transactions no matter what was picked.
+    """
+    if property_id == "all":
+        return None, ALL_PROPERTIES  # fixed: API enum — the no-filter selection
+
+    match = next((p for p in properties if p["id"] == property_id), None)
+    if match is None:
+        # Falling back to every property is a real change to what the run
+        # returns, so it is a warning the operator can find, not a silent one.
+        log.event(
+            operation="property_not_found",
+            code="PROPERTY_NOT_FOUND",
+            message=f"Property ID '{property_id}' not found in portal. Using all properties.",
+            context={"source_key": SERVICE_KEY, "property_id": property_id},
+            level="warning",
+        )
+        return None, ALL_PROPERTIES  # fixed: API enum — the no-filter selection
+
+    try:
+        entity_id = int(match["id"])
+    except (TypeError, ValueError):
+        log.event(
+            operation="property_id_not_numeric",
+            code="PROPERTY_ID_NOT_NUMERIC",
+            message=f"Property ID '{match['id']}' is not numeric. Using all properties.",
+            context={"source_key": SERVICE_KEY, "property_id": match["id"]},
+            level="warning",
+        )
+        return None, ALL_PROPERTIES  # fixed: API enum — the no-filter selection
+
+    return entity_id, SINGLE_RENTAL  # fixed: API enum — one rental property
 
 
 def _sync_properties_to_settings(page: Page, xsrf_token: str) -> list[dict]:
-    """Fetch properties from API and sync to settings.
+    """Fetch the account's properties and publish them as this field's choices.
 
-    Reads stored properties, compares with current API properties,
-    updates if changed, and returns the list.
+    `record_options` is the whole mechanism: it stores what the PORTAL offers,
+    kept apart from what the operator chose, and `settings.schema_for()` merges
+    the two when the GUI asks for the schema.
+
+    The version this replaces did it by hand — it read `settings._load_all()`,
+    stored the list under an undeclared `properties` key, and rewrote the file
+    as `{"sources": ...}` only, which dropped the `discovered` section wholesale
+    and so erased every OTHER source's recorded choices each time Epic ran.
     """
     props = _fetch_properties(page, xsrf_token)
 
-    # Read stored properties from settings
-    current = settings.values_for(SERVICE_KEY)
-    stored = current.get("properties", [])
+    previous = {
+        option["value"]
+        for option in settings.recorded_options(SERVICE_KEY).get("property_id", [])
+    }
+    settings.record_options(
+        SERVICE_KEY,
+        "property_id",
+        [{"value": prop["id"], "label": prop["name"]} for prop in props],
+    )
 
-    # Check if properties have changed
-    stored_ids = {p["id"] for p in stored}
-    current_ids = {p["id"] for p in props}
-
-    if stored_ids != current_ids:
+    if previous != {prop["id"] for prop in props}:
         log.event(
             operation="properties_changed",
             code="PROPERTIES_CHANGED",
-            message=f"Properties changed: {len(stored)} -> {len(props)}",
+            message=f"Properties changed: {len(previous)} -> {len(props)}",
             context={
                 "source_key": SERVICE_KEY,
-                "old_count": len(stored),
+                "old_count": len(previous),
                 "new_count": len(props),
             },
         )
-        # Update settings with new properties (write directly to YAML)
-        try:
-            _write_properties_to_settings(props)
-        except Exception as exc:
-            log.event(
-                operation="properties_sync_failed",
-                code="PROPERTIES_SYNC_FAILED",
-                message=f"Could not sync properties to settings: {exc}",
-                context={"source_key": SERVICE_KEY},
-                level="warning",
-            )
+
+    log.event(
+        operation="properties_synced",
+        code="PROPERTIES_SYNCED",
+        message=f"Synced {len(props)} properties to settings.",
+        context={"source_key": SERVICE_KEY},
+    )
 
     return props
-
-
-def _get_property_options() -> list[dict]:
-    """Get current property options from settings (for the GUI).
-
-    Reads stored properties and returns them as choice options.
-    Called at module level so schema_for() picks up the updated list.
-    """
-    opts = settings.values_for(SERVICE_KEY)
-    properties = opts.get("properties", [])
-    options = [{"value": "all", "label": "All Properties"}]
-    for prop in properties:
-        options.append({"value": prop["id"], "label": prop["name"]})
-    return options
-
-
-# ── Dynamic SETTINGS update at module level ───────────────────────────
-# Read stored properties and update the property_id options so the GUI
-# shows actual property names. This runs when the module is imported,
-# before schema_for() reads SETTINGS.
-
-try:
-    _current_options = _get_property_options()
-    # Find the property_id setting and update its options in place
-    for _field in SETTINGS:
-        if _field["key"] == "property_id":
-            _field["options"] = _current_options
-            break
-except Exception:
-    # If anything goes wrong (no stored properties yet, etc.), keep defaults
-    pass
 
 
 # ── extraction (pure, testable) ──────────────────────────────────────
@@ -451,28 +510,12 @@ def retrieve() -> list[Transaction]:
             properties = []
 
         # ── build property filter ─────────────────────────────────────
-        if property_id == "all":
-            # No property filter — include all properties in results
-            property_filter = None
-        else:
-            # Find the matching property
-            matching = [p for p in properties if p["id"] == property_id]
-            if not matching:
-                log.event(
-                    operation="property_not_found",
-                    code="PROPERTY_NOT_FOUND",
-                    message=f"Property ID '{property_id}' not found in portal. Using all properties.",
-                    context={"source_key": SERVICE_KEY, "property_id": property_id},
-                    level="warning",
-                )
-                property_filter = None
-            else:
-                property_filter = matching[0]["name"]
+        selection_entity_id, selection_type = _property_selection(property_id, properties)
 
         # ── fetch transactions (using configurable settings) ──────────
         body = {
-            "PropertySelectionEntityId": None,
-            "PropertySelectionType": "AllProperties",  # fixed: API protocol constant — always AllProperties for GL transactions
+            "PropertySelectionEntityId": selection_entity_id,
+            "PropertySelectionType": selection_type,
             "StartDate": start_date.isoformat(),
             "EndDate": end_date.isoformat(),
             "AccountingBasis": accounting_basis,

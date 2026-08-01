@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import subprocess
-import sys
 from collections.abc import Callable
 from pathlib import Path
 
@@ -20,7 +19,17 @@ from orchestration.codegen import run_codegen_gated
 from orchestration.verify import run_test_file, test_path_for
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SYSTEM_PROMPT_PATH = REPO_ROOT / "core" / "prompts" / "parser_builder.v1.md"
+PROMPTS = REPO_ROOT / "core" / "prompts"
+# The invariants both jobs share, plus the half that applies to the job at hand —
+# see the same split in build_scraper.py. Building and fixing want different
+# instructions, and the one the agent isn't doing is context it has to read past.
+CONTRACT_PATH = PROMPTS / "parser_contract.v1.md"
+SYSTEM_PROMPT_PATH = PROMPTS / "parser_builder.v1.md"
+REVISE_PROMPT_PATH = PROMPTS / "parser_reviser.v1.md"
+
+
+def _system(job: Path) -> str:
+    return CONTRACT_PATH.read_text() + "\n\n" + job.read_text()
 
 
 def build_parser_for_source(
@@ -32,7 +41,7 @@ def build_parser_for_source(
     """Run the agent to build a parser for `source_key`, then verify it
     independently. Returns a dict with the agent's summary, the tool calls it
     made (audit), and the verification result (transactions or error)."""
-    system = SYSTEM_PROMPT_PATH.read_text()
+    system = _system(SYSTEM_PROMPT_PATH)
     task = (
         f"Build a deterministic parser for the source '{source_key}'"
         + (f" ({source_label})" if source_label else "")
@@ -67,7 +76,7 @@ def revise_parser_for_source(
     """Have the agent REVISE an existing parser per the operator's feedback,
     then re-verify. This is the debug/maintain half — the operator says what's
     wrong in plain English, the harness fixes its own code."""
-    system = SYSTEM_PROMPT_PATH.read_text()
+    system = _system(REVISE_PROMPT_PATH)
     task = (
         f"The parser at core/parsers/{source_key}.py already exists, but the operator "
         f"reviewed its output and wants changes.\n\n"
@@ -77,7 +86,10 @@ def revise_parser_for_source(
         f"registered under '{source_key}'. Preserve the source's real columns verbatim in "
         f"Transaction.fields — don't invent columns. UPDATE the test at "
         f"{test_path_for('parser', source_key)} to cover the change and run it — it MUST pass "
-        "(the harness re-runs it). Say what you changed."
+        "(the harness re-runs it). Say what you changed.\n"
+        "If you find the code is ALREADY correct — the reported problem was fixed on an "
+        "earlier run — call no_change_needed with what you checked, and stop. Do not invent "
+        "an edit to satisfy the gate."
     )
     result, verification = run_codegen_gated(
         task, system, lambda: verify_parser(source_key, sample_path),

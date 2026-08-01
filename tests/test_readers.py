@@ -161,7 +161,7 @@ def test_the_real_epic_scraper_is_recognised_as_an_api_call():
 def test_a_source_with_no_scraper_has_no_method():
     from core import scrapers
 
-    assert scrapers.method_of("dfcu_financial_bank") == scrapers.UNKNOWN
+    assert scrapers.method_of("nonexistent_source") == scrapers.UNKNOWN
 
 
 def test_a_declared_method_beats_what_the_source_looks_like(monkeypatch):

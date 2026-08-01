@@ -15,6 +15,36 @@ Verified live at the time:
 import pytest
 
 from core.tools import buildium_owner_portal
+from core.tools.credential_store import CredentialNotFound
+
+
+class _FakeStore:
+    """Mirrors the real CredentialStore, including that `get` RAISES when there
+    is nothing stored. Stubs that only implemented `get` returning a dict hid a
+    live bug: `login()` was written as `if not store.get(key)`, a branch the real
+    store can never reach because it raises first."""
+
+    def __init__(self, creds=None, on_get=None):
+        self._creds = creds
+        self._on_get = on_get
+
+    def get(self, service_key):
+        if self._on_get is not None:
+            return self._on_get(service_key)
+        if self._creds is None:
+            raise CredentialNotFound(f"No credentials stored for '{service_key}'.")
+        return self._creds
+
+    def try_get(self, service_key):
+        try:
+            return self.get(service_key)
+        except CredentialNotFound:
+            return None
+
+
+def _store(monkeypatch, creds=None, on_get=None):
+    monkeypatch.setattr(buildium_owner_portal, "CredentialStore",
+                        lambda: _FakeStore(creds, on_get))
 
 
 @pytest.mark.parametrize(
@@ -77,10 +107,7 @@ class _FakePage:
 
 def test_login_navigates_to_the_manager_page_not_the_bare_root(monkeypatch):
     """The actual regression: login() must not open the resident site."""
-    monkeypatch.setattr(
-        buildium_owner_portal, "CredentialStore",
-        lambda: type("S", (), {"get": staticmethod(lambda k: {"username": "u", "password": "p"})})(),
-    )
+    _store(monkeypatch, creds={"username": "u", "password": "p"})
     monkeypatch.setattr(buildium_owner_portal, "_find_email_field", lambda page, t: _FakeLocator())
 
     page = _FakePage(url_after_goto="https://epicpropertymanagement.managebuilding.com/manager/public/authentication/login")
@@ -98,8 +125,7 @@ def test_login_short_circuits_when_the_saved_session_is_still_good(monkeypatch):
     def explode(_key):
         raise AssertionError("must not read credentials when already signed in")
 
-    monkeypatch.setattr(buildium_owner_portal, "CredentialStore",
-                        lambda: type("S", (), {"get": staticmethod(explode)})())
+    _store(monkeypatch, on_get=explode)
 
     page = _FakePage(url_after_goto="https://epicpropertymanagement.managebuilding.com/manager/app/homepage/dashboard")
     buildium_owner_portal.login(page, "https://epicpropertymanagement.managebuilding.com", "epic")
@@ -109,10 +135,7 @@ def test_login_short_circuits_when_the_saved_session_is_still_good(monkeypatch):
 
 def test_resident_landing_reports_where_the_browser_actually_was(monkeypatch):
     """The message that let us find this must keep naming the URL."""
-    monkeypatch.setattr(
-        buildium_owner_portal, "CredentialStore",
-        lambda: type("S", (), {"get": staticmethod(lambda k: {"username": "u", "password": "p"})})(),
-    )
+    _store(monkeypatch, creds={"username": "u", "password": "p"})
     monkeypatch.setattr(buildium_owner_portal, "_find_email_field", lambda page, t: None)
 
     page = _FakePage(url_after_goto="https://epicpropertymanagement.managebuilding.com/Resident/public/home")

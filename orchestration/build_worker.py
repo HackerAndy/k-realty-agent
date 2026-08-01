@@ -47,6 +47,42 @@ KINDS = ("parser", "scraper")
 MODES = ("build", "revise")
 
 
+def describe_exception(exc: BaseException) -> str:
+    """A failure message the operator can act on, never a bare `str(exc)`.
+
+    A build died with `KeyError: 'choices'` and the screen said, in full:
+    **Build failed: 'choices'**. That is worse than saying nothing — it looks
+    like a corrupted message rather than a report, and it names an internal
+    dictionary key the operator has no way to connect to anything. `str()` on a
+    KeyError is just the key; on an IndexError or an AttributeError it is barely
+    better, and those are exactly the exceptions raised by code that assumed a
+    shape and got another.
+
+    So: always the type, always the location it came from, and for the
+    shape-assumption family an explicit hint that this is a harness bug rather
+    than something the operator did wrong.
+    """
+    text = str(exc).strip()
+    kind = type(exc).__name__
+    where = ""
+    tb = exc.__traceback__
+    while tb is not None:          # walk to the innermost frame
+        frame = tb.tb_frame
+        where = f"{Path(frame.f_code.co_filename).name}:{tb.tb_lineno} in {frame.f_code.co_name}"
+        tb = tb.tb_next
+
+    if isinstance(exc, (KeyError, IndexError, AttributeError, TypeError)):
+        subject = f"missing key {text}" if isinstance(exc, KeyError) else text
+        return (
+            f"{kind}: {subject} — at {where}. This is a bug in the harness, not "
+            "something you did: some code expected a different shape than it got. "
+            "The traceback is in this build's log."
+        )
+    if not text:
+        return f"{kind} raised with no message — at {where}."
+    return f"{kind}: {text}" + (f" — at {where}" if where else "")
+
+
 def _emit(run_file: Path, payload: dict) -> None:
     """Append one protocol line and flush — the GUI polls this file while we run,
     so a buffered write would look like a hung build."""
@@ -121,7 +157,8 @@ def run(kind: str, mode: str, source_key: str, run_file: Path,
             else:
                 result = revise_scraper_for_source(source_key, feedback, on_event=on_event)
     except Exception as exc:
-        _emit(run_file, {"type": "failed", "error": str(exc), "traceback": traceback.format_exc()})
+        _emit(run_file, {"type": "failed", "error": describe_exception(exc),
+                         "traceback": traceback.format_exc()})
         return 1
     finally:
         watchdog.stop()

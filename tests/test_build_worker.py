@@ -61,8 +61,28 @@ def test_worker_records_a_crash_as_a_failed_line(tmp_path, monkeypatch):
     assert rc == 1
     rec = _lines(run_file)[-1]
     assert rec["type"] == "failed"
-    assert rec["error"] == "model refused"
+    assert "model refused" in rec["error"]
+    assert "RuntimeError" in rec["error"]     # the type, so a terse str() can't stand alone
     assert "RuntimeError" in rec["traceback"]
+
+
+def test_a_crash_with_a_useless_str_still_reports_something(tmp_path, monkeypatch):
+    """The field failure: `KeyError('choices')` reached the screen as the entire
+    message "Build failed: 'choices'" — the key alone, which reads as a corrupted
+    message rather than a report."""
+    run_file = tmp_path / "run.jsonl"
+    sample = tmp_path / "s.pdf"
+    sample.write_bytes(b"x")
+
+    def boom(*a, **k):
+        raise KeyError("choices")
+
+    monkeypatch.setattr("orchestration.build_parser.build_parser_for_source", boom)
+    build_worker.run("parser", "build", "k", run_file, sample_path=str(sample))
+
+    error = _lines(run_file)[-1]["error"]
+    assert error != "'choices'"
+    assert "KeyError" in error and "bug in the harness" in error
 
 
 def test_worker_rejects_a_missing_sample(tmp_path):

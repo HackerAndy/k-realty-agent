@@ -41,7 +41,7 @@ DEFAULT_STRIKES = 3
 
 # Looking at things is not doing things — an agent re-reading a file is checking
 # itself, and blocking that would make it worse, not better.
-READ_ONLY_TOOLS = frozenset({"read_file", "list_directory", "read_logs"})
+READ_ONLY_TOOLS = frozenset({"read_file", "search_files", "list_directory", "read_logs"})
 
 NUDGE = (
     "STOP AND RE-THINK. You have now made this exact call {count} times in a row "

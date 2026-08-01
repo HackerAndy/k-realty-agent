@@ -17,8 +17,18 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from orchestration import agent_tools
 from orchestration.agent import AgentResult, run_agent
-from orchestration.verify import covers_changes, hardcoded_options, lint
+from orchestration.verify import (
+    REPO_ROOT,
+    covers_changes,
+    hardcoded_options,
+    lint,
+    reconciles,
+    removed_tests,
+    snapshot_files,
+    wholesale_rewrites,
+)
 
 # Prepended to EVERY code-gen system prompt — the rules that apply to ALL code the
 # embedded agent writes, regardless of the specific task.
@@ -150,6 +160,56 @@ def fold_lint(verification: dict, tool_calls: list[tuple[str, dict]]) -> dict:
     return verification
 
 
+def fold_rewrite(verification: dict, before: dict[str, str]) -> dict:
+    """A fix that replaced the file instead of editing it is not a fix.
+
+    The opposite failure to fold_noop, and it cost more: three revises in a row
+    rewrote a working test file wholesale, the last one leaving it unparseable.
+    Every other gate looks only at what the new file contains, so none of them can
+    notice what the old one contained and the new one doesn't.
+    """
+    rewritten = wholesale_rewrites(before)
+    if rewritten:
+        verification["wholesale_rewrite"] = rewritten
+        verification["ok"] = False
+
+    # Deleting tests is the same loss in a shape the similarity ratio can't see:
+    # a revise that cut a 778-line test file to 455 kept enough lines to score
+    # well above the threshold, and six tests went with it.
+    dropped = removed_tests(before)
+    if dropped:
+        verification["removed_tests"] = dropped
+        verification["ok"] = False
+    return verification
+
+
+def fold_reconciliation(verification: dict, path: str) -> dict:
+    """A scraper must check its own arithmetic, or say why it can't.
+
+    The last unenforced rule in the scraper prompt, and the gap showed up in the
+    field within one build: Epic reconciles, DFCU (same instructions, same model)
+    does not, though the bank hands back a running balance on every row. An
+    instruction nothing checks is a suggestion.
+    """
+    result = reconciles(path)
+    if not result["ok"]:
+        verification["unreconciled"] = result["detail"]
+        verification["ok"] = False
+    else:
+        verification["reconciliation"] = result["detail"]
+    return verification
+
+
+def declared_no_change(tool_calls: list[tuple[str, dict]]) -> str:
+    """The reason the agent gave for changing nothing, or "" if it never said."""
+    for name, inp in tool_calls:
+        if name == "no_change_needed" and isinstance(inp, dict):
+            reason = (inp.get("reason") or "").strip()
+            if reason:
+                return reason
+    return ""
+
+
 def fold_noop(verification: dict, tool_calls: list[tuple[str, dict]]) -> dict:
     """A fix that changed NOTHING is not a success, however green the tests look.
 
@@ -157,10 +217,23 @@ def fold_noop(verification: dict, tool_calls: list[tuple[str, dict]]) -> dict:
     files, re-ran the existing suite, and the harness reported ok — because
     untested_code_files() only fires when code IS written. A no-op scored a
     perfect green, which is worse than a failure: it ends the conversation.
+
+    Unless the agent SAYS so. "Already fixed on the previous run" is a true
+    answer, and a gate that counts files can't tell it from laziness — so it
+    refused both, every time, and a source whose code was already correct could
+    never be approved at all (a real deadlock: the operator's only two moves,
+    revise again and give up, both leave it stuck). `no_change_needed` makes the
+    claim explicit and attributable; the operator reads the reason and decides.
+    Silence still fails, which is the case worth catching.
     """
-    if not files_written(tool_calls):
-        verification["no_changes"] = True
-        verification["ok"] = False
+    if files_written(tool_calls):
+        return verification
+    reason = declared_no_change(tool_calls)
+    if reason:
+        verification["no_change_reason"] = reason
+        return verification
+    verification["no_changes"] = True
+    verification["ok"] = False
     return verification
 
 
@@ -172,6 +245,7 @@ def run_codegen_gated(
     *,
     require_changes: bool = False,
     test_path: str | None = None,
+    reconcile_path: str | None = None,
     max_retries: int = 1,
     **kwargs,
 ) -> tuple[AgentResult, dict]:
@@ -201,9 +275,28 @@ def run_codegen_gated(
             v = fold_uncovered(v, res.tool_calls, test_path)
         v = fold_hardcoded(v, res.tool_calls)
         v = fold_lint(v, res.tool_calls)
+        if reconcile_path and (REPO_ROOT / reconcile_path).is_file():
+            v = fold_reconciliation(v, reconcile_path)
         if require_changes:
             v = fold_noop(v, res.tool_calls)
+            # The snapshot wins on conflict: it was taken before the run, whereas
+            # a recorded original could be from a second write of the same file.
+            v = fold_rewrite(v, {**agent_tools.originals(), **before})
         return v
+
+    # What these files looked like BEFORE the agent touched them. Only meaningful
+    # on a revise (require_changes): a build's first version has nothing to be
+    # compared against. Taken here rather than inside the fold because by then the
+    # agent has already overwritten them.
+    #
+    # Two sources, because neither alone is enough. This snapshot covers the two
+    # files a revise is SUPPOSED to touch even if the agent never writes them;
+    # agent_tools records anything else it actually overwrote, which is the only
+    # way to catch damage to a file nobody predicted.
+    agent_tools.forget_originals()
+    before = snapshot_files(
+        [p for p in (reconcile_path, test_path) if p] if require_changes else []
+    )
 
     result = run_agent(task, CODE_STANDARDS + "\n\n" + system, on_event=on_event, **kwargs)
     verification = _assess(result)
@@ -248,10 +341,48 @@ def run_codegen_gated(
                 "the operator's settings, the setting is silently being ignored. Either use it, "
                 "or delete it and say why it isn't needed."
             )
+        if verification.get("wholesale_rewrite"):
+            detail = "; ".join(
+                f"{path} (only {int(ratio * 100)}% of its lines survived)"
+                for path, ratio in verification["wholesale_rewrite"].items())
+            reasons.append(
+                "You REPLACED a file instead of editing it — " + detail + ". You were "
+                "asked to fix something specific; rewriting from scratch silently drops "
+                "work that was already there and already passing, and nothing else the "
+                "harness checks can see what went missing. Start again from the file as "
+                "it is on disk NOW: read it, change only the lines the problem is in, and "
+                "leave everything else byte for byte."
+            )
+        if verification.get("removed_tests"):
+            detail = "; ".join(
+                f"{path}: {', '.join(names)}"
+                for path, names in verification["removed_tests"].items())
+            reasons.append(
+                "You DELETED tests that were passing — " + detail + ". Every one of "
+                "them proved something about this source, and with them gone the code "
+                "they covered can break without anything noticing. Put them back exactly "
+                "as they were, then make your change alongside them. If a test was "
+                "genuinely wrong, fix its assertion — do not remove it. If you renamed "
+                "one, say so explicitly in your report."
+            )
+        if verification.get("unreconciled"):
+            reasons.append(
+                "Your scraper doesn't check what it extracted against the source's own "
+                "numbers — " + verification["unreconciled"] + " Look at the payload you "
+                "already have: a per-account total, an ending or running balance, a row "
+                "count. Call reconcile.record(label, expected=<the source's number>, "
+                "actual=<what you extracted>) so a run can answer 'did we get "
+                "everything'. A passing test cannot: it proves the parsing is unchanged, "
+                "not that the portal gave you every row. If this source genuinely "
+                "publishes no totals, set a module-level "
+                "NO_CONTROL_TOTALS = \"<why>\" saying what you looked at and what wasn't "
+                "there."
+            )
         if verification.get("no_changes"):
             reasons.append(
                 "You reported success without writing any file, so nothing was fixed. "
-                "Make the actual change, or state plainly that no change is needed and why."
+                "Make the actual change — or, if the code is genuinely already correct, "
+                "call no_change_needed with what you checked and what proves it."
             )
         if not reasons:
             break

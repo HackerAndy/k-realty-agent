@@ -162,11 +162,79 @@ def test_two_readers_that_do_not_exist_yet_stay_two_readers():
     assert drawn["rows"] == sorted(drawn["rows"])
 
 
+# --- opening a source lands on the route that last ran -----------------------
+
+
+def _last_run_route(transports: list[dict]) -> str | None:
+    """What the page would select when the operator expands this source."""
+    script = _script()
+    program = "\n".join([
+        _function_source(script, "lastRunRoute"),
+        f"const s = {json.dumps({'transports': transports})};",
+        "const r = lastRunRoute(s);",
+        "console.log(JSON.stringify(r ? r.id : null));",
+    ])
+    proc = subprocess.run(["node", "-e", program], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def _ran(route_id: str, at: str | None) -> dict:
+    return {"id": route_id, "last_run": {"parsed_at": at} if at else None}
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not installed")
+def test_the_selected_node_is_the_one_that_ran_most_recently():
+    """Not the first route listed, and not the first that has ever run — the
+    LATEST run, because that is the one holding the rows drawn underneath."""
+    assert _last_run_route([
+        _ran("upload", "2026-07-02T09:00:00+00:00"),
+        _ran("scrape", "2026-07-29T18:00:00+00:00"),
+        _ran("email", "2026-06-11T07:00:00+00:00"),
+    ]) == "scrape"
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not installed")
+def test_routes_that_have_never_run_are_not_selectable_defaults():
+    """A route with no run of its own would open the source onto "Not run",
+    hiding rows the source actually has."""
+    assert _last_run_route([
+        _ran("upload", None),
+        _ran("scrape", "2026-07-29T18:00:00+00:00"),
+    ]) == "scrape"
+
+
+@pytest.mark.skipif(not shutil.which("node"), reason="node not installed")
+def test_a_source_that_has_never_run_selects_nothing():
+    """Nothing selected is what leaves a brand-new source showing its build
+    panel, which is the only thing worth doing to it."""
+    assert _last_run_route([_ran("upload", None), _ran("scrape", None)]) is None
+    assert _last_run_route([]) is None
+
+
+def test_no_way_to_pin_a_favourite_route_is_left_on_the_page():
+    """The star set a default the operator then had to keep in sync with what
+    actually ran. Opening onto the last run answers the same question from
+    history, so the control — and its handler — are gone rather than dormant."""
+    html = DASHBOARD.read_text()
+
+    assert "pinDefault" not in html
+    assert "set_default_transport" not in html
+    assert "★" not in html and "☆" not in html
+
+
 def test_the_transport_tool_surface_the_page_calls_actually_exists():
-    """The page is the only caller of these, so a rename would break it silently."""
+    """The page is the only caller of these, so a rename would break it silently.
+
+    Both spellings: callTool() straight, and act(), which is callTool plus the run
+    timeline. ⏵ on a chip goes through act(), so a route wired to a tool that
+    isn't registered fails only when someone presses it.
+    """
     from interfaces import mcp_tools
 
+    html = DASHBOARD.read_text()
     names = {fn.__name__ for fn in mcp_tools.ALL_TOOLS}
-    called = set(re.findall(r"callTool\(\s*'(\w+)'", DASHBOARD.read_text()))
+    called = set(re.findall(r"callTool\(\s*'(\w+)'", html))
+    called |= set(re.findall(r"\bact\(\s*'(\w+)'", html))
     missing = called - names
     assert not missing, f"page calls tools that are not registered: {sorted(missing)}"

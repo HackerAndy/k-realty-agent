@@ -153,3 +153,57 @@ def test_action_progress_names_the_current_phase_and_its_elapsed_time():
 def test_action_progress_is_empty_and_harmless_when_nothing_runs():
     p = mcp_tools.action_progress("idle_source")
     assert p["steps"] == [] and p["current"] is None
+
+
+# --- reporting progress must never be the thing that breaks the run ---------
+#
+# From the field: a scraper wrote `progress.done("sign_in", status="success")` —
+# redundant, harmless-looking, and the natural way to say it. It raised
+# `_finish() got multiple values for argument 'status'` mid-scrape with the
+# browser already open, and the traceback pointed at core/progress.py, sending
+# both the operator and the agent hunting in the wrong file.
+
+def test_a_redundant_status_detail_does_not_crash_done():
+    with progress.channel("collide"):
+        progress.step("sign_in", "Sign in")
+        progress.done("sign_in", status="success")
+        steps = progress.read("collide")
+    assert steps[0]["status"] == "success"
+    progress.clear("collide")
+
+
+def test_a_status_detail_never_outranks_the_reported_outcome():
+    """`failed(..., status="success")` must still read as failed."""
+    with progress.channel("collide"):
+        progress.step("sign_in", "Sign in")
+        progress.failed("sign_in", error="bad password", status="success")
+        steps = progress.read("collide")
+    assert steps[0]["status"] == "failed" and steps[0]["error"] == "bad password"
+    progress.clear("collide")
+
+
+def test_step_survives_details_named_like_its_own_fields():
+    with progress.channel("collide"):
+        progress.step("fetch", "Fetch rows", label="nope", key="nope", started_at=0)
+        steps = progress.read("collide")
+    assert steps[0]["label"] == "Fetch rows" and steps[0]["key"] == "fetch"
+    assert steps[0]["started_at"] > 0
+    progress.clear("collide")
+
+
+def test_real_details_still_get_through():
+    with progress.channel("collide"):
+        progress.step("fetch", "Fetch rows")
+        progress.done("fetch", details={"rows": 19}, rows=19)
+        steps = progress.read("collide")
+    assert steps[0]["rows"] == 19 and steps[0]["details"] == {"rows": 19}
+    progress.clear("collide")
+
+
+def test_duration_is_still_recorded_when_details_collide():
+    with progress.channel("collide"):
+        progress.step("fetch", "Fetch rows")
+        progress.done("fetch", duration_ms=999999)
+        steps = progress.read("collide")
+    assert steps[0]["duration_ms"] < 999999
+    progress.clear("collide")

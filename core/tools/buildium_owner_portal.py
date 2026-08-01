@@ -21,11 +21,15 @@ from urllib.parse import urlparse, urlunparse
 from playwright.sync_api import Page
 
 from core import progress
-from core.tools.credential_store import CredentialStore
+from core.tools.credential_store import CredentialStore, CredentialStoreError
 
 
 class BuildiumLoginError(RuntimeError):
-    pass
+    # Opening a browser is not the remedy for most of these — a missing password
+    # belongs in Settings, a changed form belongs in a revise. Set True only on a
+    # failure a person at a browser can actually resolve.
+    # See core/scrapers/base.ScrapeError.
+    needs_browser_login: bool = False
 
 
 def preferred_login_url(url: str) -> str:
@@ -127,7 +131,27 @@ def login(page: Page, portal_url: str, service_key: str, timeout_ms: int = 45000
 
     # Read credentials only now that we know a sign-in is actually required — a
     # still-valid saved session shouldn't depend on them being in the vault.
-    creds = CredentialStore().get(service_key)
+    #
+    # A missing password and an unreadable vault are separate problems with
+    # separate fixes, and the operator can only act on the right one if the two
+    # are reported differently. `get()` raising made both come out as the same
+    # bare "No credentials stored for X" — the sentence you also get when the
+    # store was simply looked for in the wrong place.
+    try:
+        creds = CredentialStore().try_get(service_key)
+    except CredentialStoreError as exc:
+        progress.failed("sign_in", error="the credential store could not be read")
+        raise BuildiumLoginError(
+            f"The credential store could not be read, so '{service_key}' could not sign in. "
+            f"This is NOT a missing password — the vault itself did not open: {exc}"
+        ) from exc
+
+    if not creds or not creds.get("username") or not creds.get("password"):
+        progress.failed("sign_in", error="no stored username/password")
+        raise BuildiumLoginError(
+            f"No username/password stored for '{service_key}'. Add them under "
+            "Settings → Sign-ins before an unattended run can sign in."
+        )
 
     password_field = page.get_by_label("Password")
     sign_in_button = page.get_by_role("button", name="Sign in", exact=True)

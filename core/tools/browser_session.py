@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+import json
 import os
 from pathlib import Path
 import signal
@@ -88,6 +89,113 @@ def _profile_dir(service_key: str, profile_root: Path) -> Path:
     return profile_dir
 
 
+# ── session cookies ──────────────────────────────────────────────────
+#
+# The persistent profile does NOT actually persist the whole session. Chromium
+# writes cookies that carry an expiry to its on-disk store and keeps SESSION
+# cookies (no expiry) in memory only, discarding them when the process exits —
+# standard, correct browser behaviour, and precisely the wrong half to lose
+# here: the cookie a portal hands out at login is usually a session cookie. So
+# a profile could hold every tracking and device-recognition cookie a site had
+# ever set, and still be signed out on the next run, sending the operator back
+# to a login window they had already completed minutes earlier.
+#
+# So we keep that half ourselves. It lives inside the profile directory, which
+# already holds the site's other cookies in a plaintext SQLite file — the trust
+# boundary is the profile, and this adds no new exposure to it. (`.browser_profiles/`
+# is gitignored.) Anything longer-lived stays Chromium's job; we don't duplicate it.
+
+_SESSION_COOKIES_FILE = "session_cookies.json"
+_SAME_SITE_VALUES = {"Strict", "Lax", "None"}
+
+# Past this, don't bother putting them back. A session cookie has no expiry of
+# its own, so restoring one makes it immortal LOCALLY while the server expired it
+# long ago — and code that reads "cookie present" as "signed in" is then wrong in
+# the one direction that costs a run. Callers should verify a restored session
+# rather than trust it (see q2_online_banking.looks_authenticated); this is the
+# cheap backstop for the cookies that cannot possibly still be good.
+#
+# Twelve hours is chosen to be uncontroversial rather than clever: no portal
+# holds an idle session that long, and a scheduled overnight run is still inside
+# it. It bounds the damage; it is not the mechanism.
+MAX_RESTORE_AGE_S = 12 * 60 * 60
+
+
+def _session_cookies_path(profile_dir: Path) -> Path:
+    return Path(profile_dir) / _SESSION_COOKIES_FILE
+
+
+def save_session_cookies(context, profile_dir: Path) -> int:
+    """Write this context's session cookies beside the profile. Returns the count.
+
+    Never raises: a session we failed to save is a login to repeat, not a run to
+    lose — and this is called from a `finally` and from a poll tick, where an
+    exception would take down something that had otherwise succeeded.
+    """
+    try:
+        cookies = [c for c in context.cookies() if (c.get("expires") or -1) <= 0]
+    except Exception:
+        return 0  # browser already gone (an abrupt quit) — nothing to read
+    try:
+        path = _session_cookies_path(profile_dir)
+        path.write_text(json.dumps(cookies, indent=2))
+        path.chmod(0o600)
+    except Exception:
+        return 0
+    return len(cookies)
+
+
+def saved_session_cookie_count(profile_dir: Path) -> int:
+    """How many session cookies are on disk for this profile. 0 if none/unreadable."""
+    path = _session_cookies_path(profile_dir)
+    if not path.exists():
+        return 0
+    try:
+        return len(json.loads(path.read_text()))
+    except Exception:
+        return 0
+
+
+def restore_session_cookies(context, profile_dir: Path) -> int:
+    """Put previously saved session cookies back. Returns the count restored.
+
+    Skips a file older than `MAX_RESTORE_AGE_S` — those cookies are certainly
+    dead server-side, and handing them back only disguises a signed-out session
+    as a signed-in one.
+    """
+    path = _session_cookies_path(profile_dir)
+    if not path.exists():
+        return 0
+    try:
+        if time.time() - path.stat().st_mtime > MAX_RESTORE_AGE_S:
+            return 0
+        saved = json.loads(path.read_text())
+    except Exception:
+        return 0
+    cookies = []
+    for cookie in saved:
+        if not cookie.get("name") or cookie.get("value") is None:
+            continue
+        clean = {
+            key: cookie[key]
+            for key in ("name", "value", "domain", "path", "httpOnly", "secure")
+            if key in cookie
+        }
+        # add_cookies rejects anything outside the three legal values, and a HAR
+        # or an older Chromium can hand back "" or None for a cookie that simply
+        # never declared one.
+        if cookie.get("sameSite") in _SAME_SITE_VALUES:
+            clean["sameSite"] = cookie["sameSite"]
+        cookies.append(clean)
+    if not cookies:
+        return 0
+    try:
+        context.add_cookies(cookies)
+    except Exception:
+        return 0
+    return len(cookies)
+
+
 def _profile_pattern(profile_dir: Path) -> str:
     """The pgrep pattern that matches the browser holding this profile.
 
@@ -117,12 +225,19 @@ def launch(
         context = playwright.chromium.launch_persistent_context(
             str(profile_dir), headless=headless
         )
+        # Before the first navigation: the whole point is that the site sees a
+        # signed-in session on its very first request.
+        restore_session_cookies(context, profile_dir)
         progress.done("browser_launch")
         try:
             page = context.pages[0] if context.pages else context.new_page()
             yield page
         finally:
             progress.step("browser_close", "Close browser session")
+            # Before close(), while the context can still be read — and whether
+            # or not the run succeeded, since a session refreshed by a failed
+            # run is still the session the next one should start from.
+            save_session_cookies(context, profile_dir)
             context.close()
             progress.done("browser_close")
 
@@ -344,6 +459,8 @@ def bootstrap_login_until_window_closed(
                 f"Details: {exc}"
             ) from exc
 
+        restore_session_cookies(context, profile_dir)
+
         try:
             # Always use a fresh page for recovery to avoid reusing stale tabs
             # from prior sessions that can stay blank or unfocused.
@@ -379,10 +496,34 @@ def bootstrap_login_until_window_closed(
             # So also consult OS truth: no Chromium process is still holding this
             # profile => the browser is gone, whatever CDP thinks. Plus an absolute
             # deadline, so this can never hang indefinitely again.
-            reason = wait_until_window_closed(page, profile_dir, max_wait_s)
+            # Save the session WHILE they're logged in, not after they've gone.
+            # This is the one place the login actually happens, and the same
+            # abrupt-quit problem the wait loop exists to survive (Cmd-Q, force
+            # quit — no CDP close event, no readable context afterwards) would
+            # otherwise throw away the very session the operator just created.
+            # Cheap enough to poll, but not every 0.5s tick.
+            last_saved = [0.0]
+
+            def keep_session(_page: Page) -> None:
+                now = time.monotonic()
+                if now - last_saved[0] >= 5.0:
+                    last_saved[0] = now
+                    save_session_cookies(context, profile_dir)
+
+            reason = wait_until_window_closed(page, profile_dir, max_wait_s, keep_session)
+            # A final save if the browser is still readable; otherwise the last
+            # poll's file is what we have, and reporting ITS count is the honest
+            # number — 0 here would read as "your login was lost" when it wasn't.
+            saved = save_session_cookies(context, profile_dir) or saved_session_cookie_count(
+                profile_dir
+            )
             # Written to the worker's log file, so a future hang is diagnosable
             # instead of leaving a 0-byte log behind.
-            print(f"[browser_session] recovery for '{service_key}' finished: {reason}", flush=True)
+            print(
+                f"[browser_session] recovery for '{service_key}' finished: {reason} "
+                f"({saved} session cookies saved)",
+                flush=True,
+            )
             if reason == "deadline":
                 raise RuntimeError(
                     f"Gave up waiting for the '{service_key}' login after {int(max_wait_s / 60)} minutes. "

@@ -1,7 +1,12 @@
 # K-Realty Agent — project directives
 
 ## Agent Rules
-- When reporting information to me, be extremely concise and sacrifice grammar for the sake of concision.
+- **Report in TLDR format. Very short.** Sacrifice grammar and explanation for brevity.
+  Only these, and only when there is something to say:
+  - **Did:** high level only. Not a file-by-file tour, not a table of changes.
+  - **Concerns:** what's broken/unproven/risky.
+  - **Next:** what I have to do.
+  No preamble, no recap of the request, no summary of the summary. Detail only when I ask.
 
 ## Quick reference
 
@@ -21,9 +26,14 @@
 - Architecture and the `core/`/`orchestration/`/`evals/` portability contract: see
   [README.md](README.md#architecture-portability-contract).
 - Building a new source's parser/scraper: the embedded agent does this, driven by
-  [core/prompts/parser_builder.v1.md](core/prompts/parser_builder.v1.md) /
-  [core/prompts/scraper_builder.v1.md](core/prompts/scraper_builder.v1.md) — read those
-  before touching `core/parsers/` or `core/scrapers/` by hand (see Foundational directive below).
+  the prompts in [core/prompts/](core/prompts/) — read those before touching
+  `core/parsers/` or `core/scrapers/` by hand (see Foundational directive below).
+  Each kind is a **contract + a job**: `*_contract.v1.md` is what the code must
+  always be and is sent to both jobs; `*_builder.v1.md` (write one that doesn't
+  exist) and `*_reviser.v1.md` (fix one that does) are sent to one each. An
+  invariant belongs in the contract — put it in a job half and the agent is told
+  about it when building and not when fixing. `tests/test_prompts_split.py`
+  enforces that.
 
 ## Foundational directive: the harness builds its own domain code
 
@@ -47,7 +57,7 @@ embedded agent (`orchestration/agent.py`), working *with* the operator.
   / `tests/test_scraper_<key>.py`, inline sample — never a gitignored `data/`
   file). The workflow (`orchestration/verify.py`) re-runs that test independently;
   a missing or failing test is NOT `ok`, and the GUI shows the pass/fail and gates
-  approval on it. See `parser_builder.v1.md` / `scraper_builder.v1.md`.
+  approval on it. See the prompts in `core/prompts/`.
 - **What the gate checks, all of it** (`orchestration/verify.py` + the `fold_*`
   functions in `orchestration/codegen.py`). Each exists because the one before it
   passed something broken; `verify.blockers()` turns whichever fired into the

@@ -63,7 +63,7 @@ def summarize(results: list[EvalResult]) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--golden-set", type=Path, default=Path("evals/golden_set"))
-    args = parser.parse_args()
+    parser.parse_args()   # still parsed, so --help and bad flags behave
 
     raise NotImplementedError(
         "Wire in the agent_fn (core.tools + core.validators) once it exists."

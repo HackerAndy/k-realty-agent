@@ -16,16 +16,16 @@ One source, several doors:
                           <- file upload        (needs a human)
 
 Transports are DERIVED, not stored: a source can be uploaded to if it has a
-parser, scraped if it has a scraper, and emailed if some inbox routes to it. The
-only thing worth persisting is which one is the DEFAULT.
+parser, scraped if it has a scraper, and emailed if some inbox routes to it.
+Nothing about them is persisted at all.
 
-Default vs automated — deliberately separate:
-  - the DEFAULT is what "Get latest" runs. Every source with any working route
-    has one.
-  - AUTOMATION is a further step that runs the default unattended. It is only
-    possible when the default can run with nobody watching, so a source whose
-    only route is a file upload has a default but can never be automated. Zero
-    automation is a perfectly good state; zero default is not.
+There is no default route, and no source-level "can be automated" flag. Both were
+one answer standing in for several, and both drifted: a stored default said "file
+upload" long after Epic's website had taken over, and the automation verdict
+computed from it then called a self-running source manual. Each route already
+carries `available` and `unattended`; anything that needs to choose one reads
+those and says WHICH route it chose. The screen selects the route that last RAN
+(interfaces/web/index.html, lastRunRoute) — history, which cannot go stale.
 
 This module must stay framework-free (no langgraph/langchain imports).
 """
@@ -37,10 +37,6 @@ from typing import Any
 UPLOAD = "upload"
 SCRAPE = "scrape"
 EMAIL = "email"
-
-# Ordered best-first: when nothing is pinned, prefer the route that needs the
-# least from the operator.
-_PREFERENCE = (EMAIL, SCRAPE, UPLOAD)
 
 # Named for the WAY IN, not for what happens afterwards: "Portal scrape" packed
 # getting at the data and reading it into one word, and they are two stages that
@@ -103,7 +99,7 @@ def transports_for(
         carrier = next((s for s in services if s.key == search.carrier), None)
         # Naming an inbox is not the same as being able to READ it: a source
         # pointed at an inbox nobody has signed into would otherwise show as a
-        # working route, and "Get latest" would pick it and fail.
+        # working route, carrying a run control that fails the moment it's used.
         connected = (carrier is not None
                      and (True if carrier_ready is None else bool(carrier_ready(carrier.key))))
         carrier_label = carrier.label if carrier is not None else search.carrier
@@ -140,33 +136,9 @@ def _route(route_id: str, *, available: bool, unattended: bool,
     }
 
 
-def default_transport(service: Any, routes: list[dict]) -> str | None:
-    """Which route "Get latest" runs.
-
-    Honours the operator's pinned choice when it still works, so a stored default
-    silently degrades rather than silently lying: if the pinned route stops being
-    available (a scraper was deleted), fall back instead of offering a dead
-    button. Returns None only when NO route works at all.
-    """
-    working = [r for r in routes if r["available"]]
-    if not working:
-        return None
-
-    pinned = getattr(service, "default_transport", None)
-    if pinned and any(r["id"] == pinned for r in working):
-        return pinned
-
-    by_id = {r["id"]: r for r in working}
-    for candidate in _PREFERENCE:
-        if candidate in by_id:
-            return candidate
-    return working[0]["id"]
-
-
-def can_automate(routes: list[dict], default_id: str | None) -> bool:
-    """Automation runs the DEFAULT unattended, so it's only possible when the
-    default route can run with nobody watching."""
-    if default_id is None:
-        return False
-    route = next((r for r in routes if r["id"] == default_id), None)
-    return bool(route and route["available"] and route["unattended"])
+# No default_transport() and no can_automate() here on purpose. Both collapsed a
+# question about SEVERAL routes into one answer, and the answer went stale: the
+# pin said "file upload" long after Epic's website had taken over, and the
+# automation flag, computed from that pin, then reported a self-running source as
+# manual. Every route already carries `available` and `unattended`; a caller that
+# needs to pick one reads those and says which it picked.

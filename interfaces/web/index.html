@@ -225,17 +225,13 @@
   :root[data-theme="dark"] .rnode .flag.unverified { color: #d7ab5c; }
   .door { display: flex; align-items: center; gap: 9px; font-size: 12.5px; border: 1px solid var(--border);
     border-radius: 10px; padding: 9px 12px; background: color-mix(in oklab, var(--muted) 5%, var(--card)); }
-  .door.on { border-color: color-mix(in oklab, var(--accent) 45%, var(--border)); background: color-mix(in oklab, var(--accent) 10%, var(--card)); }
   .door.off { opacity: .55; }
-  /* The whole box runs the route; only the star is carved out for setting default. */
+  /* The box SELECTS the route; ⏵ at its right runs it. */
   .door.go { cursor: pointer; }
   .door.go:hover { border-color: color-mix(in oklab, var(--accent) 55%, var(--border)); background: color-mix(in oklab, var(--accent) 8%, var(--card)); }
   .door.live .w { color: var(--text); font-weight: 600; }
   .door .t { font-weight: 600; }
   .door .w { color: var(--muted); font-size: 11.5px; margin-left: auto; text-align: right; }
-  .door .star { font-size: 13px; width: 15px; flex: none; color: var(--accent); }
-  .door .star.set { color: var(--border); cursor: pointer; }
-  .door .star.set:hover { color: var(--accent); }
   .door .rerun { flex: none; margin-left: 10px; width: 22px; height: 22px; border-radius: 6px;
     border: 1px solid var(--border); display: flex; align-items: center; justify-content: center;
     font-size: 13px; color: var(--muted); cursor: pointer; }
@@ -586,6 +582,16 @@
     if (openKey && sources.some(s => s.key === openKey) && !sourceTxnCache[openKey]) {
       try { sourceTxnCache[openKey] = await callTool('source_transactions', { source_key: openKey }); }
       catch (e) { sourceTxnCache[openKey] = { error: e.message, transactions: [], count: 0, money_in: 0, money_out: 0 }; }
+    }
+    // ...and for the node that's selected, whose rows are what the table below the
+    // graph actually shows. A run invalidates every route's cache (the number
+    // under a route may have just changed), so without this the panel that was
+    // selected when the run started would sit at "Loading transactions…" forever.
+    const openSource = sources.find(s => s.key === openKey);
+    const selRoute = openSource && (openSource.transports || [])
+      .find(r => r.id === graphSel[openKey]);
+    if (selRoute && selRoute.last_run && !routeTxnCache[openKey + '|' + selRoute.id]) {
+      await loadRouteTxns(openKey, selRoute.id, true);
     }
     if (openKey && sources.some(s => s.key === openKey) && !sourceSettingsCache[openKey]) {
       // Best-effort: a source with no declared options simply has no panel.
@@ -967,9 +973,18 @@
   }
   function netOf(data) { return (data.money_in || 0) + (data.money_out || 0); }
 
+  /** Opening a source lands on the node that last ran, exactly as if the operator
+   *  had clicked it — so the panel and the rows underneath describe THAT route
+   *  from the first frame. Landing on nothing meant the graph said "last used"
+   *  about one route while the table below it showed the source's rows under no
+   *  route's name at all, which is the same confusion the per-route counts fixed. */
   function toggleSource(key) {
-    ingestOpen.key = (ingestOpen.key === key) ? null : key;
-    renderIngest();
+    const opening = ingestOpen.key !== key;
+    ingestOpen.key = opening ? key : null;
+    if (!opening) return renderIngest();
+    const s = sourcesCache.find(x => x.key === key);
+    const last = s && lastRunRoute(s);
+    setNode(key, last ? last.id : null);
   }
 
   const ROUTE_ICON = { email: '✉', scrape: '⌘', upload: '⬆' };
@@ -1022,18 +1037,32 @@
     return routes.slice().sort((a, b) => rank[a.id] - rank[b.id]);
   }
 
+  /** The route that ran most recently — the source's own history, ordered by the
+   *  run's parsed_at rather than by the order routes happen to be listed in. */
+  function lastRunRoute(s) {
+    return (s.transports || [])
+      .filter(r => r.last_run)
+      .sort((a, b) => (b.last_run.parsed_at || '').localeCompare(a.last_run.parsed_at || ''))[0] || null;
+  }
+
   function selectNode(key, id) {
-    graphSel[key] = graphSel[key] === id ? null : id;
-    // A route's own rows, not whichever route ran last. Fetched on demand
-    // because most routes are never looked at.
-    const route = (sourcesCache.find(x => x.key === key) || {}).transports || [];
-    if (route.some(r => r.id === graphSel[key])) loadRouteTxns(key, graphSel[key]);
+    setNode(key, graphSel[key] === id ? null : id);   // clicking the selected one clears it
+  }
+
+  /** Select a node outright, so opening a source can land in exactly the state a
+   *  click would have produced. The selected route's own rows are fetched by
+   *  renderIngest — one place, so a run that emptied the cache and a fresh click
+   *  take the same path and neither can double-fetch. */
+  function setNode(key, id) {
+    graphSel[key] = id;
     // The website node shows the sign-in, which lives with the credentials.
-    if (graphSel[key] === 'scrape' && !credCache) loadCredentials().then(renderIngest);
+    if (id === 'scrape' && !credCache) loadCredentials().then(renderIngest);
     renderIngest();
   }
 
-  async function loadRouteTxns(key, transport) {
+  /** `quiet` when the caller is renderIngest itself, which is about to draw
+   *  anyway — re-rendering from in here would recurse. */
+  async function loadRouteTxns(key, transport, quiet) {
     const slot = key + '|' + transport;
     if (routeTxnCache[slot]) return;
     try {
@@ -1042,7 +1071,7 @@
     } catch (e) {
       routeTxnCache[slot] = { error: e.message, transactions: [], count: 0 };
     }
-    renderIngest();
+    if (!quiet) renderIngest();
   }
 
   /** The reader node. Named for what it IS — a parser, an API call, a model —
@@ -1065,8 +1094,7 @@
   }
 
   /** One source, several ways in, and what reads each. The picture IS the model:
-   *  ways in on the left, the reading in the middle, the rows on the right.
-   *  ★ is the default — what "Get latest" runs. */
+   *  ways in on the left, the reading in the middle, the rows on the right. */
   function funnelHTML(s) {
     if (!(s.transports || []).length) return '';
     const groups = readerGroups(s.transports);
@@ -1080,10 +1108,12 @@
     const groupY = groups.map((_, i) => slot(i, m));
 
     // Solid = the path the data on screen ACTUALLY came by; dashed = available
-    // but not used. So the drawing is history, not configuration — the ★ carries
-    // the config meaning. Falls back to the default before anything has run.
-    const data = sourceTxnCache[s.key];
-    const live = (data && data.last_transport) || s.default_transport;
+    // but not used. The drawing is pure history, read off the routes themselves
+    // rather than off the loaded rows, so the solid line and the node selected on
+    // open can never disagree while the rows are still in flight. A source that
+    // has never run is all dashed — there is no path to draw as taken.
+    const lastRoute = lastRunRoute(s);
+    const live = lastRoute && lastRoute.id;
     const liveGroup = groups.find(g => g.routes.includes(live));
     const curve = (y1, y2, solid) =>
       (Math.abs(y1 - y2) < 1
@@ -1103,15 +1133,6 @@
       'px" aria-hidden="true">' + inner + '</svg>';
 
     const doors = routes.map(r => {
-      const isDefault = r.id === s.default_transport;
-      // Two separate targets on purpose: the star sets the default, the rest of
-      // the box RUNS the route. One control doing both was the confusion.
-      const star = isDefault
-        ? '<span class="star" title="this is the default">★</span>'
-        : (r.available
-            ? '<span class="star set" title="make this the default" ' +
-              'onclick="event.stopPropagation();pinDefault(\'' + s.key + '\',\'' + r.id + '\')">☆</span>'
-            : '<span class="star"></span>');
       const right = r.available
         ? (r.id === live ? 'last used' : (r.unattended ? 'can run unattended' : 'needs you'))
         : esc(r.reason || 'not available');
@@ -1125,12 +1146,12 @@
           'onclick="event.stopPropagation();runRoute(\'' + s.key + '\',\'' + r.id + '\')">&#9205;</span>'
         : '';
       const settings = routeSettingsTarget(s, r.id);
-      return '<div class="door' + (isDefault ? ' on' : '') + (runnable ? ' go' : ' off') +
+      return '<div class="door' + (runnable ? ' go' : ' off') +
         (r.id === live ? ' live' : '') + (graphSel[s.key] === r.id ? ' sel' : '') + '"' +
         ' onclick="selectNode(\'' + s.key + '\',\'' + r.id + '\')"' +
         ' title="' + esc(settings ? settings.hint
                                   : (r.available ? r.detail : (r.reason || r.detail))) + '">' +
-        star + '<span>' + (ROUTE_ICON[r.id] || '•') + '</span>' +
+        '<span>' + (ROUTE_ICON[r.id] || '•') + '</span>' +
         '<span class="t">' + esc(r.label) + '</span>' +
         '<span class="w">' + right + '</span>' + rerun + '</div>';
     }).join('');
@@ -1361,24 +1382,40 @@
     return null;
   }
 
+  /** ⏵ on a chip runs THAT route, and only that route. All three used to funnel
+   *  through get_latest, which ran whichever route was the source's default — so
+   *  with a default of file upload, pressing ⏵ on Mailbox answered "there's
+   *  nothing to fetch, choose a document". A control on a route has to be about
+   *  that route, so this maps every route there is and has no fallback: a route
+   *  id that isn't one of these doesn't exist (core/transports.py _LABELS). */
+  const ROUTE_RUNNER = {
+    upload: key => chooseUpload(key),
+    scrape: key => act('run_scraper', { source_key: key }),
+    email: key => act('fetch_source', { source_key: key }),
+  };
+
   function runRoute(key, transport) {
-    if (transport === 'upload') return chooseUpload(key);
-    if (transport === 'scrape') return act('run_scraper', { source_key: key });
-    if (transport === 'email') return act('get_latest', { source_key: key });
-    return act('get_latest', { source_key: key });
+    return ROUTE_RUNNER[transport](key);
   }
 
-  /** The month-to-month answer: does this source look after itself, or need you? */
+  /** The month-to-month answer: does this source look after itself, or need you?
+   *
+   *  Asked of the routes, not of a pinned default. The pin was the star's doing,
+   *  and a stale one made this line say "needs you — file upload" about a source
+   *  whose website had just run itself. What the operator wants to know is
+   *  whether ANY way in can run with nobody watching. */
   function verdictHTML(s, isPending) {
     const routes = s.transports || [];
-    const def = routes.find(r => r.id === s.default_transport);
+    const usable = routes.filter(r => r.available);
+    const auto = usable.find(r => r.unattended);
     let txt;
-    if (!def) {
+    if (!usable.length) {
       txt = '<span class="verdict-txt manual">No working route yet — build a parser or a scraper below.</span>';
-    } else if (s.can_automate) {
-      txt = '<span class="verdict-txt self">★ Can run itself — ' + esc(def.label.toLowerCase()) + '</span>';
+    } else if (auto) {
+      txt = '<span class="verdict-txt self">Can run itself — ' + esc(auto.label.toLowerCase()) + '</span>';
     } else {
-      txt = '<span class="verdict-txt manual">Needs you — ' + esc(def.label.toLowerCase()) +
+      txt = '<span class="verdict-txt manual">Needs you — ' +
+            esc(usable.map(r => r.label.toLowerCase()).join(' and ')) +
             ' can’t run unattended</span>';
     }
 
@@ -1393,17 +1430,6 @@
       btns += sourceUploadAction(s.key, false);
     }
     return '<div class="verdict-row">' + txt + btns + '</div>';
-  }
-
-  async function pinDefault(key, transport) {
-    clearToast();
-    try {
-      const r = await callTool('set_default_transport', { source_key: key, transport });
-      toast('Default is now ' + transport + (r.can_automate ? ' — this route can run unattended.' : '.'), true);
-      await renderIngest();
-    } catch (e) {
-      toast('Couldn’t set the default: ' + e.message, false);
-    }
   }
 
   // ── Reading a document with the model instead of a parser ──
@@ -1546,7 +1572,15 @@
       '<span class="sub">' + (c.has_password ? 'Leave blank to keep the saved one. ' : '') +
       'Stored encrypted in <b>.secrets/</b> — never in the repo, never shown back to you.</span></div>' +
       '<div class="row"><button class="btn" onclick="saveCredentials(\'' + s.key + '\')">' +
-      (c.has_username && c.has_password ? 'Update' : 'Save') + '</button></div></div>';
+      (c.has_username && c.has_password ? 'Update' : 'Save') + '</button>' +
+      // The deliberate way to open a browser. A run only opens one on its own
+      // when the failure says a person is needed, so this is how you sign in on
+      // purpose: the first time, or to re-earn a portal's trust in this machine.
+      '<button class="btn" onclick="signInWithBrowser(\'' + s.key + '\')">' +
+      'Sign in with a browser</button></div>' +
+      '<p class="note" style="margin:8px 0 0">Only needed for a first sign-in, or when the ' +
+      'portal asks for a one-time code. After that the saved sign-in above is used on its own ' +
+      '— runs won’t open a browser unless the portal actually asks for you.</p></div>';
   }
 
   function uploadPanel(s) {
@@ -1570,9 +1604,7 @@
       // The route that produced the rows the source is showing — which is the
       // most RECENT run, not merely the first route that has ever run. Naming
       // the wrong one sends the operator to a route that isn't holding the data.
-      const live = (s.transports || [])
-        .filter(r => r.last_run)
-        .sort((a, b) => (b.last_run.parsed_at || '').localeCompare(a.last_run.parsed_at || ''))[0];
+      const live = lastRunRoute(s);
       const where = live
         ? ' The rows this source has came in by <b>' + esc(live.label.toLowerCase()) + '</b>.'
         : '';
@@ -1607,8 +1639,8 @@
     if (!data.transactions || !data.transactions.length) {
       // Carriers are no longer listed as sources, so the old "this is a delivery
       // trigger, not a ledger" apology has nothing left to explain.
-      const msg = s.default_transport
-        ? 'No transactions yet — use <b>Get latest</b> above to bring some in.'
+      const msg = (s.transports || []).some(r => r.available)
+        ? 'No transactions yet — press ⏵ on a way in above to bring some in.'
         : 'No working route yet. Build a parser or a scraper below, then get the data.';
       return head + '<div class="notbuilt">' + msg + '</div>';
     }
@@ -1853,6 +1885,13 @@
     // "it stopped early" changes how much weight to put on the result.
     if (v.agent_stopped) {
       body += '<div class="notbuilt" style="margin-bottom:10px">' + esc(v.agent_stopped) + '</div>';
+    }
+
+    // A run that changed nothing ON PURPOSE has to say so, or the screen reads as
+    // "it passed" over a file list that is empty and looks like a mistake.
+    if (v.no_change_reason) {
+      body += '<div class="notbuilt" style="margin-bottom:10px">No change was needed — ' +
+        esc(v.no_change_reason) + '</div>';
     }
 
     const did = st.did || {};
@@ -2168,8 +2207,8 @@
     }
   }
 
-  /** `withButton: false` when "Get latest" already IS the upload action — the
-   *  file picker still has to exist in the DOM, but a second button that opens
+  /** `withButton: false` when the upload chip's own ⏵ already opens the picker —
+   *  the file input still has to exist in the DOM, but a second button that opens
    *  the same dialog is just noise. */
   function sourceUploadAction(sourceKey, withButton = true) {
     const sid = sourceDomId(sourceKey);
@@ -2959,6 +2998,36 @@
   }
 
   /** Say WHY a human is needed, above the step timeline. */
+  /** Open the recovery browser because the OPERATOR asked, not because a failure
+   *  guessed they should. Auto-recovery now fires only on a failure that says it
+   *  needs a person (see shouldAutoRecoverLogin), so this is the deliberate way
+   *  in — for a first sign-in, or to re-establish device trust. */
+  async function signInWithBrowser(sourceKey) {
+    const runId = startActionRun(sourceKey, 'start_login_recovery');
+    let steps = defaultActionSteps('start_login_recovery');
+    steps = updateUploadStep(steps, 'launch_browser', 'in-progress', 'Launch recovery browser');
+    renderUploadSteps(sourceKey, steps);
+    try {
+      const recovery = await callTool('start_login_recovery', {
+        source_key: sourceKey,
+        trigger_error: 'You asked to sign in with a browser.',
+      });
+      if (!isCurrentActionRun(sourceKey, runId)) return;
+      if (recovery && Array.isArray(recovery.steps)) {
+        steps = applyServerUploadSteps(steps, recovery.steps);
+      }
+      renderUploadSteps(sourceKey, steps);
+      showRecoveryReason(sourceKey, recovery);
+      toast('Recovery browser opened. Sign in, then close it to save the session.', true);
+      // No failed call to resume — this wasn't triggered by one.
+      beginLoginRecoveryPolling(sourceKey, runId, null, null);
+    } catch (e) {
+      if (!isCurrentActionRun(sourceKey, runId)) return;
+      endRecovery(sourceKey, 'launch_browser', e && e.message ? e.message : 'failed to start');
+      showRecoveryCancel(sourceKey);
+    }
+  }
+
   function showRecoveryReason(sourceKey, recovery) {
     if (!recovery || !recovery.explanation) return;
     const row = el('upload-steps-row-' + sourceDomId(sourceKey));
@@ -2973,16 +3042,25 @@
     row.insertBefore(why, row.firstChild);
   }
 
+  /** Should a browser be opened at the operator, unasked?
+   *
+   *  Only when the failure itself says so (`needs_browser_login` on the
+   *  exception, surfaced as `needs_login`). This used to be a regex over the
+   *  error prose — /401|unauthor|session|login|credential|sign-in|2fa/i — and it
+   *  was wrong in both directions on the same run: a plain HTTP 403 carried the
+   *  harness's own boilerplate "Check session validity and network
+   *  connectivity", matched on the word *session*, and launched a browser
+   *  demanding a login that was neither needed nor able to help; while "No
+   *  username/password stored" — the one case a human must act on — matched
+   *  nothing and was shown as an ordinary error.
+   *
+   *  Anything not flagged shows its real error, and the operator can still open
+   *  a browser deliberately with the "Sign in with a browser" button. Guessing
+   *  is what took the choice away from them. */
   function shouldAutoRecoverLogin(tool, err) {
     if (tool !== 'run_scraper') return false;
     const detail = err && err.detail ? err.detail : null;
-    const msg = String((detail && detail.message) || (err && err.message) || '');
-    const authLike = /(\b401\b|unauthor|session|login|credential|sign[\s-]?in|2fa|verification)/i;
-    if (authLike.test(msg)) return true;
-    const stepErrors = detail && Array.isArray(detail.steps)
-      ? detail.steps.map(s => String(s && s.error ? s.error : '')).join(' | ')
-      : '';
-    return authLike.test(stepErrors);
+    return !!(detail && detail.needs_login);
   }
 
   /** Poll the phases INSIDE a long action so a silent 30-60s step becomes

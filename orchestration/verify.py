@@ -214,6 +214,175 @@ def declares_settings(path: str) -> bool:
     return declared and reads
 
 
+# Below this fraction of surviving lines, a "fix" is a rewrite. Calibrated on the
+# recorded builds in data/logs/builds: every genuine iterative edit the agent has
+# ever made to an existing file scored 0.84-1.00, and the rewrite that destroyed a
+# working test file scored 0.08. The gap is enormous; 0.4 sits in the middle of it.
+MIN_REVISE_SIMILARITY = 0.4
+
+
+def snapshot_files(paths: list[str]) -> dict[str, str]:
+    """The current contents of `paths` that exist, for comparing against later."""
+    out: dict[str, str] = {}
+    for path in paths:
+        full = REPO_ROOT / path
+        try:
+            if full.is_file():
+                out[path] = full.read_text(encoding="utf-8")
+        except OSError:
+            continue
+    return out
+
+
+def wholesale_rewrites(before: dict[str, str]) -> dict[str, float]:
+    """Files whose content was REPLACED rather than edited. {path: similarity}.
+
+    A revise is a fix, and a fix is targeted. Asked three times running to correct
+    a single undefined name, the agent rewrote a 272-line test file from scratch —
+    twice producing new bugs, and the third time hitting the turn cap mid-write and
+    leaving a file that would not parse. Each rewrite passed every other gate on
+    the way in, because each one was, in isolation, a plausible file.
+
+    The damage is specific and not otherwise detectable: work disappears. That
+    rewrite silently dropped the reconciliation tests, so the scraper kept its
+    control-total check while nothing was left to prove it. No gate that looks at
+    the new file alone can see what used to be in the old one.
+
+    Deliberately NOT applied to a build: the first version of a file has nothing
+    to be similar to, and successive drafts within one build are how the agent
+    works.
+    """
+    import difflib
+
+    out: dict[str, float] = {}
+    for path, old in before.items():
+        full = REPO_ROOT / path
+        try:
+            new = full.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if new == old or not old.strip():
+            continue
+        ratio = difflib.SequenceMatcher(None, old.splitlines(), new.splitlines()).ratio()
+        if ratio < MIN_REVISE_SIMILARITY:
+            out[path] = round(ratio, 2)
+    return out
+
+
+def _test_names(source: str) -> set[str] | None:
+    """Every test function and test class in a module. None if it doesn't parse."""
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
+            names.add(node.name)
+        elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
+            names.add(node.name)
+    return names
+
+
+def removed_tests(before: dict[str, str]) -> dict[str, list[str]]:
+    """Tests that existed before the agent's edit and don't afterwards.
+
+    The companion to `wholesale_rewrites`, and it exists because that check has a
+    blind spot this closes. Similarity only notices REPLACEMENT: a revise that
+    took a 778-line test file down to 455 kept enough lines to score well above
+    the threshold and sailed through, having quietly dropped six tests. Deleting a
+    third of a file is the same damage as replacing it, in a shape the ratio can't
+    see.
+
+    Tests specifically, because their loss is the silent kind. Delete a function
+    the code needs and something fails immediately; delete the test that proves
+    the code works and everything stays green — which is exactly how the
+    reconciliation coverage disappeared while the scraper kept reconciling.
+
+    A rename shows up here as a removal, and that is the intended behaviour: the
+    agent should say it renamed something rather than have it vanish silently.
+    """
+    out: dict[str, list[str]] = {}
+    for path, old in before.items():
+        # No filename guessing about which file is "the test file". Only files
+        # that HAD tests can lose them, so the AST already answers it — and a
+        # name-shaped guess is one more thing to be subtly wrong about.
+        full = REPO_ROOT / path
+        try:
+            new_source = full.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        was, now = _test_names(old), _test_names(new_source)
+        # A file that no longer parses is a different failure, and `lint` names it
+        # properly. Reporting every test as "removed" would bury that.
+        if was is None or now is None:
+            continue
+        gone = sorted(was - now)
+        if gone:
+            out[path] = gone
+    return out
+
+
+NO_TOTALS_DECLARATION = "NO_CONTROL_TOTALS"
+
+
+def reconciles(path: str) -> dict:
+    """Does this scraper check its extraction against the source's own arithmetic?
+
+    Returns {"ok": bool, "detail": str}.
+
+    This gate exists because reconciliation was the ONE rule in the scraper
+    prompt with nothing enforcing it, and the difference showed immediately: the
+    Epic scraper reconciles, the DFCU scraper — written from the same
+    instructions — does not, even though the bank returns a `runningBalance` on
+    every row. An instruction the harness doesn't check is a suggestion, and a
+    model under context pressure drops suggestions first.
+
+    It matters more than the other gates, not less. A passing test says the
+    parsing logic is unchanged. A successful run says the portal answered.
+    Neither notices that a date window clipped rows, an account was skipped, or
+    pagination stopped early — the run stays green while the numbers are quietly
+    wrong, which for financial data is the worst failure mode available.
+
+    The escape hatch is a declaration, not a silence: a source that genuinely
+    publishes no totals says so as a module-level
+    `NO_CONTROL_TOTALS = "<why>"`, which is greppable and reviewable, in the same
+    spirit as `# fixed: <reason>`.
+    """
+    full = REPO_ROOT / path
+    try:
+        tree = ast.parse(full.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return {"ok": True, "detail": "not checked — the module could not be parsed"}
+
+    records = any(
+        isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "record"
+        and getattr(getattr(node.func, "value", None), "id", None) == "reconcile"
+        for node in ast.walk(tree)
+    )
+    if records:
+        return {"ok": True, "detail": "calls reconcile.record()"}
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and any(
+            getattr(t, "id", None) == NO_TOTALS_DECLARATION for t in node.targets
+        ):
+            reason = getattr(node.value, "value", None)
+            if isinstance(reason, str) and len(reason.strip()) >= 15:
+                return {"ok": True, "detail": f"declares no control totals: {reason.strip()}"}
+            return {
+                "ok": False,
+                "detail": f"{NO_TOTALS_DECLARATION} is set but says nothing useful — "
+                          "give the reason this source publishes no totals.",
+            }
+
+    return {
+        "ok": False,
+        "detail": "nothing checks the extraction against the source's own totals, and "
+                  f"no {NO_TOTALS_DECLARATION} explains why there are none.",
+    }
+
+
 def changed_lines(path: str) -> set[int]:
     """Line numbers this file has ADDED or MODIFIED versus HEAD.
 
@@ -318,6 +487,27 @@ def blockers(verification: dict) -> list[str]:
     if verification.get("no_changes"):
         out.append("The agent reported success without writing any file, so nothing changed. "
                    "(Its earlier edits, if any, are still on disk — check the diff.)")
+
+    rewritten = verification.get("wholesale_rewrite") or {}
+    if rewritten:
+        detail = "; ".join(
+            f"{path} (only {int(ratio * 100)}% of its lines survived)"
+            for path, ratio in rewritten.items())
+        out.append(f"The agent replaced a file rather than editing it — {detail}. Work "
+                   f"that was already there may have been dropped; check the diff before "
+                   f"trusting this.")
+
+    dropped = verification.get("removed_tests") or {}
+    if dropped:
+        detail = "; ".join(
+            f"{path}: {', '.join(names)}" for path, names in dropped.items())
+        out.append(f"Tests that were passing have been deleted — {detail}. Whatever they "
+                   f"proved is no longer being checked.")
+
+    if verification.get("unreconciled"):
+        out.append("Nothing checks the numbers against the source's own totals, so a run "
+                   "can't tell a complete pull from a partial one — "
+                   f"{verification['unreconciled']}")
 
     uncovered = verification.get("uncovered_changes") or {}
     if uncovered:

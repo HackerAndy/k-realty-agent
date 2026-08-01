@@ -119,7 +119,6 @@ def parse_statement(pdf_path: Path) -> list[Transaction]:
     transactions: list[Transaction] = []
     sign: int | None = None  # +1 additions, -1 subtractions; carries across pages
     current: dict | None = None
-    seq = 0
 
     def finalize(row: dict) -> None:
         property_name = _clean_property(row["cells"][1])

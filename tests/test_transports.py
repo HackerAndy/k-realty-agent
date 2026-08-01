@@ -4,10 +4,10 @@ The modelling error this fixes: the inbox carrying the Epic statement was listed
 as a PEER of Epic, so the operator saw two sources where there is one source with
 two ways in. A source is a body of data; a transport is a route it takes.
 
-Also pins the distinction the operator drew: the DEFAULT is what "Get latest"
-runs and every working source has one, while AUTOMATION is a further step that
-runs the default unattended. A source can legitimately have a default and no
-possible automation.
+Each route also answers for ITSELF. There is no default route and no per-source
+"can be automated" flag: both summarised several routes into one value that then
+went stale, and the screen read the stale value back out — Epic reported "needs
+you — file upload" while its website was running itself unattended.
 """
 
 import pathlib
@@ -110,61 +110,44 @@ def test_only_upload_needs_a_human():
     assert routes[EMAIL]["unattended"] is True
 
 
-# --- the default -------------------------------------------------------------
+# --- there is no default, and no source-level automation flag ----------------
+#
+# Both were one answer standing in for several, and both drifted. A pinned default
+# said "file upload" long after Epic's website had taken over; the automation flag,
+# computed from that pin, then called a self-running source manual. What replaced
+# them is per-route facts, which cannot disagree with themselves.
 
-def test_the_operators_pinned_choice_wins():
-    epic = _epic(default_transport=SCRAPE)
-    routes = _routes(epic, [epic, _inbox()], scraper=True)
-    assert transports.default_transport(epic, routes) == SCRAPE
+def test_no_route_is_singled_out_as_the_default():
+    """The concept is gone from the module, not merely unused by the screen — a
+    surviving helper is something the next caller reaches for."""
+    assert not hasattr(transports, "default_transport")
+    assert not hasattr(transports, "can_automate")
 
 
-def test_a_pinned_route_that_stopped_working_falls_back_instead_of_lying():
-    """A scraper can be deleted. Offering a dead button is worse than moving on."""
-    epic = _epic(default_transport=SCRAPE)
-    routes = _routes(epic, [epic, _inbox()], scraper=False)
-    assert transports.default_transport(epic, routes) == EMAIL
+def test_a_leftover_pin_in_the_manifest_decides_nothing():
+    """Someone's services.yaml may still carry the field the star wrote. It has to
+    be inert, not a value the code keeps half-honouring."""
+    stale = Service(key="dfcu", label="DFCU", parser="dfcu", default_transport=SCRAPE)
+
+    assert not hasattr(stale, "default_transport")
+    assert {r["id"] for r in _routes(stale)} == {UPLOAD, SCRAPE}
 
 
-def test_unpinned_prefers_the_route_needing_least_from_the_operator():
+def test_every_route_answers_for_itself():
+    """What the default and the automation flag were summarising. Epic can run
+    itself two ways and needs a human for the third — one bit per source could
+    never say that."""
     epic = _epic()
-    routes = _routes(epic, [epic, _inbox()], scraper=True)
-    assert transports.default_transport(epic, routes) == EMAIL
+    routes = _by_id(_routes(epic, [epic, _inbox()], scraper=True))
+
+    assert [r for r in routes.values() if r["available"] and r["unattended"]]
+    assert routes[UPLOAD]["unattended"] is False
+    assert routes[SCRAPE]["unattended"] is True and routes[EMAIL]["unattended"] is True
 
 
-def test_every_source_with_a_working_route_gets_a_default():
-    """The operator's rule: zero automation is fine, zero default is not."""
-    upload_only = Service(key="dfcu", label="DFCU", parser="dfcu")
-    routes = _routes(upload_only)
-    assert transports.default_transport(upload_only, routes) == UPLOAD
-
-
-def test_no_default_when_nothing_works_at_all():
+def test_a_source_with_nothing_working_has_no_unattended_route():
     nothing = Service(key="new", label="New")
-    assert transports.default_transport(nothing, _routes(nothing)) is None
-
-
-# --- default is not automation ----------------------------------------------
-
-def test_upload_can_be_the_default_but_never_automated():
-    """The operator's correction: 'Get latest' on an upload source means 'hand me
-    the file'. That is a fine default; it just cannot run unattended."""
-    upload_only = Service(key="dfcu", label="DFCU", parser="dfcu")
-    routes = _routes(upload_only)
-    default = transports.default_transport(upload_only, routes)
-
-    assert default == UPLOAD
-    assert transports.can_automate(routes, default) is False
-
-
-def test_an_unattended_default_can_be_automated():
-    epic = _epic()
-    routes = _routes(epic, [epic, _inbox()])
-    assert transports.can_automate(routes, transports.default_transport(epic, routes)) is True
-
-
-def test_nothing_working_cannot_be_automated():
-    nothing = Service(key="new", label="New")
-    assert transports.can_automate(_routes(nothing), None) is False
+    assert not [r for r in _routes(nothing) if r["available"] and r["unattended"]]
 
 
 # --- the tool surface --------------------------------------------------------
@@ -196,42 +179,31 @@ def test_carriers_are_still_reachable_when_asked_for(two_sources):
     assert "email" in keys
 
 
-def test_list_sources_reports_routes_and_the_default(two_sources):
+def test_list_sources_reports_the_routes_and_nothing_summarising_them(two_sources):
     epic = next(s for s in two_sources.list_sources() if s["key"] == "epic")
     assert {r["id"] for r in epic["transports"]} == {UPLOAD, SCRAPE, EMAIL}
-    assert epic["default_transport"] == EMAIL and epic["can_automate"] is True
+    assert "default_transport" not in epic and "can_automate" not in epic
 
     dfcu = next(s for s in two_sources.list_sources() if s["key"] == "dfcu")
-    assert dfcu["default_transport"] == UPLOAD and dfcu["can_automate"] is False
+    assert {r["id"] for r in dfcu["transports"]} == {UPLOAD, SCRAPE}
 
 
-def test_setting_a_default_to_an_unusable_route_is_refused(two_sources):
-    with pytest.raises(two_sources.ToolError, match="isn't usable"):
-        two_sources.set_default_transport("dfcu", SCRAPE)
+def test_the_tools_that_only_served_the_default_are_gone(two_sources):
+    """set_default_transport set it; get_latest ran it. With no default, the first
+    writes something nothing reads and the second makes a control on one route run
+    another — ⏵ on Mailbox used to answer "choose a document"."""
+    names = {fn.__name__ for fn in two_sources.ALL_TOOLS}
+
+    assert "set_default_transport" not in names and not hasattr(two_sources, "set_default_transport")
+    assert "get_latest" not in names and not hasattr(two_sources, "get_latest")
 
 
-def test_get_latest_on_an_upload_source_asks_for_the_file(two_sources):
-    """There is nothing to fetch — say so instead of failing obscurely."""
-    with pytest.raises(two_sources.ToolError, match="choose a document"):
-        two_sources.get_latest("dfcu")
-
-
-def test_get_latest_fetches_the_source_itself(two_sources, monkeypatch):
-    """The source is what gets fetched and ingested; the inbox is only where we
-    look. It used to be handed the carrier's key, which then had to bounce the
-    document back through a delivers_to indirection."""
-    seen = {}
-
-    def fake_fetch(key):
-        seen["key"] = key
-        return {"ingested": []}
-
-    monkeypatch.setattr(two_sources, "fetch_source", fake_fetch)
-
-    result = two_sources.get_latest("epic")
-
-    assert result["transport"] == EMAIL
-    assert seen["key"] == "epic"
+def test_a_route_is_run_by_the_tool_that_belongs_to_it(two_sources):
+    """What replaced get_latest: the mailbox route fetches the SOURCE — the inbox
+    is only where we look — and no other route's tool is involved."""
+    assert {"fetch_source", "run_scraper", "ingest_document"} <= {
+        fn.__name__ for fn in two_sources.ALL_TOOLS
+    }
 
 
 # --- which route actually delivered the data ---------------------------------

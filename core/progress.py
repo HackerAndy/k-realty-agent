@@ -43,6 +43,8 @@ import time
 from contextlib import contextmanager
 from typing import Any
 
+from core import observability
+
 # channel name -> ordered steps. Kept small: one entry per named channel, reset
 # each time that channel is opened.
 _CHANNELS: dict[str, list[dict[str, Any]]] = {}
@@ -59,27 +61,61 @@ def _active() -> str | None:
 @contextmanager
 def channel(name: str):
     """Open `name` as this thread's progress channel, clearing anything from a
-    previous run so a poller never sees two runs interleaved."""
+    previous run so a poller never sees two runs interleaved.
+
+    Also opens the matching observability scope, so the run's FAILURES are
+    stamped with the same source its phases are. The two modules answer "what is
+    happening now" and "what happened", and a channel is always named for the
+    source — so tying them here means every call site gets a source-tagged
+    failure record for free, instead of each one remembering to pass it. They
+    forgot: a live 403 logged its URL and status and nothing to say which source
+    it belonged to, which made "what went wrong with this source" unanswerable.
+    """
     with _LOCK:
         _CHANNELS[name] = []
     previous = _active()
     _ACTIVE.name = name
     try:
-        yield
+        with observability.scope(name):
+            yield
     finally:
         _ACTIVE.name = previous
 
 
-def step(key: str, label: str, status: str = "in-progress", **details: Any) -> None:
+# Fields this module owns. A detail that collides with one of these is dropped
+# rather than allowed to fight it — see _own_fields() below.
+_RESERVED = ("key", "label", "status", "started_at", "duration_ms")
+
+
+def _own_fields(details: dict[str, Any]) -> dict[str, Any]:
+    """Strip the fields the channel itself sets, so reporting progress can never
+    be the thing that breaks a run.
+
+    These writers are called from agent-authored scrapers, and the parameters are
+    named the obvious things — `progress.done("sign_in", status="success")` is the
+    natural way to write a line that is merely redundant. It used to raise
+    `_finish() got multiple values for argument 'status'` from inside the scrape,
+    mid-run, after the browser was already open: a fatal crash caused purely by
+    the reporting of success. Worse, the traceback pointed at core/progress.py, so
+    the operator (and the agent, reading the logs) went hunting in the wrong file.
+
+    Losing a redundant detail costs nothing. The status a caller passed as data
+    never outranks the outcome the caller actually reported.
+    """
+    return {k: v for k, v in details.items() if k not in _RESERVED}
+
+
+def step(key: str, label: str, /, status: str = "in-progress", **details: Any) -> None:
     """Report a phase starting (or update one). No-op with no channel open."""
     name = _active()
     if name is None:
         return
+    extra = _own_fields(details)
     with _LOCK:
         steps = _CHANNELS.setdefault(name, [])
         for existing in steps:
             if existing["key"] == key:
-                existing.update(label=label, status=status, **details)
+                existing.update(label=label, status=status, **extra)
                 return
         if len(steps) >= MAX_STEPS:
             return
@@ -88,24 +124,25 @@ def step(key: str, label: str, status: str = "in-progress", **details: Any) -> N
             "label": label,
             "status": status,
             "started_at": time.time(),
-            **details,
+            **extra,
         })
 
 
-def done(key: str, **details: Any) -> None:
+def done(key: str, /, **details: Any) -> None:
     """Mark a phase finished, recording how long it took — the number that tells
     the operator whether 'slow' means working or wedged."""
     _finish(key, "success", **details)
 
 
-def failed(key: str, error: str = "", **details: Any) -> None:
+def failed(key: str, /, error: str = "", **details: Any) -> None:
     _finish(key, "failed", error=error, **details)
 
 
-def _finish(key: str, status: str, **details: Any) -> None:
+def _finish(key: str, status: str, /, **details: Any) -> None:
     name = _active()
     if name is None:
         return
+    extra = _own_fields(details)
     with _LOCK:
         for existing in _CHANNELS.get(name, []):
             if existing["key"] == key:
@@ -113,7 +150,7 @@ def _finish(key: str, status: str, **details: Any) -> None:
                 if started:
                     existing["duration_ms"] = int((time.time() - started) * 1000)
                 existing["status"] = status
-                existing.update(details)
+                existing.update(extra)
                 return
 
 

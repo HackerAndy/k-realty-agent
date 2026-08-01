@@ -19,7 +19,6 @@ import time
 from datetime import datetime, timezone
 
 from core import hot_reload, progress, readers, reconcile, settings, source_status, transports
-from core.transports import EMAIL, SCRAPE
 from core.observability import get_logger
 from core.fetch_ingest import fetch_and_ingest, persist_scraped
 from core.ingest import (
@@ -160,7 +159,10 @@ def list_sources(include_carriers: bool = False) -> list[dict]:
             carrier_ready=_inbox_connected,
         )
         _attach_reader_and_run(s, routes)
-        default_id = transports.default_transport(s, routes)
+        # No "default_transport" and no "can_automate": each route reports its own
+        # `available` / `unattended` / `last_run`, and a summary over them was a
+        # second answer that went stale. A caller wanting the automatable ways in
+        # filters `transports`, and can then say WHICH one.
         out.append({
             "key": s.key,
             "label": s.label,
@@ -172,8 +174,6 @@ def list_sources(include_carriers: bool = False) -> list[dict]:
             "parser_built": source_status.parser_built(s.key),
             "has_scraper": has_scraper(s.key),
             "transports": routes,
-            "default_transport": default_id,
-            "can_automate": transports.can_automate(routes, default_id),
         })
     return out
 
@@ -577,8 +577,6 @@ def preview_document(sample_path: str, filename: str = "") -> dict:
     layout, the answer is a smaller panel plus a name suggested from the
     filename, never a blocked flow.
     """
-    from core import preview
-
     doc = Path(sample_path).expanduser()
     if not doc.exists():
         raise ToolError(f"No file at {doc}")
@@ -1008,55 +1006,12 @@ def reset_source_settings(source_key: str) -> dict:
     return {"source_key": source_key, "values": settings.reset_for(source_key), "overridden": []}
 
 
-def set_default_transport(source_key: str, transport: str) -> dict:
-    """Pin which route "Get latest" runs for a source."""
-    services = _load_services()
-    service = next((s for s in services if s.key == source_key), None)
-    if service is None:
-        raise ToolError(f"Unknown source '{source_key}'.")
-
-    routes = transports.transports_for(
-        service, services, has_scraper=has_scraper, parser_built=source_status.parser_built
-    )
-    route = next((r for r in routes if r["id"] == transport), None)
-    if route is None:
-        raise ToolError(f"'{transport}' is not a route for '{source_key}'. "
-                        f"Options: {[r['id'] for r in routes]}")
-    if not route["available"]:
-        raise ToolError(f"{route['label']} isn't usable for '{source_key}' yet — {route['reason']}.")
-
-    ServiceManifest().update(source_key, default_transport=transport)
-    return {"source_key": source_key, "default_transport": transport,
-            "can_automate": route["unattended"]}
-
-
-def get_latest(source_key: str) -> dict:
-    """Run whichever route is this source's default — the one-button 'get me the
-    newest data', without the operator having to remember how it arrives."""
-    services = _load_services()
-    service = next((s for s in services if s.key == source_key), None)
-    if service is None:
-        raise ToolError(f"Unknown source '{source_key}'.")
-
-    routes = transports.transports_for(
-        service, services, has_scraper=has_scraper, parser_built=source_status.parser_built
-    )
-    default_id = transports.default_transport(service, routes)
-    if default_id is None:
-        raise ToolError(
-            f"'{service.label}' has no working route yet. Build a parser or a scraper for it first."
-        )
-    if default_id == SCRAPE:
-        return {"transport": SCRAPE, **run_scraper(source_key)}
-    if default_id == EMAIL:
-        # The source is fetched, not the inbox: the inbox is only where we look.
-        return {"transport": EMAIL, **fetch_source(source_key)}
-    # Upload can be a default — "get latest" means "hand me the file" — but the
-    # file itself has to come from the operator, so the caller opens the picker.
-    raise ToolError(
-        f"'{service.label}' arrives by file upload, so there's nothing to fetch — "
-        "choose a document to bring in the latest data."
-    )
+# No get_latest(). "Run whichever route is the default" only meant anything while
+# a default existed, and it made a control on one route run another: ⏵ on Mailbox
+# went through here and answered "there's nothing to fetch, choose a document"
+# because the default was file upload. Each route runs itself — run_scraper for
+# the website, fetch_source for a mailbox, ingest_document for a file the operator
+# picks — and the screen says which one it ran.
 
 
 def latest_transactions(limit: int = 200) -> dict:
@@ -1279,7 +1234,15 @@ def run_scraper(source_key: str, save: bool = True, limit: int = 200) -> dict:
             "duration_ms": int((time.perf_counter() - scrape_started) * 1000),
             "error": str(exc),
         })
-        raise ToolError({"message": str(exc), "steps": steps}) from exc
+        # Does this failure actually want a human at a browser? The FAILURE says
+        # so — the front-end used to guess by matching words like "session" in the
+        # message, which opened a browser for a 403 that had nothing to do with
+        # signing in, and showed a plain error for a genuinely missing password.
+        raise ToolError({
+            "message": str(exc),
+            "steps": steps,
+            "needs_login": bool(getattr(exc, "needs_browser_login", False)),
+        }) from exc
 
     # Did we get EVERYTHING? Reported as its own step so a silent shortfall can't
     # hide behind a green "Run scraper". `ok is None` means the source published
@@ -1881,6 +1844,7 @@ def build_status(source_key: str, event_offset: int = 0) -> dict:
     # WHY it was refused, named specifically. "Its test did NOT pass" was reported
     # for every refusal, including runs whose test passed.
     payload["blockers"] = _verify.blockers(verification)
+    payload["no_change_reason"] = verification.get("no_change_reason") or ""
     # WHAT it did, as files and commands. The agent's own prose can run to tens of
     # thousands of characters; the list of files it wrote cannot.
     payload["did"] = _what_it_did(result or {})
@@ -2003,8 +1967,6 @@ ACTION_TOOLS = [
     start_build,
     stop_build,
     build_status,
-    set_default_transport,
-    get_latest,
     save_source_settings,
     reset_source_settings,
     set_credentials,

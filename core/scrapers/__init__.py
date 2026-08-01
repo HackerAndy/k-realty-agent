@@ -12,10 +12,12 @@ empty; the harness fills it.
 from __future__ import annotations
 
 from core.scrapers.base import ScrapeError, Scraper
+from core.scrapers.dfcu_financial_bank import retrieve as _dfcu_retrieve
 from core.scrapers.epic_property_management import retrieve as _epic_retrieve
 
 # source_key -> retrieve() callable. Populated by the agent via build_scraper.
 REGISTRY: dict[str, Scraper] = {
+    "dfcu_financial_bank": _dfcu_retrieve,
     "epic_property_management": _epic_retrieve,
 }
 

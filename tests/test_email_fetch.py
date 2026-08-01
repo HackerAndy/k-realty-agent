@@ -6,7 +6,6 @@ network: the search-query builder, the email search round-tripping through
 services.yaml, the attachment-tree walk, and the guards on fetching.
 """
 
-from pathlib import Path
 
 import pytest
 

@@ -44,6 +44,51 @@ def test_reading_files_is_not_changing_them():
     assert v["ok"] is False
 
 
+# --- the escape hatch: already correct --------------------------------------
+#
+# Without it the gate deadlocks. A bug fixed on run 1 means run 2 has nothing to
+# write, so run 2 is refused as a no-op — and so is every run after it. The
+# operator's screen said "nothing changed" with no move left that could change it.
+
+def _declared(reason="the status= kwarg was already removed at line 197; 16 tests cover it"):
+    return [("read_file", {"path": "core/scrapers/x.py"}),
+            ("no_change_needed", {"reason": reason})]
+
+
+def test_a_declared_no_change_is_allowed_through():
+    v = codegen.fold_noop({"ok": True, "test": {"ok": True}}, _declared())
+    assert v["ok"] is True and "no_changes" not in v
+
+
+def test_the_reason_is_kept_for_the_operator_to_read():
+    v = codegen.fold_noop({"ok": True}, _declared("already fixed at line 197 — see the test"))
+    assert v["no_change_reason"] == "already fixed at line 197 — see the test"
+
+
+def test_declaring_it_cannot_rescue_a_failing_test():
+    """The hatch excuses writing nothing. It does not excuse broken code."""
+    v = codegen.fold_noop({"ok": False, "test": {"ok": False}}, _declared())
+    assert v["ok"] is False
+
+
+def test_an_empty_reason_is_not_a_declaration():
+    v = codegen.fold_noop({"ok": True}, [("no_change_needed", {"reason": "   "})])
+    assert v["ok"] is False and v["no_changes"] is True
+
+
+def test_a_declaration_alongside_real_edits_still_counts_the_edits():
+    v = codegen.fold_noop({"ok": True}, _declared() + _wrote("core/scrapers/x.py"))
+    assert v["ok"] is True and "no_change_reason" not in v
+
+
+def test_a_declared_no_change_is_not_retried(monkeypatch):
+    seen = _runner(monkeypatch, [_Result(_declared())])
+    _, v = codegen.run_codegen_gated(
+        "task", "sys", lambda: {"ok": True, "test": {"ok": True}}, on_event=lambda _: None,
+        require_changes=True)
+    assert len(seen["tasks"]) == 1 and v["ok"] is True
+
+
 # --- the auto-retry ---------------------------------------------------------
 
 def _runner(monkeypatch, sequence):
@@ -240,3 +285,410 @@ def test_an_unmeasurable_coverage_run_does_not_block(monkeypatch):
     )
 
     assert v["ok"] is True and "uncovered_changes" not in v
+
+
+# --- reconciling against the source's own numbers ---------------------------
+#
+# This was the ONE rule in the scraper prompt with nothing enforcing it, and the
+# gap showed up in a single build cycle: the Epic scraper reconciles, the DFCU
+# scraper — same instructions, same model — does not, though the bank returns a
+# runningBalance on every row. An instruction the harness doesn't check is a
+# suggestion, and a model under context pressure drops suggestions first.
+#
+# It matters more than the other gates, not less. A passing test says the parsing
+# is unchanged; a successful run says the portal answered. Neither notices that a
+# date window clipped rows or pagination stopped early — the run stays green while
+# the numbers are quietly wrong.
+
+from orchestration import verify as _verify
+
+
+def _scraper(tmp_path, monkeypatch, body):
+    monkeypatch.setattr(_verify, "REPO_ROOT", tmp_path)
+    path = tmp_path / "core" / "scrapers" / "x.py"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body)
+    return "core/scrapers/x.py"
+
+
+RECONCILING = '''
+from core import reconcile
+
+def retrieve():
+    rows = fetch()
+    reconcile.record("Checking", expected=payload["endingBalance"], actual=sum(r["amount"] for r in rows))
+    return rows
+'''
+
+SILENT = '''
+def retrieve():
+    return fetch()
+'''
+
+DECLARED = '''
+NO_CONTROL_TOTALS = "The endpoint returns bare rows: no total, no balance, no count."
+
+def retrieve():
+    return fetch()
+'''
+
+
+def test_a_scraper_that_reconciles_passes(tmp_path, monkeypatch):
+    path = _scraper(tmp_path, monkeypatch, RECONCILING)
+    assert _verify.reconciles(path)["ok"] is True
+
+
+def test_a_silent_scraper_fails(tmp_path, monkeypatch):
+    path = _scraper(tmp_path, monkeypatch, SILENT)
+    result = _verify.reconciles(path)
+    assert result["ok"] is False
+    assert "NO_CONTROL_TOTALS" in result["detail"]
+
+
+def test_a_source_with_no_totals_can_say_so(tmp_path, monkeypatch):
+    """The escape hatch is a declaration, not a silence — greppable and reviewable."""
+    path = _scraper(tmp_path, monkeypatch, DECLARED)
+    assert _verify.reconciles(path)["ok"] is True
+
+
+def test_an_empty_excuse_is_not_accepted(tmp_path, monkeypatch):
+    path = _scraper(tmp_path, monkeypatch, 'NO_CONTROL_TOTALS = "none"\n')
+    assert _verify.reconciles(path)["ok"] is False
+
+
+def test_an_unparseable_module_is_not_blamed_for_this(tmp_path, monkeypatch):
+    """Some other gate names a syntax error properly; this one must not bury it."""
+    path = _scraper(tmp_path, monkeypatch, "def retrieve(:\n")
+    assert _verify.reconciles(path)["ok"] is True
+
+
+def test_the_gate_fails_the_verification(tmp_path, monkeypatch):
+    path = _scraper(tmp_path, monkeypatch, SILENT)
+    v = codegen.fold_reconciliation({"ok": True, "test": {"ok": True}}, path)
+    assert v["ok"] is False and v["unreconciled"]
+
+
+def test_the_gate_records_what_satisfied_it(tmp_path, monkeypatch):
+    path = _scraper(tmp_path, monkeypatch, RECONCILING)
+    v = codegen.fold_reconciliation({"ok": True}, path)
+    assert v["ok"] is True and "reconcile.record()" in v["reconciliation"]
+
+
+def test_an_unreconciled_scraper_gets_one_retry(monkeypatch, tmp_path):
+    path = _scraper(tmp_path, monkeypatch, SILENT)
+    monkeypatch.setattr(codegen, "REPO_ROOT", tmp_path)
+    seen = _runner(monkeypatch, [_Result(_wrote(path)), _Result(_wrote(path))])
+    codegen.run_codegen_gated(
+        "task", "sys", lambda: {"ok": True, "test": {"ok": True}},
+        on_event=lambda _: None, reconcile_path=path)
+    assert len(seen["tasks"]) == 2
+    assert "reconcile.record" in seen["tasks"][1]
+
+
+def test_the_operator_is_told_in_their_own_words():
+    out = _verify.blockers({"ok": False, "unreconciled": "nothing checks the extraction"})
+    assert any("complete pull from a partial one" in b for b in out)
+
+
+# --- a fix must edit, not replace -------------------------------------------
+#
+# The opposite failure to fold_noop, and it cost more. Asked three times running
+# to correct a single undefined name, the agent rewrote a 272-line test file from
+# scratch: twice introducing new bugs, and the third time hitting the turn cap
+# mid-write and leaving a file that would not parse.
+#
+# Every other gate looks only at what the NEW file contains, so none of them can
+# notice what the old one contained and the new one doesn't. That rewrite silently
+# dropped the reconciliation tests — the scraper kept its control-total check while
+# nothing was left to prove it.
+#
+# The threshold is calibrated on the recorded builds: every genuine iterative edit
+# the agent has made to an existing file scored 0.84-1.00 line-similarity; the
+# rewrite scored 0.08.
+
+TARGETED_BEFORE = "\n".join(f"line {i}" for i in range(60))
+TARGETED_AFTER = TARGETED_BEFORE.replace("line 30", "line 30  # fixed")
+REPLACED = "\n".join(f"completely different content {i}" for i in range(60))
+
+
+def _file(tmp_path, monkeypatch, body):
+    monkeypatch.setattr(_verify, "REPO_ROOT", tmp_path)
+    path = tmp_path / "tests" / "t.py"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body)
+    return "tests/t.py"
+
+
+def test_a_targeted_edit_is_allowed(tmp_path, monkeypatch):
+    rel = _file(tmp_path, monkeypatch, TARGETED_BEFORE)
+    before = _verify.snapshot_files([rel])
+    (tmp_path / rel).write_text(TARGETED_AFTER)
+    assert _verify.wholesale_rewrites(before) == {}
+
+
+def test_a_wholesale_replacement_is_flagged(tmp_path, monkeypatch):
+    rel = _file(tmp_path, monkeypatch, TARGETED_BEFORE)
+    before = _verify.snapshot_files([rel])
+    (tmp_path / rel).write_text(REPLACED)
+    assert rel in _verify.wholesale_rewrites(before)
+
+
+def test_growing_a_file_is_not_a_rewrite(tmp_path, monkeypatch):
+    """Adding a test class keeps every existing line — that must stay allowed."""
+    rel = _file(tmp_path, monkeypatch, TARGETED_BEFORE)
+    before = _verify.snapshot_files([rel])
+    (tmp_path / rel).write_text(TARGETED_BEFORE + "\n" + "\n".join(
+        f"new test line {i}" for i in range(25)))
+    assert _verify.wholesale_rewrites(before) == {}
+
+
+def test_an_untouched_file_is_not_flagged(tmp_path, monkeypatch):
+    rel = _file(tmp_path, monkeypatch, TARGETED_BEFORE)
+    before = _verify.snapshot_files([rel])
+    assert _verify.wholesale_rewrites(before) == {}
+
+
+def test_a_file_that_did_not_exist_before_is_never_flagged(tmp_path, monkeypatch):
+    """A build writes the first version; there is nothing to be similar to."""
+    monkeypatch.setattr(_verify, "REPO_ROOT", tmp_path)
+    before = _verify.snapshot_files(["tests/brand_new.py"])
+    (tmp_path / "tests").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "tests" / "brand_new.py").write_text(REPLACED)
+    assert _verify.wholesale_rewrites(before) == {}
+
+
+def test_the_rewrite_gate_fails_the_verification(tmp_path, monkeypatch):
+    rel = _file(tmp_path, monkeypatch, TARGETED_BEFORE)
+    before = _verify.snapshot_files([rel])
+    (tmp_path / rel).write_text(REPLACED)
+    v = codegen.fold_rewrite({"ok": True, "test": {"ok": True}}, before)
+    assert v["ok"] is False and rel in v["wholesale_rewrite"]
+
+
+def test_a_rewrite_gets_one_retry_telling_it_to_start_from_disk(monkeypatch, tmp_path):
+    rel = _file(tmp_path, monkeypatch, TARGETED_BEFORE)
+    monkeypatch.setattr(codegen, "REPO_ROOT", tmp_path)
+
+    def rewrite_it(task, system, on_event=print, **kw):
+        (tmp_path / rel).write_text(REPLACED)
+        return _Result(_wrote(rel))
+
+    seen = {"tasks": []}
+    def fake(task, system, on_event=print, **kw):
+        seen["tasks"].append(task)
+        return rewrite_it(task, system, on_event, **kw)
+    monkeypatch.setattr(codegen, "run_agent", fake)
+
+    codegen.run_codegen_gated(
+        "fix one name", "sys", lambda: {"ok": True, "test": {"ok": True}},
+        on_event=lambda _: None, require_changes=True, test_path=rel)
+
+    assert len(seen["tasks"]) == 2
+    assert "REPLACED a file instead of editing it" in seen["tasks"][1]
+
+
+def test_a_build_is_never_checked_for_rewrites(monkeypatch, tmp_path):
+    """Successive drafts within one build are how the agent works."""
+    rel = _file(tmp_path, monkeypatch, TARGETED_BEFORE)
+    monkeypatch.setattr(codegen, "REPO_ROOT", tmp_path)
+
+    def fake(task, system, on_event=print, **kw):
+        (tmp_path / rel).write_text(REPLACED)
+        return _Result(_wrote(rel))
+    monkeypatch.setattr(codegen, "run_agent", fake)
+
+    _, v = codegen.run_codegen_gated(
+        "build it", "sys", lambda: {"ok": True, "test": {"ok": True}},
+        on_event=lambda _: None, test_path=rel)      # no require_changes
+    assert "wholesale_rewrite" not in v
+
+
+def test_the_operator_is_warned_that_work_may_be_missing():
+    out = _verify.blockers({"ok": False, "wholesale_rewrite": {"tests/t.py": 0.08}})
+    assert any("replaced a file rather than editing it" in b for b in out)
+    assert any("may have been dropped" in b for b in out)
+
+
+# --- deleting tests is the loss the ratio can't see -------------------------
+#
+# The blind spot in the similarity check above. A revise took a 778-line test
+# file down to 455 — it kept enough lines to score well above the 0.4 threshold,
+# sailed through, and six tests went with it. Deleting a third of a file is the
+# same damage as replacing it, in a shape a ratio cannot notice.
+#
+# Tests specifically, because their loss is the silent kind: delete a function
+# the code needs and something fails at once; delete the test that proves the
+# code works and everything stays green. That is exactly how the reconciliation
+# coverage vanished while the scraper kept reconciling.
+
+def _suite(n_cases, extra_class=True):
+    body = ["import pytest", "", "class TestBasics:"]
+    for i in range(n_cases):
+        body += [f"    def test_case_{i}(self):", f"        assert {i} == {i}", ""]
+    if extra_class:
+        body += ["class TestDateFiltering:", "    def test_filter(self):",
+                 "        assert True", ""]
+    return "\n".join(body)
+
+
+def _suite_file(tmp_path, monkeypatch, body):
+    monkeypatch.setattr(_verify, "REPO_ROOT", tmp_path)
+    path = tmp_path / "tests" / "test_thing.py"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body)
+    return "tests/test_thing.py"
+
+
+def test_a_deleted_test_is_caught(tmp_path, monkeypatch):
+    rel = _suite_file(tmp_path, monkeypatch, _suite(27))
+    before = _verify.snapshot_files([rel])
+    (tmp_path / rel).write_text(_suite(21, extra_class=False))
+    assert "test_case_21" in _verify.removed_tests(before)[rel]
+
+
+def test_a_deleted_test_CLASS_is_caught(tmp_path, monkeypatch):
+    """The class AND the methods it took with it — both are gone, both are named,
+    because "TestDateFiltering" alone doesn't tell you what stopped being checked."""
+    rel = _suite_file(tmp_path, monkeypatch, _suite(27))
+    before = _verify.snapshot_files([rel])
+    (tmp_path / rel).write_text(_suite(27, extra_class=False))
+    assert _verify.removed_tests(before)[rel] == ["TestDateFiltering", "test_filter"]
+
+
+def test_the_similarity_gate_alone_would_have_missed_it(tmp_path, monkeypatch):
+    """Pins WHY this check exists — a shrink that stays similar enough to pass."""
+    rel = _suite_file(tmp_path, monkeypatch, _suite(27))
+    before = _verify.snapshot_files([rel])
+    (tmp_path / rel).write_text(_suite(21, extra_class=False))
+    assert _verify.wholesale_rewrites(before) == {}       # blind
+    assert _verify.removed_tests(before)                   # not blind
+
+
+def test_adding_tests_is_allowed(tmp_path, monkeypatch):
+    rel = _suite_file(tmp_path, monkeypatch, _suite(27))
+    before = _verify.snapshot_files([rel])
+    (tmp_path / rel).write_text(_suite(28))
+    assert _verify.removed_tests(before) == {}
+
+
+def test_editing_a_test_body_is_allowed(tmp_path, monkeypatch):
+    """Fixing a wrong assertion must not read as deleting the test."""
+    rel = _suite_file(tmp_path, monkeypatch, _suite(27))
+    before = _verify.snapshot_files([rel])
+    (tmp_path / rel).write_text(_suite(27).replace("assert 3 == 3", "assert 3 == 3  # fixed"))
+    assert _verify.removed_tests(before) == {}
+
+
+def test_a_file_that_stops_parsing_is_left_to_the_lint_gate(tmp_path, monkeypatch):
+    """Otherwise every test reads as deleted and buries the real syntax error."""
+    rel = _suite_file(tmp_path, monkeypatch, _suite(27))
+    before = _verify.snapshot_files([rel])
+    (tmp_path / rel).write_text(_suite(27) + "\n}")
+    assert _verify.removed_tests(before) == {}
+
+
+def test_a_rename_is_reported_as_a_removal(tmp_path, monkeypatch):
+    """Intended: the agent should SAY it renamed something, not have it vanish."""
+    rel = _suite_file(tmp_path, monkeypatch, _suite(5))
+    before = _verify.snapshot_files([rel])
+    (tmp_path / rel).write_text(_suite(5).replace("test_case_0", "test_case_zero"))
+    assert _verify.removed_tests(before)[rel] == ["test_case_0"]
+
+
+def test_the_gate_fails_the_verification_and_names_the_tests(tmp_path, monkeypatch):
+    rel = _suite_file(tmp_path, monkeypatch, _suite(27))
+    before = _verify.snapshot_files([rel])
+    (tmp_path / rel).write_text(_suite(21, extra_class=False))
+    v = codegen.fold_rewrite({"ok": True, "test": {"ok": True}}, before)
+    assert v["ok"] is False
+    assert "TestDateFiltering" in v["removed_tests"][rel]
+
+
+def test_deleting_tests_gets_one_retry_telling_it_to_put_them_back(monkeypatch, tmp_path):
+    rel = _suite_file(tmp_path, monkeypatch, _suite(27))
+    monkeypatch.setattr(codegen, "REPO_ROOT", tmp_path)
+
+    seen = {"tasks": []}
+    def fake(task, system, on_event=print, **kw):
+        seen["tasks"].append(task)
+        (tmp_path / rel).write_text(_suite(21, extra_class=False))
+        return _Result(_wrote(rel))
+    monkeypatch.setattr(codegen, "run_agent", fake)
+
+    codegen.run_codegen_gated(
+        "fix one assertion", "sys", lambda: {"ok": True, "test": {"ok": True}},
+        on_event=lambda _: None, require_changes=True, test_path=rel)
+
+    assert len(seen["tasks"]) == 2
+    assert "DELETED tests that were passing" in seen["tasks"][1]
+
+
+def test_the_operator_is_told_which_tests_went():
+    out = _verify.blockers({"ok": False,
+                            "removed_tests": {"tests/t.py": ["test_a", "TestB"]}})
+    assert any("test_a" in b and "TestB" in b for b in out)
+    assert any("no longer being checked" in b for b in out)
+
+
+# --- files nobody predicted the agent would touch ---------------------------
+#
+# The snapshot covers the scraper and its test — the two files a revise is
+# SUPPOSED to touch. It cannot cover a third file, because nothing knows in
+# advance which one that would be. agent_tools records the pre-write content of
+# anything it actually overwrites, which closes that gap.
+
+def test_a_third_file_the_agent_damages_is_still_caught(monkeypatch, tmp_path):
+    monkeypatch.setattr(_verify, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(codegen.agent_tools, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(codegen, "REPO_ROOT", tmp_path)
+
+    other = tmp_path / "tests" / "test_unrelated.py"
+    other.parent.mkdir(parents=True, exist_ok=True)
+    other.write_text(_suite(10))
+    watched = _suite_file(tmp_path, monkeypatch, _suite(5))
+
+    def fake(task, system, on_event=print, **kw):
+        # Touches the watched file legitimately, and quietly guts another.
+        codegen.agent_tools.write_file(watched, _suite(6))
+        codegen.agent_tools.write_file("tests/test_unrelated.py", _suite(2, extra_class=False))
+        return _Result(_wrote(watched, "tests/test_unrelated.py"))
+    monkeypatch.setattr(codegen, "run_agent", fake)
+
+    _, v = codegen.run_codegen_gated(
+        "fix one thing", "sys", lambda: {"ok": True, "test": {"ok": True}},
+        on_event=lambda _: None, require_changes=True, test_path=watched, max_retries=0)
+
+    assert "tests/test_unrelated.py" in v["removed_tests"]
+    assert v["ok"] is False
+
+
+def test_originals_do_not_leak_between_runs(monkeypatch, tmp_path):
+    """A file overwritten in an earlier run must not count as this run's damage."""
+    monkeypatch.setattr(codegen.agent_tools, "REPO_ROOT", tmp_path)
+    (tmp_path / "tests").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "tests" / "test_x.py").write_text(_suite(5))
+
+    codegen.agent_tools.write_file("tests/test_x.py", _suite(1))
+    assert codegen.agent_tools.originals()
+
+    codegen.agent_tools.forget_originals()
+    assert codegen.agent_tools.originals() == {}
+
+
+def test_only_the_first_overwrite_of_a_run_is_the_baseline(monkeypatch, tmp_path):
+    """Later writes are the agent iterating; the baseline is what it started from."""
+    monkeypatch.setattr(codegen.agent_tools, "REPO_ROOT", tmp_path)
+    (tmp_path / "tests").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "tests" / "test_x.py").write_text("ORIGINAL")
+    codegen.agent_tools.forget_originals()
+
+    codegen.agent_tools.write_file("tests/test_x.py", "second")
+    codegen.agent_tools.write_file("tests/test_x.py", "third")
+    assert codegen.agent_tools.originals()["tests/test_x.py"] == "ORIGINAL"
+
+
+def test_a_newly_created_file_has_no_original(monkeypatch, tmp_path):
+    monkeypatch.setattr(codegen.agent_tools, "REPO_ROOT", tmp_path)
+    codegen.agent_tools.forget_originals()
+    codegen.agent_tools.write_file("tests/test_brand_new.py", _suite(3))
+    assert codegen.agent_tools.originals() == {}

@@ -198,21 +198,21 @@ def test_property_id_default_is_all():
 #     like "a quiet month" and silently under-report the books.
 
 import json as _json
-from pathlib import Path
-from io import StringIO
 
 import pytest
-from ruamel.yaml import YAML
 
 from core import observability
 from core.scrapers.base import ScrapeError
 from core.scrapers.epic_property_management import (
+    ALL_PROPERTIES,
+    SINGLE_RENTAL,
     _extract_xsrf_token,
     _fetch_json,
     _fetch_properties,
     _get_gl_account_ids,
-    _get_property_options,
     _post_json,
+    _property_rows,
+    _property_selection,
 )
 
 
@@ -366,48 +366,123 @@ def test_fetch_properties_returns_id_and_name():
     assert props[1] == {"id": "20", "name": "8095 Prospect Ave."}
 
 
-def test_get_property_options_builds_from_stored_properties(tmp_path, monkeypatch):
-    """_get_property_options reads stored properties and builds choice options.
+# ── the property the operator picked ──────────────────────────────────
+#
+# Field failure this guards: the scrape looked the chosen property up, assigned
+# its NAME to a local variable, and then sent "AllProperties" anyway. The
+# dropdown on the settings screen did nothing whatsoever — every run returned
+# every property's transactions, and nothing on screen said so. Only ruff
+# noticed, as an unused variable.
+#
+# The pair below is Buildium's own, read out of the bundle its report form ships
+# rather than guessed: AllProperties carries a null entity id, and a single
+# rental carries the integer id with type "Rental".
 
-    We write directly to the settings YAML (bypassing save_for which rejects
-    'properties' as an unknown key) and then verify the options are built.
-    """
+
+def test_choosing_all_properties_sends_no_filter():
+    assert _property_selection("all", []) == (None, ALL_PROPERTIES)
+
+
+def test_choosing_one_property_actually_filters_the_request():
+    """The whole point. If this pair doesn't change, the setting is decorative."""
+    properties = [{"id": "10", "name": "1029 E. Granet Ave."},
+                  {"id": "20", "name": "8095 Prospect Ave."}]
+
+    assert _property_selection("20", properties) == (20, SINGLE_RENTAL)
+
+
+def test_the_entity_id_is_sent_as_a_number():
+    """Buildium's form does parseInt on it; a string is not the same request."""
+    entity_id, _ = _property_selection("10", [{"id": "10", "name": "A"}])
+
+    assert isinstance(entity_id, int)
+
+
+def test_a_property_that_no_longer_exists_says_so(tmp_path, monkeypatch):
+    """Falling back to every property changes what the run returns, so it can't
+    be silent — a sold property would otherwise quietly widen the books."""
+    log_file = _log_file(tmp_path, monkeypatch)
+
+    assert _property_selection("999", [{"id": "10", "name": "A"}]) == (None, ALL_PROPERTIES)
+
+    record = _json.loads(log_file.read_text().splitlines()[-1])
+    assert record["code"] == "PROPERTY_NOT_FOUND"
+
+
+# ── reading the portal's property list ────────────────────────────────
+#
+# Field failure this guards: the response was assumed to be a bare list. It is
+# not — iterating the dict that came back yielded its keys, so `p["Id"]` raised
+# `string indices must be integers` on all seven runs in the log. It was caught
+# and logged as a warning, so the list silently stayed empty and the dropdown
+# never had anything in it to pick.
+
+
+def test_a_list_of_properties_is_read():
+    assert _property_rows([{"Id": 1, "Name": "A"}]) == [{"Id": 1, "Name": "A"}]
+
+
+def test_a_list_wrapped_in_an_envelope_is_read():
+    """The shape that actually broke it."""
+    assert _property_rows({"Data": [{"Id": 1, "Name": "A"}]}) == [{"Id": 1, "Name": "A"}]
+
+
+def test_an_unrecognisable_shape_is_refused_rather_than_guessed_at():
+    assert _property_rows({"Message": "Not authorised"}) is None
+    assert _property_rows("nope") is None
+
+
+def test_an_unreadable_response_reports_what_it_actually_got(tmp_path, monkeypatch):
+    """Seven identical failures taught nobody anything, because the record named
+    a Python exception and not one fact about the response. The next run has to
+    be able to say what the endpoint sends."""
+    log_file = _log_file(tmp_path, monkeypatch)
+    page = _FakePage(payload={"Message": "Not authorised"})
+
+    with pytest.raises(ScrapeError):
+        _fetch_properties(page, "tok")
+
+    record = _json.loads(log_file.read_text().splitlines()[-1])
+    assert record["code"] == "PROPERTIES_SHAPE_UNKNOWN"
+    assert record["context"]["payload_type"] == "dict"
+    assert record["context"]["payload_keys"] == ["Message"]
+
+
+def test_the_portals_property_list_is_published_the_declared_way(tmp_path, monkeypatch):
+    """record_options is the sanctioned path, and it only accepts a field that
+    declared itself discoverable. The version this replaces couldn't use it —
+    so it hand-wrote the settings file instead, under a key nothing declared,
+    and dropped every other source's recorded choices in the process."""
     import core.settings as _settings
 
-    SETTINGS_PATH = Path("core/policies/source_settings.yaml")
-    _yaml = YAML()
-    _yaml.preserve_quotes = True
-    _yaml.width = 4096
+    monkeypatch.setattr(_settings, "SETTINGS_PATH", tmp_path / "source_settings.yaml")
 
-    # Save original file content
-    original_content = SETTINGS_PATH.read_text() if SETTINGS_PATH.exists() else ""
+    _settings.record_options(SERVICE_KEY, "property_id", [
+        {"value": "10", "label": "1029 E. Granet Ave."},
+        {"value": "20", "label": "8095 Prospect Ave."},
+    ])
 
-    try:
-        # Write test properties directly to YAML (bypassing save_for validation)
-        data = {"sources": {SERVICE_KEY: {
-            "lookback_days": 30,
-            "accounting_basis": "cash",
-            "property_id": "all",
-            "properties": [
-                {"id": "10", "name": "1029 E. Granet Ave."},
-                {"id": "20", "name": "8095 Prospect Ave."},
-            ],
-        }}}
-        buf = StringIO()
-        _yaml.dump(data, buf)
-        SETTINGS_PATH.write_text(buf.getvalue())
+    options = next(
+        f for f in _settings.schema_for(SERVICE_KEY) if f["key"] == "property_id"
+    )["options"]
+    values = [o["value"] for o in options]
 
-        # Re-import to pick up new settings (or just call the function)
-        options = _get_property_options()
-        values = {o["value"] for o in options}
-        labels = {o["label"] for o in options}
+    assert values[0] == "all", "the declared catch-all is not displaced by the portal's list"
+    assert "10" in values and "20" in values
 
-        assert "all" in values
-        assert "10" in values
-        assert "20" in values
-        assert "All Properties" in labels
-        assert "1029 E. Granet Ave." in labels
-        assert "8095 Prospect Ave." in labels
-    finally:
-        # Restore original file content
-        SETTINGS_PATH.write_text(original_content)
+
+def test_publishing_the_list_leaves_other_sources_alone(tmp_path, monkeypatch):
+    """The hand-rolled writer dumped {"sources": ...} only, so the whole
+    `discovered` section went with it — every Epic run silently erased what
+    every other source had learned."""
+    import core.settings as _settings
+
+    monkeypatch.setattr(_settings, "SETTINGS_PATH", tmp_path / "source_settings.yaml")
+    _settings._write(
+        {}, {"another_source": {"some_field": [{"value": "keep", "label": "Keep me"}]}}
+    )
+
+    _settings.record_options(SERVICE_KEY, "property_id", [{"value": "10", "label": "A"}])
+
+    survived = _settings.recorded_options("another_source").get("some_field")
+    assert survived == [{"value": "keep", "label": "Keep me"}]

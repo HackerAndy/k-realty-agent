@@ -130,7 +130,7 @@ def test_pointing_a_new_source_at_a_non_inbox_is_refused(registry):
 
 def test_an_inbox_that_is_not_signed_in_yet_is_not_a_working_route(registry, monkeypatch):
     """THE trap: naming an inbox is not the same as being able to read it.
-    Advertising the route would make "Get latest" pick one that cannot run."""
+    Advertising the route would put a run control on a way in that cannot run."""
     monkeypatch.setattr(mcp_tools, "_inbox_connected", lambda key: True)
     mcp_tools.add_source("Epic statement", "email", carrier="inbox")
     monkeypatch.setattr(mcp_tools, "_inbox_connected", lambda key: False)
@@ -139,7 +139,7 @@ def test_an_inbox_that_is_not_signed_in_yet_is_not_a_working_route(registry, mon
     email_route = next(r for r in added["transports"] if r["id"] == "email")
     assert email_route["available"] is False
     assert "signed in" in email_route["reason"]
-    assert added["default_transport"] != "email"
+    assert "email" not in {r["id"] for r in added["transports"] if r["available"]}
 
 
 def test_once_it_is_signed_in_the_route_works(registry, monkeypatch):
