@@ -78,6 +78,49 @@ case, so treat single-case moves as weak evidence and the pattern as strong.
   Reproducible: both cases died on both attempts, at kv_len 17.7k/24.8k then
   33.8k/35.1k. They had done 19–30 turns of real work first.
 
+**After Phase 3a, `20267d0`** — gate 0/3, correct 1/3, and **no OOM at all**:
+
+| case | before 3a | after 3a | live context | trimmed |
+|---|---|---|---|---|
+| riverbend | pass / correct | FAIL / correct | ~17.4k tok | ~11.1k |
+| summit | void (OOM ×2) | **completed**, wrong signs | ~19.3k tok | ~12.1k |
+| harbor | void (OOM ×2) | **completed**, wrong | ~8.0k tok | ~9.3k |
+
+**3a did its job.** The two cases that could not finish now finish. Nothing hit
+the prefill guard; live context peaked at 19.3k where the deaths were at
+33.8k–35.1k.
+
+**gate 1/3 → 0/3 is not a regression.** The OOM was masking lint failures. All
+three now fail the same gate, which makes the next thing to fix unambiguous.
+
+### The lint gate is now the only thing blocking every build
+
+And it is conflating two unrelated things:
+
+- `harbor`: **F821 undefined name `Path`, `datetime`** — a real defect. The
+  parser references names it never imported and crashes at runtime. The gate is
+  exactly right to refuse this.
+- `riverbend`, `summit`: **F401 unused import**, both in the *test* file
+  (`pytest`, `core.models.Transaction`). Cosmetic. On riverbend this is the sole
+  reason a parser the bench scores **correct** was refused.
+
+The gate's stated rationale is F841 — "a value computed and never used is
+usually a wire you forgot to connect; if it came from the operator's settings,
+the setting is silently being ignored." An unused import in a test file is not
+that. Keep F821 and F841; F401 should not fail a build on its own.
+
+### The cost 3a introduced: trimming every turn
+
+`riverbend` went 299s → 704s, the one case with a before-and-after. Trimming
+fires on **30 of 47 turns**, and each one rewrites *old* messages — precisely
+the prefix a server would otherwise keep in its KV cache, so every trim likely
+forces a full re-prefill. (Plausible and consistent, not proven; n=1 on the
+timing.)
+
+The fix is to trim on a size threshold rather than every turn: the cacheable
+prefix then stays stable until the conversation actually needs room. Worth doing
+before reading anything into bench timings.
+
 ### What that changes
 
 **Phase 3 (condensation) moves ahead of Phase 2 (more loop rounds).** The two
