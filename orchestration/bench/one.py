@@ -37,6 +37,17 @@ def main(argv: list[str]) -> int:
         events.append(text)
         print(text, flush=True)
 
+    def tools_from_events() -> list[str]:
+        """Tool names recovered from the progress stream.
+
+        The real list lives on the AgentResult, which a crashed run never
+        returns — so the one time the tool mix matters most, it used to come
+        back empty and read as "the agent did nothing". It had usually done
+        twenty turns of work before whatever killed it.
+        """
+        return [line.strip()[2:].split("(", 1)[0].strip()
+                for line in events if line.strip().startswith("→ ")]
+
     started = time.monotonic()
     record: dict = {"case_key": case.key, "difficulty": case.difficulty}
     try:
@@ -58,7 +69,7 @@ def main(argv: list[str]) -> int:
             verification={"ok": False, "error": f"{type(exc).__name__}: {exc}"},
             crash=traceback.format_exc()[-4000:],
             blockers=[f"The build raised {type(exc).__name__}."],
-            tool_calls=[],
+            tool_calls=tools_from_events(),
             agent_summary="",
         )
 
