@@ -49,6 +49,20 @@ re-states what you already said is trimmed and counts against the run.
    nothing. Skip section headers / subtotals / balance rows; extract only real
    transactions. The schema is `core/models.py`.
 
+   **The source's sign convention is probably not ours, and copying its number
+   through is the most common way this goes wrong.** Decide the sign from what
+   the row MEANS, not from how the payload writes it. A card endpoint states a
+   purchase as a POSITIVE amount and a payment as negative — both are backwards
+   for us, because a purchase is money out. Others use a separate Debit/Credit
+   pair, or a Charges/Credits pair where the sign is which field is populated.
+
+   Check yourself against a row whose direction is not in doubt before you
+   finish: a purchase, a fee, a management charge are money OUT and must come
+   out negative; rent received and a deposit are money IN and must come out
+   positive. If one of those has the wrong sign, every row does — and a test
+   written from your own output will agree with you, so the test cannot catch
+   this. Only reading a real row can.
+
 2. **The choices the portal asked for are SETTINGS, not literals.** A date range,
    which properties, an accounting basis, which accounts — declare them in a
    module-level `SETTINGS` list and read them at run time:

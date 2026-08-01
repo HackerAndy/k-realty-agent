@@ -41,6 +41,21 @@ re-states what you already said is trimmed and counts against the run.
    - `date`, `amount`, `description`: the ONLY normalized fields. Amount is a
      single signed float — **positive for money in, negative for money out**.
      Draw all three from the document's own columns; never fabricate them.
+
+     **The source's sign convention is probably not ours, and copying its number
+     through is the most common way this goes wrong.** Decide the sign from what
+     the row MEANS, not from how the document writes it. A credit-card export
+     states a purchase as a POSITIVE amount and a payment as negative — both are
+     backwards for us, because a purchase is money out. Statements use
+     parentheses, or a separate Debit/Credit column, or a Charges/Credits pair
+     where the sign is which column the number sits in.
+
+     Check yourself against a row whose direction is not in doubt before you
+     finish: a shop purchase, a fee, a utility bill are money OUT and must come
+     out negative; rent received and a deposit are money IN and must come out
+     positive. If one of those has the wrong sign, every row does — and a test
+     written from your own output will agree with you, so the test cannot catch
+     this. Only reading a real row can.
    - `fields`: a `dict[str, str]` preserving the source's ACTUAL columns,
      **verbatim** — the exact column names and values as they appear (e.g. a
      bank's `Account Number / Post Date / Check / Description / Debit / Credit /
