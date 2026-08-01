@@ -86,12 +86,40 @@ harder cases cannot finish inside the local model's context at all, so:
 - more judged rounds would make the binding constraint strictly worse;
 - the bench cannot grade Phase 2 while two of its three cases die of context.
 
-Phase 1 does not fix this and was never going to. The dominant consumer is
-whole-file `read_file` — the builder prompt tells the agent to read
-`buildium_owner_statement.py` in full, and it also reads `base.py`,
-`__init__.py` and `models.py`. That is the 22k measured in
-[[agent-context-bloat-is-the-models-own-prose]], untouched by patch editing.
-Phase 3a (truncate old tool results in place, no LLM) targets exactly it.
+Phase 1 does not fix this and was never going to.
+
+### What actually fills the context — measured, not assumed
+
+Decomposed from the `summit` run at the moment the server refused it
+(kv_len 33,809):
+
+| | tokens | share |
+|---|---|---|
+| system prompt + tool schemas | ~3,089 | 9% |
+| the model's own prose | ~2,216 | 7% |
+| `read_file` results | ~3,411 | 10% |
+| unaccounted | ~25,100 | 74% |
+
+**An earlier draft of this document said whole-file reads were the dominant
+consumer. That was wrong** — they are about a tenth. The 74% is arithmetic
+(kv_len minus the measured parts) and is attributable to `run_command`:
+**17 of summit's 32 tool calls** and 12 of harbor's 29, being `pytest -v` runs
+and a long tail of `python -c` debug scripts — eight consecutively on summit.
+Each result is capped at `MAX_OUTPUT_CHARS` = 8,000 chars (~2,000 tok) and
+every one stays in the conversation for the rest of the run.
+
+Splitting that remainder exactly (command output vs the `write_file` /
+`str_replace` payloads) needs the loop instrumented; the direction does not.
+
+Two consequences for Phase 3:
+
+- **3a targets stale `run_command` output first**, not stale file reads. Same
+  mechanism, right target — reads would have bought ~10%.
+- **The agent debugs by print statement**, re-running `python -c` with debug
+  output rather than reading the failure it already has. That is a prompt
+  problem as much as a context one, and it is what generates the volume. Worth
+  a line in the contract prompts pointing at `read_logs` and targeted
+  assertions.
 
 ## Phase 0 — a baseline number
 
