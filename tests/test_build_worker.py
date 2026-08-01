@@ -335,6 +335,31 @@ def test_a_run_reports_what_it_did_as_acts_not_prose(tmp_path, monkeypatch):
     assert did["reads"] == 1
 
 
+def test_an_edited_file_is_reported_as_written_not_read(tmp_path, monkeypatch):
+    """The agent has several ways to change a file, and the screen must know them all.
+
+    When this counted only `write_file`, a run that edited three files with
+    `str_replace` reported "files: none" and filed the edits under reads — which
+    is the screen telling the operator the opposite of what happened.
+    """
+    _seed(tmp_path, monkeypatch, [
+        {"type": "result", "result": {
+            "verification": {"ok": True, "test": {"ok": True}},
+            "agent_summary": "done",
+            "tool_calls": [
+                ["read_file", {"path": "core/parsers/x.py"}],
+                ["str_replace", {"path": "core/parsers/x.py"}],
+                ["insert", {"path": "core/parsers/__init__.py"}],
+            ],
+        }},
+    ], exit_code=0)
+
+    did = mcp_tools.build_status("k")["did"]
+
+    assert did["files"] == ["core/parsers/x.py", "core/parsers/__init__.py"]
+    assert did["reads"] == 1
+
+
 # --- a run that stops making progress ---------------------------------------
 #
 # The field failure: a build held an open socket to the operator's model for 21

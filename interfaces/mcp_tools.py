@@ -1872,6 +1872,12 @@ def _what_it_did(result: dict) -> dict:
     """The agent's run as a short list of acts: files written, commands run, files
     read. Derived from the recorded tool calls, so it can't drift from what it
     actually did — and it stays readable however long the model's prose gets."""
+    # Imported rather than spelled out: the agent has several ways to change a
+    # file, and a screen that only knows about one of them tells the operator
+    # "files written: none" about a run that edited three. Deferred like the
+    # verify import below, to keep this module importable on its own.
+    from orchestration.agent_tools import WRITE_TOOLS
+
     files: list[str] = []
     commands: list[str] = []
     reads = 0
@@ -1880,7 +1886,7 @@ def _what_it_did(result: dict) -> dict:
             name, args = call[0], call[1] or {}
         except (IndexError, TypeError):
             continue
-        if name == "write_file":
+        if name in WRITE_TOOLS:
             path = str(args.get("path") or "")
             if path and path not in files:
                 files.append(path)
