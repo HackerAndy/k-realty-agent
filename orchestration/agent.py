@@ -370,6 +370,9 @@ def run_agent(
     # Which tool produced which result, so a collapsed one can still say what it
     # was standing in for.
     tool_by_id: dict[str, str] = {}
+    # Set once the server has told us where its ceiling actually is, so the
+    # recovery is attempted once rather than every turn of a losing fight.
+    shrunk = False
 
     for turn in range(1, max_turns + 1):
         # Before the request, not after: this is the turn whose prompt has to
@@ -378,6 +381,11 @@ def run_agent(
         freed = context_budget.collapse_stale_results(messages, tool_by_id, ledger,
                                                       keep_last=keep_last_results,
                                                       trim_above=trim_above_chars)
+        # The other half, and the bigger one: str_replace carries old_str AND
+        # new_str, which are pure history the moment the edit lands.
+        freed += context_budget.collapse_stale_call_args(messages, ledger,
+                                                         keep_last=keep_last_results,
+                                                         trim_above=trim_above_chars)
         if freed:
             on_event(f"  [trimmed ~{freed // context_budget.CHARS_PER_TOKEN:,} tokens of "
                      f"tool output the agent had finished with]")
@@ -387,11 +395,31 @@ def run_agent(
         on_event(f"Asking the model (turn {turn} of {max_turns})…")
         try:
             turn_result = adapter.next_turn(messages=messages, system=system)
-        except Exception:
-            # The request that doesn't fit is the one worth explaining, and it
-            # leaves by raising — so without this the accounting is lost on
-            # precisely the runs it exists for. Say what filled the conversation,
-            # then let the original error through untouched.
+        except Exception as exc:
+            # A prompt the server refuses for SIZE is the one failure here the
+            # harness can do something about — everything else is the operator's
+            # or the model's problem, but an oversized prompt is one we chose to
+            # send. And the refusal carries the real ceiling, measured on the
+            # machine actually running the model: better than any constant, and
+            # necessary, because the ceiling moves with whatever else is resident.
+            ceiling = context_budget.observed_ceiling_chars(exc)
+            recoverable = (context_budget.looks_like_context_overflow(exc)
+                           and not shrunk
+                           and keep_last_results != context_budget.KEEP_ALL)
+            if recoverable:
+                shrunk = True
+                trim_above_chars = int((ceiling or ledger.live_total)
+                                       * context_budget.CEILING_HEADROOM)
+                keep_last_results = max(2, keep_last_results // 2)
+                on_event(f"  [the model server refused that prompt as too large"
+                         f"{f' at ~{ceiling // context_budget.CHARS_PER_TOKEN:,} tokens' if ceiling else ''}"
+                         f" — trimming to ~{trim_above_chars // context_budget.CHARS_PER_TOKEN:,} "
+                         f"tokens and trying this turn again]")
+                continue
+
+            # Not recoverable, or already tried. The accounting is the point here:
+            # this run leaves by raising, so without it the one thing worth
+            # knowing about the failure goes with it.
             on_event(ledger.summary())
             on_event("[context] where it went:\n" + ledger.breakdown())
             raise

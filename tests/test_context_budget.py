@@ -14,10 +14,14 @@ error that points nowhere near here.
 
 from __future__ import annotations
 
+import json
+
 from orchestration.context_budget import (
     Ledger,
     TRIM_MARKER,
     collapse_stale_results,
+    looks_like_context_overflow,
+    observed_ceiling_chars,
     stub_for,
 )
 
@@ -343,3 +347,202 @@ def test_the_threshold_is_measured_on_what_is_still_live():
                                    keep_last=0, trim_above=48_000)
 
     assert saved == 0
+
+
+# --- trimming the CALL side -------------------------------------------------
+#
+# Collapsing results alone was not enough. Instrumenting a run that died put
+# `str_replace` ARGUMENTS at the top of the list — 9,324 tokens, more than
+# command output and more than every file read together — because each edit
+# carries old_str AND new_str, and both are pure history the moment it lands.
+
+from orchestration.context_budget import collapse_stale_call_args  # noqa: E402
+
+
+def _openai_call(cid, name, args):
+    return {"role": "assistant", "content": None, "tool_calls": [
+        {"id": cid, "type": "function",
+         "function": {"name": name, "arguments": json.dumps(args)}}]}
+
+
+class _SdkToolUse:
+    """What the Anthropic adapter actually parks in the conversation."""
+    type = "tool_use"
+
+    def __init__(self, cid, name, payload):
+        self.id, self.name, self.input = cid, name, payload
+
+
+def _big(n=5000):
+    return "x" * n
+
+
+def _loaded(ledger, chars=200_000):
+    ledger.note_call("str_replace", {"old_str": "x" * chars})
+    return ledger
+
+
+def test_edit_payloads_are_trimmed_in_the_openai_shape():
+    messages = [_openai_call("a", "str_replace",
+                             {"path": "core/parsers/x.py", "old_str": _big(), "new_str": _big()})]
+    ledger = _loaded(Ledger())
+
+    saved = collapse_stale_call_args(messages, ledger, keep_last=0, trim_above=0)
+
+    args = json.loads(messages[0]["tool_calls"][0]["function"]["arguments"])
+    assert saved > 9000
+    assert TRIM_MARKER in args["old_str"] and TRIM_MARKER in args["new_str"]
+    assert args["path"] == "core/parsers/x.py", "the useful part stays readable"
+
+
+def test_edit_payloads_are_trimmed_in_the_anthropic_shape():
+    block = {"type": "tool_use", "id": "a", "name": "str_replace",
+             "input": {"path": "core/parsers/x.py", "old_str": _big(), "new_str": _big()}}
+    messages = [{"role": "assistant", "content": [block]}]
+
+    collapse_stale_call_args(messages, _loaded(Ledger()), keep_last=0, trim_above=0)
+
+    kept = messages[0]["content"][0]
+    assert TRIM_MARKER in kept["input"]["old_str"]
+    assert kept["input"]["path"] == "core/parsers/x.py"
+
+
+def test_an_sdk_block_is_replaced_by_the_dict_the_api_also_accepts():
+    """The adapter parks SDK objects, not dicts — mutating those is not the move."""
+    messages = [{"role": "assistant",
+                 "content": [_SdkToolUse("a", "write_file",
+                                         {"path": "core/parsers/x.py", "content": _big()})]}]
+
+    collapse_stale_call_args(messages, _loaded(Ledger()), keep_last=0, trim_above=0)
+
+    kept = messages[0]["content"][0]
+    assert isinstance(kept, dict) and kept["type"] == "tool_use"
+    assert kept["id"] == "a" and kept["name"] == "write_file", "identity must survive"
+    assert TRIM_MARKER in kept["input"]["content"]
+
+
+def test_every_argument_key_survives_the_trim():
+    """A tool_use whose input lost a required field is a malformed conversation."""
+    args = {"path": "x.py", "old_str": _big(), "new_str": _big()}
+    messages = [_openai_call("a", "str_replace", args)]
+
+    collapse_stale_call_args(messages, _loaded(Ledger()), keep_last=0, trim_above=0)
+
+    after = json.loads(messages[0]["tool_calls"][0]["function"]["arguments"])
+    assert set(after) == set(args)
+    assert all(isinstance(v, str) for v in after.values())
+
+
+def test_recent_calls_keep_their_payloads():
+    messages = [_openai_call(str(i), "str_replace",
+                             {"path": "x.py", "old_str": _big()}) for i in range(5)]
+
+    collapse_stale_call_args(messages, _loaded(Ledger()), keep_last=2, trim_above=0)
+
+    trimmed = [m for m in messages
+               if TRIM_MARKER in m["tool_calls"][0]["function"]["arguments"]]
+    assert len(trimmed) == 3
+
+
+def test_trimming_call_args_twice_is_a_no_op():
+    messages = [_openai_call("a", "str_replace", {"path": "x.py", "old_str": _big()})]
+    ledger = _loaded(Ledger())
+
+    first = collapse_stale_call_args(messages, ledger, keep_last=0, trim_above=0)
+    second = collapse_stale_call_args(messages, ledger, keep_last=0, trim_above=0)
+
+    assert first > 0 and second == 0
+
+
+def test_call_args_respect_the_same_threshold_as_results():
+    messages = [_openai_call("a", "str_replace", {"path": "x.py", "old_str": _big()})]
+
+    assert collapse_stale_call_args(messages, Ledger(), keep_last=0,
+                                    trim_above=48_000) == 0
+
+
+# --- learning the ceiling from the server -----------------------------------
+
+def test_a_prefill_refusal_is_recognised_and_its_size_read():
+    error = ('OpenAI-compatible API error 400: oMLX prefill memory guard rejected this '
+             'prompt: Prefill context too large for available memory (preflight safety '
+             'guard, kv_len=26015, min_chunk=32)')
+
+    assert looks_like_context_overflow(error)
+    assert observed_ceiling_chars(error) == 26015 * 4
+
+
+def test_an_ordinary_failure_is_not_mistaken_for_one():
+    """Shrinking the context would not help, and would hide the real fault."""
+    assert not looks_like_context_overflow("Connection refused")
+    assert not looks_like_context_overflow("401 Unauthorized")
+    assert observed_ceiling_chars("Connection refused") is None
+
+
+def test_a_refusal_without_a_size_still_recovers():
+    """Not every server reports the length it rejected; the run should still try."""
+    assert looks_like_context_overflow("This model's maximum context length is 8192 tokens")
+    assert observed_ceiling_chars("maximum context length is 8192 tokens") is None
+
+
+def test_a_refused_prompt_is_retried_smaller_instead_of_killing_the_run(monkeypatch):
+    """The failure that killed two bench cases four times over.
+
+    A prompt the server refuses for SIZE is the one failure here the harness can
+    act on — it chose what to send. The refusal also carries the real ceiling,
+    measured on the machine running the model, which beats any constant because
+    the ceiling moves with whatever else is resident on that host.
+    """
+    from orchestration import agent
+
+    class _RefusesOnce(_RecordingAdapter):
+        def __init__(self, turns):
+            super().__init__(turns)
+            self.refused = False
+
+        def next_turn(self, messages, system):
+            if not self.refused and len(self.messages_seen) == 2:
+                self.refused = True
+                raise RuntimeError(
+                    "OpenAI-compatible API error 400: oMLX prefill memory guard "
+                    "rejected this prompt (preflight safety guard, kv_len=26015)")
+            return super().next_turn(messages, system)
+
+    adapter = _RefusesOnce([_cmd_turn(str(i)) for i in range(4)])
+    monkeypatch.setattr(agent, "_build_adapter", lambda choice: adapter)
+    monkeypatch.setattr(agent.agent_tools, "dispatch", lambda n, a: ("OUTPUT " + "x" * 6000, False))
+    events = []
+
+    result = agent.run_agent("task", "system", on_event=events.append, max_turns=8)
+
+    assert adapter.refused, "the test must actually have exercised the refusal"
+    assert result.turns > 1, "the run continued rather than dying"
+    assert any("refused that prompt as too large" in e for e in events)
+    # 26,015 is the server's own number, echoed back; 15,609 is 60% of it, the
+    # margin we then aim at. Both matter: the first says we listened, the second
+    # says we left room, because the ceiling moves between runs.
+    assert any("~26,015 tokens" in e for e in events), "the ceiling came from the server"
+    assert any("~15,609 tokens" in e for e in events), "and we aimed well under it"
+
+
+def test_a_second_refusal_gives_up_rather_than_looping(monkeypatch):
+    """Shrinking twice would be a losing fight; the operator should see the error."""
+    from orchestration import agent
+
+    class _AlwaysRefuses(_RecordingAdapter):
+        def next_turn(self, messages, system):
+            self.messages_seen.append([])
+            raise RuntimeError("prefill context too large, kv_len=26015")
+
+    monkeypatch.setattr(agent, "_build_adapter", lambda choice: _AlwaysRefuses([]))
+    monkeypatch.setattr(agent.agent_tools, "dispatch", lambda n, a: ("x", False))
+    events = []
+
+    try:
+        agent.run_agent("task", "system", on_event=events.append, max_turns=8)
+    except RuntimeError as exc:
+        assert "prefill" in str(exc), "the original error reaches the operator"
+    else:
+        raise AssertionError("a hopeless run must not be swallowed")
+
+    assert any("where it went" in e for e in events), "and it explains what filled it"
