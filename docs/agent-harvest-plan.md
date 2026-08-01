@@ -49,6 +49,50 @@ guessing. **Do not add an LLM critic.** Their good one
 
 ---
 
+## Measured so far
+
+Model: `Qwen3-Coder-30B-A3B-Instruct-MLX-8bit` on the local server. One run per
+case, so treat single-case moves as weak evidence and the pattern as strong.
+
+**Baseline, `7fb415a` (before Phase 1)** — gate 1/3, correct 1/3:
+
+- `riverbend` (easy): gate FAIL, **correct**. Refused over an unused
+  `typing.List` import.
+- `summit` (medium): **gate PASS, wrong**. Every sign inverted — `+367.92` where
+  the answer is `-367.92`, 5 rows money-in where 5 are money-out. It wrote a test
+  that agreed with itself. This is the failure `verify.py` cannot see, and the
+  reason the bench scores `correct` separately.
+- `harbor` (hard): gate FAIL, wrong. Crashed, then went in circles.
+
+**After Phase 1, `1512def`** — one clean win, two runs void:
+
+- `riverbend`: gate **FAIL → pass**, still correct. Tool mix went from
+  `write_file × 6` to `write_file × 1` + `str_replace × 5`. Same work, five
+  surgical edits instead of five whole-file re-emissions.
+- `summit`, `harbor`: **void, twice.** Not a Phase 1 result — the model server
+  refused the prompt outright:
+
+  > `oMLX prefill memory guard rejected this prompt … kv_len=33809 … predicted
+  > peak ~37.03 GB (current 33.31 GB + KV 3.10 GB)`
+
+  Reproducible: both cases died on both attempts, at kv_len 17.7k/24.8k then
+  33.8k/35.1k. They had done 19–30 turns of real work first.
+
+### What that changes
+
+**Phase 3 (condensation) moves ahead of Phase 2 (more loop rounds).** The two
+harder cases cannot finish inside the local model's context at all, so:
+
+- more judged rounds would make the binding constraint strictly worse;
+- the bench cannot grade Phase 2 while two of its three cases die of context.
+
+Phase 1 does not fix this and was never going to. The dominant consumer is
+whole-file `read_file` — the builder prompt tells the agent to read
+`buildium_owner_statement.py` in full, and it also reads `base.py`,
+`__init__.py` and `models.py`. That is the 22k measured in
+[[agent-context-bloat-is-the-models-own-prose]], untouched by patch editing.
+Phase 3a (truncate old tool results in place, no LLM) targets exactly it.
+
 ## Phase 0 — a baseline number
 
 - [x] Done. `poetry run python -m orchestration.bench` — see
@@ -155,7 +199,9 @@ Phase 0 number moved.
 
 ## Phase 2 — turn the goal loop up
 
-- [ ] Not started
+- [ ] Not started. **Deferred behind Phase 3** — see "What that changes" above.
+      More rounds worsen the context exhaustion that is currently killing runs,
+      and the bench cannot grade this phase until its cases can finish.
 
 Generalize `run_codegen_gated` from `max_retries=1` to a real loop, cap ~4.
 
@@ -190,7 +236,9 @@ early when it stops improving, and says which of the three ways it ended.
 
 ## Phase 3 — condensation
 
-- [ ] Not started
+- [ ] Not started. **Promoted ahead of Phase 2** — this is now the binding
+      constraint, measured, not predicted. Start with 3a; it needs no LLM call
+      and targets the whole-file reads that dominate.
 
 We have none: messages grow monotonically until the local model's fixed window
 blows. More rounds from Phase 2 makes this urgent. `degeneration.collapse` trims
