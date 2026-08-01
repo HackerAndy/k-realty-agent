@@ -70,10 +70,18 @@ def _make_worktree(ref: str, parent: Path) -> tuple[Path, str]:
     path = parent / "worktree"
     _git("worktree", "add", "--detach", str(path), ref)
     sha = _git("rev-parse", "HEAD", cwd=path)
-    (path / ".venv").symlink_to(VENV)
-    if SECRETS.is_dir():
-        (path / ".secrets").symlink_to(SECRETS)
+    _link_support_dirs(path)
     return path, sha
+
+
+def _link_support_dirs(worktree: Path) -> None:
+    """(Re)create the `.venv` and `.secrets` links. Idempotent, and called again
+    after every reset — see `_reset` for why they do not survive on their own.
+    """
+    for link, target in ((".venv", VENV), (".secrets", SECRETS)):
+        destination = worktree / link
+        if target.is_dir() and not destination.exists():
+            destination.symlink_to(target)
 
 
 def _reset(worktree: Path, sha: str) -> None:
@@ -82,9 +90,43 @@ def _reset(worktree: Path, sha: str) -> None:
     Without this each case inherits the last one's registrations in
     `core/parsers/__init__.py`, and a repeat run measures a repo that already
     contains the answer.
+
+    The `-e` flags and the re-link are both needed, and neither is belt-and-
+    braces. `.gitignore` spells these `.venv/` and `.secrets/`, with the
+    trailing slash that matches a directory — but what we put here is a
+    *symlink*, which git sees as an untracked file the pattern does not cover,
+    so a plain `git clean -fd` deletes both. It did: the first bench run reset
+    the links away and then spent three builds on the wrong model with a
+    fallback interpreter. The excludes stop it happening; the re-link means a
+    future change to those patterns cannot quietly break it again.
     """
     _git("reset", "--hard", sha, cwd=worktree)
-    _git("clean", "-fd", cwd=worktree)
+    _git("clean", "-fd", "-e", ".venv", "-e", ".secrets", cwd=worktree)
+    _link_support_dirs(worktree)
+
+
+def _preflight(worktree: Path, expected: str) -> None:
+    """Refuse to start unless the worktree resolves the same model we do.
+
+    Cheap, and it replaces the worst failure this thing can have: three finished
+    builds and a summary that is quietly about a different model than the one
+    the operator chose. Run after a reset, because that is the state the cases
+    actually execute in.
+    """
+    proc = subprocess.run(
+        ["poetry", "run", "python", "-c",
+         "from core.tools import llm_provider; print(llm_provider.resolve().describe())"],
+        cwd=str(worktree), capture_output=True, text=True, timeout=180,
+    )
+    resolved = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""
+    if resolved != expected:
+        raise SystemExit(
+            f"[bench] the worktree resolves '{resolved or (proc.stderr or '').strip()[-300:]}' "
+            f"but this repo resolves '{expected}'.\n"
+            f"        Every number would be about the wrong model, so nothing was run.\n"
+            f"        The worktree only has what git tracks plus the .venv/.secrets links; "
+            f"check those exist in {worktree}."
+        )
 
 
 def _run_case(worktree: Path, case_key: str, out_json: Path, log: Path, timeout: int) -> None:
@@ -185,6 +227,8 @@ def main(argv: list[str] | None = None) -> int:
         worktree, sha = _make_worktree(args.ref, Path(parent))
         print(f"[bench] measuring {sha[:12]} in {worktree}")
         try:
+            _reset(worktree, sha)
+            _preflight(worktree, choice.describe())
             for attempt in range(1, args.repeat + 1):
                 for case in selected:
                     tag = f"{case.key}.{attempt}"
