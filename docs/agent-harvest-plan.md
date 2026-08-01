@@ -121,6 +121,48 @@ The fix is to trim on a size threshold rather than every turn: the cacheable
 prefix then stays stable until the conversation actually needs room. Worth doing
 before reading anything into bench timings.
 
+**After threshold trimming + the F401 change, `15173ca`** — gate 3/3, correct
+1/3, and the bench caught what that bought:
+
+- riverbend 704s → **339s**, 1 round. The KV-cache explanation for the slowdown
+  holds: trimming only when there is a reason gave the time back.
+- **harbor passed the gate having extracted ZERO transactions** from a statement
+  holding six. `ok: True`, its own test green, `blockers: []`. Nothing in the
+  harness asked whether the parser did the job — every gate asks whether the
+  code is well-formed, and `[]` satisfies all of them. F401 had been the only
+  thing in the way, which is an accident, not a gate. Fixed in `e9678a6`.
+
+**After the sign-convention contracts, `912b320`** — gate 1/3, **correct 2/3**:
+
+| case | gate | correct | note |
+|---|---|---|---|
+| riverbend | FAIL | **yes** | F841: `except ... as e`, unused |
+| summit | pass | **yes** | the sign inversion is fixed |
+| harbor | FAIL | no | parser raises; F841 + a hardcoded `amount=0.0` |
+
+**`correct` moved for the first time: 1/3 → 2/3.** Summit had been inverted in
+every previous run — baseline, Phase 1, 3a, threshold — and no tooling phase
+touched it, because it was never a tooling problem. Telling the contract that
+the source's sign convention is probably not ours fixed it.
+
+### The gate now refuses more good work than it accepts bad
+
+gate 1/3 is *below* correct 2/3 — the reverse of the baseline, where the gate
+passed a parser with every sign inverted. For financial data that is the safer
+direction to be wrong in, but it costs a full rebuild each time, and both
+refusals are F841:
+
+- harbor: `default_amount` assigned and never used — the real target. That
+  parser is genuinely broken.
+- riverbend: `except Exception as e` where `e` is unused — in a parser the bench
+  scores **correct**.
+
+F841 is earning its place on harbor, so the answer is not to drop it as F401 was
+dropped. An unused exception binding is a swallowed error, which is a real smell
+but not "a setting silently ignored". The cheap move is to name it in the retry
+text so the agent knows the fix (use it in the log record, or drop the binding)
+rather than being told only that something "does nothing".
+
 ### What that changes
 
 **Phase 3 (condensation) moves ahead of Phase 2 (more loop rounds).** The two
