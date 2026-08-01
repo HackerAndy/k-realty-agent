@@ -25,7 +25,7 @@ import anthropic
 
 from core.observability import get_logger
 from core.tools import llm_provider
-from orchestration import agent_tools, degeneration
+from orchestration import agent_tools, context_budget, degeneration
 from orchestration.repetition import RepetitionDetector
 
 log = get_logger("orchestration.agent")
@@ -44,10 +44,14 @@ DEFAULT_MAX_TURNS = 40
 
 class AgentResult:
     def __init__(self, final_text: str, turns: int, tool_calls: list[tuple[str, dict]],
-                 stopped_reason: str = ""):
+                 stopped_reason: str = "", context: context_budget.Ledger | None = None):
         self.final_text = final_text
         self.turns = turns
         self.tool_calls = tool_calls  # (name, input) in order, for audit
+        # Where the conversation's characters went. A run that dies of context
+        # has to be able to say what filled it, rather than leaving it to be
+        # guessed at — which was guessed at once, and wrongly.
+        self.context = context or context_budget.Ledger()
         # Set when the loop ended itself rather than the model finishing — today
         # only "went in circles". Verification still decides whether what it wrote
         # before that is acceptable; this only says why it stopped when it did.
@@ -326,9 +330,19 @@ def run_agent(
     provider: str | None = None,
     model: str | None = None,
     api_url: str | None = None,
+    keep_last_results: int = -1,
 ) -> AgentResult:
     """Run the tool-use loop until the model stops calling tools (or the turn
-    cap is hit). `on_event` receives human-readable progress lines."""
+    cap is hit). `on_event` receives human-readable progress lines.
+
+    `keep_last_results` is how many recent tool results stay verbatim; older
+    large ones are replaced by a stub. -1 takes the default;
+    `context_budget.KEEP_ALL` turns trimming off, which is how the bench
+    measures what it is worth. Note 0 means keep NONE, not keep everything.
+    """
+    if keep_last_results < 0:
+        keep_last_results = int(os.getenv("AGENT_KEEP_LAST_RESULTS",
+                                          str(context_budget.KEEP_LAST_RESULTS)))
     choice = llm_provider.resolve(provider=provider, model=model, base_url=api_url)
     # Say which model is about to do the work. The operator picks one in
     # Settings; a run that silently used a different one would be unauditable.
@@ -346,15 +360,39 @@ def run_agent(
     restating = degeneration.Restatement()
     loops = 0
 
+    ledger = context_budget.Ledger(
+        system=len(system), schemas=len(json.dumps(agent_tools.TOOL_SCHEMAS)))
+    # Which tool produced which result, so a collapsed one can still say what it
+    # was standing in for.
+    tool_by_id: dict[str, str] = {}
+
     for turn in range(1, max_turns + 1):
+        # Before the request, not after: this is the turn whose prompt has to
+        # fit. Results the agent has already acted on become a one-line stub —
+        # nothing is removed, so tool_use/tool_result pairing is untouched.
+        freed = context_budget.collapse_stale_results(messages, tool_by_id, ledger,
+                                                      keep_last=keep_last_results)
+        if freed:
+            on_event(f"  [trimmed ~{freed // context_budget.CHARS_PER_TOKEN:,} tokens of "
+                     f"tool output the agent had finished with]")
         # Announced BEFORE the call, not after: this is the moment the run goes
         # quiet, sometimes for minutes on a local model, and both the operator and
         # the watchdog need to know what the silence is for.
         on_event(f"Asking the model (turn {turn} of {max_turns})…")
-        turn_result = adapter.next_turn(messages=messages, system=system)
+        try:
+            turn_result = adapter.next_turn(messages=messages, system=system)
+        except Exception:
+            # The request that doesn't fit is the one worth explaining, and it
+            # leaves by raising — so without this the accounting is lost on
+            # precisely the runs it exists for. Say what filled the conversation,
+            # then let the original error through untouched.
+            on_event(ledger.summary())
+            on_event("[context] where it went:\n" + ledger.breakdown())
+            raise
 
         for text in turn_result.text_blocks:
             on_event(text)
+            ledger.note_prose(text)
 
         adapter.append_assistant(messages, turn_result.assistant_payload)
 
@@ -366,11 +404,12 @@ def run_agent(
             loops += 1
             on_event(f"  [{turn_result.looped.describe()}]")
             if loops >= 2:
-                return AgentResult(
-                    final_text, turn, tool_calls,
-                    stopped_reason="The model got stuck repeating itself and was not "
-                                   "making progress, so the run was ended.",
-                )
+                return _finish(
+                    AgentResult(
+                        final_text, turn, tool_calls, context=ledger,
+                        stopped_reason="The model got stuck repeating itself and was not "
+                                       "making progress, so the run was ended."),
+                    on_event)
 
         repeating_itself = restating.observe(
             turn_result.text_blocks[0] if turn_result.text_blocks else "")
@@ -380,12 +419,14 @@ def run_agent(
 
         if not turn_result.tool_calls:
             final_text = turn_result.text_blocks[0] if turn_result.text_blocks else ""
-            return AgentResult(final_text, turn, tool_calls)
+            return _finish(AgentResult(final_text, turn, tool_calls, context=ledger), on_event)
 
         results: list[ToolResult] = []
         circling = None
         for tool_call in turn_result.tool_calls:
             tool_calls.append((tool_call.name, tool_call.input))
+            tool_by_id[tool_call.id] = tool_call.name
+            ledger.note_call(tool_call.name, tool_call.input)
             preview = _preview(tool_call.name, tool_call.input)
             on_event(f"  → {tool_call.name}({preview})")
             result_text, is_error = agent_tools.dispatch(tool_call.name, tool_call.input)
@@ -401,10 +442,13 @@ def run_agent(
                     # with tool_use blocks, which providers reject.
                     result_text = f"{result_text}\n\n{repetition.nudge_text(repeat)}"
 
+            ledger.note_result(tool_call.name, result_text)
             results.append(ToolResult(id=tool_call.id, content=result_text, is_error=is_error))
 
         if circling is not None:
-            return AgentResult(final_text, turn, tool_calls, stopped_reason=circling.describe())
+            return _finish(
+                AgentResult(final_text, turn, tool_calls, context=ledger,
+                            stopped_reason=circling.describe()), on_event)
 
         # Same delivery as the repetition nudge: ride along with a result the agent
         # is about to read. A standalone message can't be interleaved with tool_use
@@ -424,8 +468,22 @@ def run_agent(
         adapter.append_tool_results(messages, results)
 
     on_event(f"[stopped after {max_turns} turns without finishing]")
-    return AgentResult(final_text, max_turns, tool_calls,
-                       stopped_reason=f"Hit the {max_turns}-turn cap without finishing.")
+    return _finish(
+        AgentResult(final_text, max_turns, tool_calls, context=ledger,
+                    stopped_reason=f"Hit the {max_turns}-turn cap without finishing."),
+        on_event)
+
+
+def _finish(result: AgentResult, on_event: Callable[[str], None]) -> AgentResult:
+    """Say what filled the conversation, on the way out of every exit.
+
+    Emitted rather than merely returned because the operator watches the stream,
+    and because a run killed by the model server's context limit never returns
+    at all — the last thing in the log is then the only account of what filled
+    it. Routed through one helper so a new early return cannot silently skip it.
+    """
+    on_event(result.context.summary())
+    return result
 
 
 def _build_adapter(choice: llm_provider.LLMChoice) -> LLMAdapter:

@@ -76,6 +76,12 @@ def main(argv: list[str]) -> int:
     record["seconds"] = round(time.monotonic() - started, 1)
     record["rounds"] = 1 + sum(1 for event in events if REJECTION_MARKER in event)
     record["model"] = next((e for e in events if e.startswith("[model]")), "")
+    # The last one wins: on a retry there is a ledger per round, and the run that
+    # matters is the one that ended it. Both are in the .log either way.
+    context = [e for e in events if e.startswith("[context]")]
+    record["context"] = context[-1] if context else ""
+    record["context_breakdown"] = next(
+        (e for e in reversed(context) if "where it went" in e), "")
     out_path.write_text(json.dumps(record, indent=2), encoding="utf-8")
     return 0
 

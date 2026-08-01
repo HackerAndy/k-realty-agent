@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -32,6 +33,7 @@ from datetime import datetime, UTC
 from pathlib import Path
 
 from core.tools import llm_provider
+from orchestration import context_budget
 from orchestration.bench.cases import BY_KEY, CASES, score
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -129,11 +131,22 @@ def _preflight(worktree: Path, expected: str) -> None:
         )
 
 
-def _run_case(worktree: Path, case_key: str, out_json: Path, log: Path, timeout: int) -> None:
-    """Drive one build in the worktree, teeing the agent's own progress to a log."""
+def _run_case(worktree: Path, case_key: str, out_json: Path, log: Path, timeout: int,
+              keep_last: int | None = None) -> None:
+    """Drive one build in the worktree, teeing the agent's own progress to a log.
+
+    `keep_last` reaches the agent as an environment variable because the build
+    workflow between here and `run_agent` takes no such argument, and threading
+    one through it for the bench's benefit would be the bench changing
+    production code to measure it.
+    """
+    env = dict(os.environ)
+    if keep_last is not None:
+        env["AGENT_KEEP_LAST_RESULTS"] = str(keep_last)
     proc = subprocess.Popen(
         ["poetry", "run", "python", "-m", "orchestration.bench.one", case_key, str(out_json)],
         cwd=str(worktree),
+        env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -178,6 +191,8 @@ def _report(rows: list[dict]) -> None:
               f"{'pass' if row['gate_ok'] else 'FAIL':<7}"
               f"{'yes' if row['correct'] else 'no':<9}"
               f"{row['rounds']:<8}{row['seconds']:.0f}")
+        if row.get("context"):
+            print(f"    {row['context']}")
         for miss in row["misses"]:
             print(f"    ~ {miss}")
 
@@ -205,9 +220,17 @@ def main(argv: list[str] | None = None) -> int:
                         help="Only this case; repeatable. Default: all.")
     parser.add_argument("--timeout", type=int, default=1800,
                         help="Seconds per build before it is killed (default 1800).")
+    parser.add_argument("--keep-last", type=int, default=None, metavar="N",
+                        help="How many recent tool results the agent keeps verbatim "
+                             "(0 keeps none). Default: the agent's own.")
+    parser.add_argument("--no-trim", action="store_true",
+                        help="Leave every tool result in the conversation, as it was "
+                             "before context trimming existed. Use this for the "
+                             "before-number when measuring what trimming is worth.")
     args = parser.parse_args(argv)
 
     selected = [BY_KEY[k] for k in args.cases] if args.cases else list(CASES)
+    keep_last = context_budget.KEEP_ALL if args.no_trim else args.keep_last
 
     # Fail before spending an hour on it if no model is configured.
     choice = llm_provider.resolve()
@@ -236,7 +259,7 @@ def main(argv: list[str] | None = None) -> int:
                     _reset(worktree, sha)
                     out_json = results_dir / f"{tag}.json"
                     _run_case(worktree, case.key, out_json, results_dir / f"{tag}.log",
-                              args.timeout)
+                              args.timeout, keep_last=keep_last)
                     _keep_artifacts(worktree, case.key, results_dir / tag)
 
                     if not out_json.is_file():
@@ -271,6 +294,7 @@ def main(argv: list[str] | None = None) -> int:
                         "rounds": record.get("rounds", 0),
                         "seconds": record.get("seconds", 0.0),
                         "tool_calls": len(record.get("tool_calls") or []),
+                        "context": record.get("context", ""),
                     })
         finally:
             _git("worktree", "remove", "--force", str(worktree))
@@ -278,6 +302,7 @@ def main(argv: list[str] | None = None) -> int:
     summary = {
         "ref": args.ref,
         "sha": sha,
+        "keep_last": keep_last,
         "model": choice.describe(),
         "started": stamp,
         "runs": rows,
