@@ -163,6 +163,49 @@ but not "a setting silently ignored". The cheap move is to name it in the retry
 text so the agent knows the fix (use it in the log record, or drop the binding)
 rather than being told only that something "does nothing".
 
+### Three things the instrumentation settled, `3cebbfa`
+
+**1. `str_replace` arguments are now the biggest single consumer.** Measured on
+the harbor run at the moment the server refused it:
+
+| | tokens |
+|---|---|
+| `str_replace` args | 9,324 |
+| `run_command` results | 5,693 |
+| `str_replace` results | 5,590 |
+| `read_file` results | 4,932 |
+| `write_file` args | 2,904 |
+| system prompt | 1,817 |
+
+`str_replace` and its echo together are ~60% of the live conversation. The plan
+predicted the opposite — "a whole-file write parks the entire file in the
+conversation forever; an edit parks ~9 lines". In practice the agent makes many
+edits, each carrying `old_str` **and** `new_str`, and none of it is trimmable:
+**3a collapses tool RESULTS only.** Call arguments live in the assistant
+message and are never touched. That is the largest remaining lever, and it is a
+gap in 3a rather than a fault in Phase 1.
+
+**2. The context ceiling is not fixed.** This OOM came at kv_len **26,015** with
+`current 34.28 GB`, where earlier deaths were at 33.8k–35.1k with 33.3–34.9 GB
+resident. Headroom moves with whatever else is on the host, so a threshold tuned
+to "~33k is the wall" is tuned to a number that isn't stable. 48,000 chars is
+probably too high; the honest fix is to drive it from what the server reports
+rather than from a constant.
+
+**3. Single runs are noise, and this document has been over-reading them.**
+riverbend's gate verdict across six runs: FAIL, pass, FAIL, pass, FAIL, FAIL —
+with `correct` flipping to no on the last, where it hit the 40-turn cap. Two
+signals have been robust enough to trust:
+
+- **3a removing the OOM deaths** — two cases died twice each, then all three
+  completed.
+- **the sign-convention contracts** — summit was wrong in five consecutive runs
+  and right in the two since.
+
+Everything else reported here as a result sits inside run-to-run variance. Use
+`--repeat 3` for any comparison that matters, and read the per-case gate column
+as noise unless it moves the same way repeatedly.
+
 ### What that changes
 
 **Phase 3 (condensation) moves ahead of Phase 2 (more loop rounds).** The two
