@@ -132,4 +132,15 @@ def verify_parser(source_key: str, sample_path: Path) -> dict:
         transactions = json.loads(proc.stdout.strip().splitlines()[-1])
     except (json.JSONDecodeError, IndexError) as exc:
         return {"ok": False, "test": test, "error": f"Could not read parser output: {exc}\n{proc.stdout[-2000:]}"}
+
+    # A parser that finds nothing in a real document has not succeeded, whatever
+    # its test says. Caught on the bench: a parser returned [] for a statement
+    # holding six transactions, its own test agreed, and the harness approved it
+    # with no blocker at all — the operator would have activated a source that
+    # silently ingests nothing. Every other check here asks whether the code is
+    # well-formed; this is the only one that asks whether it did the job.
+    if not transactions:
+        return {"ok": False, "test": test, "transactions": transactions,
+                "extracted_nothing": True}
+
     return {"ok": test["ok"], "test": test, "transactions": transactions}

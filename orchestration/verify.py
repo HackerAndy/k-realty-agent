@@ -491,6 +491,11 @@ def blockers(verification: dict) -> list[str]:
         return []
 
     out: list[str] = []
+    if verification.get("extracted_nothing"):
+        out.append("The parser ran on the real document and found no transactions in it "
+                   "at all. Whatever its test proves, it is not reading this source — "
+                   "activating it would ingest nothing, silently.")
+
     test = verification.get("test") or {}
     if test.get("missing"):
         out.append("No test was written for the change, and the harness won't ship untested code.")

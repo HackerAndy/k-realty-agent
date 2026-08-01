@@ -385,6 +385,14 @@ def run_codegen_gated(
                 "NO_CONTROL_TOTALS = \"<why>\" saying what you looked at and what wasn't "
                 "there."
             )
+        if verification.get("extracted_nothing"):
+            reasons.append(
+                "Your parser ran on the real sample document and returned NO transactions. "
+                "The document has some — read it again and find where the rows actually "
+                "are, rather than trusting the shape you assumed. A test that passes on "
+                "an empty result is agreeing with the bug, so fix the test too: assert the "
+                "real transaction count from the document you were given."
+            )
         if verification.get("no_changes"):
             reasons.append(
                 "You reported success without writing any file, so nothing was fixed. "

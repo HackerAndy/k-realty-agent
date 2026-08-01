@@ -17,6 +17,7 @@ body instead.
 
 import pytest
 
+from orchestration import verify
 from orchestration.agent import _first_choice
 from orchestration.build_worker import describe_exception
 
@@ -113,3 +114,28 @@ def test_a_non_json_body_says_what_type_arrived():
 def test_the_model_and_url_are_named_so_the_operator_knows_which_server():
     text = _fails({})
     assert "some-model" in text and "localhost:10240" in text
+
+
+# --- a parser that reads nothing --------------------------------------------
+#
+# From the codegen bench: a parser returned [] for a statement holding six
+# transactions, its own test agreed with it, and the harness approved the build
+# with no blocker at all. Every other check asks whether the code is well
+# formed; this is the only one that asks whether it did the job.
+
+def test_a_parser_that_finds_nothing_is_refused():
+    v = {"ok": False, "test": {"ok": True}, "transactions": [], "extracted_nothing": True}
+
+    said = verify.blockers(v)
+
+    assert said, "an empty extraction must not pass silently"
+    assert "no transactions" in said[0]
+    assert "ingest nothing" in said[0], "say what it would cost the operator"
+
+
+def test_the_empty_extraction_blocker_leads():
+    """It explains every other symptom, so it goes first."""
+    v = {"ok": False, "extracted_nothing": True,
+         "test": {"ok": False, "output": "1 failed"}}
+
+    assert "found no transactions" in verify.blockers(v)[0]
