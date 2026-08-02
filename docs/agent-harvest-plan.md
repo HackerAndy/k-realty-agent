@@ -245,6 +245,39 @@ path to the failure that matters most for financial data.
 all on summit and harbor, which matches the observed habit of debugging by
 re-running `python -c` with print statements instead of reading the failure.
 
+### Reconciliation, n=3 at `41e60d7` — the false passes are gone
+
+**gate 2/9, correct 2/9, approved-but-wrong 0/9.**
+
+| case | gate | correct |
+|---|---|---|
+| riverbend | 2/3 | 2/3 |
+| summit | 0/3 | 0/3 |
+| harbor | 0/3 | 0/3 |
+
+The number this was aimed at: **3/9 approved-while-wrong became 0/9.** Every
+build the harness now approves is correct — precision went from 40% (2 of 5
+approvals right) to 100% (2 of 2). Harbor's approved 1-of-6 read cannot recur;
+its own subtotals refuse it.
+
+`correct` did not move, and was not going to: reconciliation cannot make a
+parser right, only stop a wrong one shipping. What it bought is that the
+operator is no longer handed a finished build that silently ingests a fraction
+of a statement — the worst failure available on financial data.
+
+The cost is honest and worth stating: fewer approvals (5/9 to 2/9) and longer
+runs (up to 702s), because a gate that refuses more causes more retries.
+
+**Turn exhaustion is now the dominant blocker: "hit the 40-turn cap" in 4 of 9**,
+up from 3. Summit and harbor both burn their budget re-running `python -c` with
+print statements instead of reading the failure they already have. That is the
+next thing to fix, and it is prompt work.
+
+Two other notes from this run: summit's inversion survived again (2 of 3, the
+third lost to a transport fault), so the sign contracts remain unproven; and
+`IncompleteRead` from the local server cost 2 of 9 builds outright — flakiness
+worth watching, not yet worth handling.
+
 ### What that changes
 
 **Phase 3 (condensation) moves ahead of Phase 2 (more loop rounds).** The two
