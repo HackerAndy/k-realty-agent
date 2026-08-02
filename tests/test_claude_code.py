@@ -285,3 +285,34 @@ def test_choosing_it_without_the_cli_installed_is_refused(monkeypatch):
 
     with pytest.raises(mcp_tools.ToolError, match="isn't on this machine's PATH"):
         mcp_tools.set_llm_provider("claude_code", model="sonnet")
+
+
+# --- whose bill --------------------------------------------------------------
+#
+# The CLI signed in to a Claude subscription draws on that plan. Hand it an API
+# key and it bills per token instead. That makes the presence of a key a billing
+# decision, and it must be the operator's, not a side effect.
+
+def test_an_ambient_api_key_does_not_move_the_operator_off_their_subscription(cli, monkeypatch):
+    """load_into_env() exports ANTHROPIC_API_KEY whenever the anthropic provider
+    has ever been configured. Inheriting it here would switch the CLI to
+    per-token billing because of a setting made for a different provider."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-from-some-other-provider")
+    monkeypatch.setattr(claude_code.llm_provider, "resolve",
+                        lambda **kw: claude_code.llm_provider.LLMChoice(
+                            provider="claude_code", model="sonnet", api_key=None))
+    captured = cli(_stream({"type": "result", "subtype": "success", "num_turns": 1}))
+
+    run_claude_code("t", "s", on_event=lambda _: None)
+
+    assert "ANTHROPIC_API_KEY" not in captured["env"]
+    assert "ANTHROPIC_AUTH_TOKEN" not in captured["env"]
+
+
+def test_the_resolver_does_not_invent_a_key_from_the_environment(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ambient")
+    monkeypatch.setattr(claude_code.llm_provider, "_stored", lambda: {})
+
+    choice = claude_code.llm_provider.resolve(provider="claude_code")
+
+    assert choice.api_key is None, "blank in Settings must mean the CLI's own login"

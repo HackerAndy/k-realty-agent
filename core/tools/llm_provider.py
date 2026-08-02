@@ -181,9 +181,16 @@ def resolve(
         return LLMChoice(
             provider=resolved_provider,
             model=chosen_model,
-            # Optional on purpose: the CLI normally has its own login. Passing
-            # None means "use whatever the CLI is already authenticated as".
-            api_key=own.get("api_key") or os.getenv("ANTHROPIC_API_KEY"),
+            # ONLY what the operator stored, with no environment fallback — and
+            # that difference is a billing decision, not a detail. The CLI signed
+            # in to a Claude subscription draws on that plan; hand it an API key
+            # and it bills per token instead. `load_into_env()` puts
+            # ANTHROPIC_API_KEY in the environment whenever the anthropic
+            # provider is configured, so falling back to it here would silently
+            # move an operator off their subscription because of a setting they
+            # made for a different provider. None means "use the CLI's own
+            # login", and it has to be reachable.
+            api_key=own.get("api_key") or None,
             provider_source=provider_source,
             model_source=model_source,
         )

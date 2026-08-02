@@ -148,10 +148,17 @@ def run_claude_code(
     ]
 
     env = dict(os.environ)
-    # Only when the operator stored one. Absent, the CLI uses its own login,
-    # which is the normal case and the reason this provider needs no credential.
     if choice.api_key:
         env["ANTHROPIC_API_KEY"] = choice.api_key
+    else:
+        # Actively REMOVED, not merely left unset. The subprocess inherits this
+        # process's environment, and `llm_provider.load_into_env()` exports
+        # ANTHROPIC_API_KEY whenever the anthropic provider has ever been
+        # configured — so without this, an operator who chose "use the CLI's own
+        # login" would be moved onto per-token API billing by a setting they made
+        # for something else, with nothing on screen saying so.
+        for leaked in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+            env.pop(leaked, None)
 
     tool_calls: list[tuple[str, dict]] = []
     final_text = ""

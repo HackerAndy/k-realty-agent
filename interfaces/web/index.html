@@ -2401,11 +2401,15 @@
         '" placeholder="sonnet, opus, or a full model name">' +
         '<span class="sub">An alias such as <code>sonnet</code> or <code>opus</code> lets the CLI ' +
         'pick the current version; a full name pins one.</span></div>' +
-        '<div class="field"><label for="llm-key">Anthropic API key <span class="sub">(optional)</span></label>' +
+        '<div class="field"><label for="llm-key">Anthropic API key <span class="sub">(optional — ' +
+        'changes who pays)</span></label>' +
         '<input type="password" id="llm-key" placeholder="' +
         (keyStored ? '•••••••••••• saved' : 'blank — use the CLI\'s own login') + '" autocomplete="off">' +
-        '<span class="sub">Leave blank and it uses whatever <code>claude</code> is already signed ' +
-        'in as. Supply one only to bill a specific key instead.</span></div>';
+        '<span class="sub"><b>Blank</b> uses whatever <code>claude</code> is already signed in as ' +
+        '— on a Claude subscription that draws on your plan\'s usage, with no per-token API bill. ' +
+        '<b>Supplying a key</b> switches this to per-token API billing on that key instead. The ' +
+        'harness never passes a key you did not enter here, even if one is set elsewhere in the ' +
+        'environment.</span></div>';
     } else if (llmForm.provider === 'anthropic') {
       form =
         '<div class="field"><label for="llm-key">Anthropic API key</label>' +
