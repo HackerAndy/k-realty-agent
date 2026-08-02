@@ -278,6 +278,50 @@ third lost to a transport fault), so the sign contracts remain unproven; and
 `IncompleteRead` from the local server cost 2 of 9 builds outright — flakiness
 worth watching, not yet worth handling.
 
+### The debugging-loop fix did not work, `0436326`
+
+**gate 1/9, correct 2/9, approved-wrong 0/9, turn cap 5/9** — the cap went UP,
+from 4 of 9.
+
+The behaviour did shift, slightly and in the right direction: `run_command`
+11.1 → 9.7 calls per run, `search_files` 0.6 → 1.2. So the agent read the
+prompt and did somewhat less of what it was told not to. It changed nothing
+about whether builds succeed.
+
+**Which suggests the turn cap was a symptom, not a cause.** Look at where it
+fires:
+
+| case | correct | caps |
+|---|---|---|
+| riverbend | 2/3 | none |
+| summit | 0/3 | yes |
+| harbor | 0/3 | yes |
+
+It fires on exactly the two cases that are *never* correct — summit across every
+run since the bench existed, harbor in roughly eighteen attempts. That is what a
+model burning its budget on a problem it cannot solve looks like. Better habits
+make such a run cheaper, not successful, which is precisely the result observed.
+
+The guidance is kept: it is correct on its merits, it moved the behaviour, and
+removing it would cost another hour to re-measure. But it is unproven as a fix
+and should not be counted as one.
+
+### The question that now blocks everything else
+
+Is what remains the **model's ceiling** or the **harness's fault**? Every
+intervention left is guesswork until that is settled, and the experiment is
+cheap: run the same three cases against a stronger model. The bench already
+measures whatever Settings resolves, and its preflight makes a model mismatch
+impossible to report by accident.
+
+- If a stronger model gets summit and harbor right, the harness is fine and the
+  local 30B is the limit — which is an operational answer (bigger model for
+  builds, or accept it), not a harness one.
+- If a stronger model fails them too, the fault is in the prompts or the cases
+  themselves, and there is something real left to fix.
+
+Either answer redirects the work. Neither can be guessed from here.
+
 ### What that changes
 
 **Phase 3 (condensation) moves ahead of Phase 2 (more loop rounds).** The two
