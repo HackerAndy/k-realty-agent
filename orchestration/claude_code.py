@@ -34,6 +34,7 @@ from pathlib import Path
 
 from core.observability import get_logger
 from core.tools import llm_provider
+from orchestration import agent_tools
 from orchestration.agent import AgentResult
 from orchestration.context_budget import Ledger
 
@@ -62,6 +63,24 @@ TOOL_NAMES = {
 # Where each tool keeps the thing the harness wants to record.
 _PATH_KEYS = ("file_path", "path", "notebook_path")
 _COMMAND_KEYS = ("command",)
+
+# What the CLI may do without a human at the keyboard — the SAME set we can
+# translate above, derived from it rather than listed twice so the two cannot
+# drift. A tool the harness can't put into its own vocabulary is a tool whose
+# work no gate would see, and it does not get pre-approved.
+#
+# This is not a widening: `agent_tools.run_command` gives the harness's own loop
+# unrestricted shell in the repo already. It is `--permission-mode acceptEdits`
+# alone that was NARROWER than the native path — it approves file edits and
+# nothing else, so the agent could write a parser and its test and then be
+# refused permission to RUN the test. That breaks the harness's central promise
+# ("it tests the code it writes") from the outside, and quietly: the CLI reports
+# `is_error: false` on a run it spent asking for a permission it never got.
+ALLOWED_TOOLS = sorted(TOOL_NAMES)
+
+# Denials of these mean the agent could not do the job at all, as opposed to
+# being turned down for something incidental.
+_ESSENTIAL = agent_tools.WRITE_TOOLS | {"run_command"}
 
 
 def available() -> bool:
@@ -97,6 +116,34 @@ def _translate(name: str, payload: dict) -> tuple[str, dict]:
     return mapped, arguments
 
 
+def _refused(result_event: dict, on_event: Callable[[str], None]) -> str:
+    """Say so when the CLI was refused a permission, instead of letting the run
+    look like it simply finished.
+
+    The CLI answers `is_error: false` on a session it spent asking for a
+    permission it never got — so a misconfigured permission mode reads on screen
+    as a model that gave up, and the test gate then reports "no test was run"
+    about a test the agent wrote and was forbidden to execute. Every denial is
+    printed; only one that blocked writing or testing stops the run, because
+    those are the two things the harness must have.
+    """
+    denials = result_event.get("permission_denials") or []
+    blocked: list[str] = []
+    for denial in denials:
+        name = str(denial.get("tool_name") or "")
+        mapped = TOOL_NAMES.get(name, name)
+        on_event(f"[claude-code] refused permission to use {name}")
+        if mapped in _ESSENTIAL:
+            blocked.append(name)
+    if not blocked:
+        return ""
+    return ("The Claude Code CLI was refused permission to use "
+            + ", ".join(sorted(set(blocked)))
+            + ", so it could not edit or test the code. This is the harness's "
+              "configuration, not the model's doing — see ALLOWED_TOOLS in "
+              "orchestration/claude_code.py.")
+
+
 def _preview(name: str, arguments: dict) -> str:
     if arguments.get("path"):
         return arguments["path"]
@@ -108,7 +155,7 @@ def run_claude_code(
     task: str,
     system: str,
     on_event: Callable[[str], None] = print,
-    max_turns: int = 40,
+    max_turns: int | None = None,
     provider: str | None = None,
     model: str | None = None,
     api_url: str | None = None,
@@ -120,9 +167,19 @@ def run_claude_code(
     replacing it: the harness's contract is a set of extra rules about this
     repository, not a substitute for knowing how to edit code, and replacing the
     prompt would throw away the thing we came for.
+
+    `max_turns` is accepted for signature compatibility and CANNOT be honoured:
+    the CLI runs its own loop and offers no turn cap (2.1.x has only
+    `--max-budget-usd`, which is an API-billing number and means nothing on a
+    subscription). It says so rather than accepting the number and ignoring it —
+    a bound the caller believes in and nothing enforces is worse than no bound.
     """
     choice = llm_provider.resolve(provider=provider, model=model, base_url=api_url)
     on_event(f"[model] {choice.describe()}")
+    if max_turns is not None:
+        on_event(f"[claude-code] the {max_turns}-turn cap does not apply here — the CLI "
+                 "runs its own loop and exposes no turn limit. It stops when it is done, "
+                 "or when whatever launched it times out.")
 
     if not available():
         raise RuntimeError(log.failure(
@@ -141,9 +198,10 @@ def run_claude_code(
         "--output-format", "stream-json",
         "--verbose",
         "--model", choice.model,
-        # It has to be able to edit and run tests without a human at the
+        # It has to be able to edit AND run tests without a human at the
         # keyboard; this runs against a checkout the harness controls.
         "--permission-mode", "acceptEdits",
+        "--allowedTools", " ".join(ALLOWED_TOOLS),
         "--append-system-prompt", system,
     ]
 
@@ -201,6 +259,7 @@ def run_claude_code(
             if event.get("is_error"):
                 stopped_reason = (f"The Claude Code CLI ended with an error "
                                   f"({event.get('subtype') or 'unknown'}).")
+            stopped_reason = _refused(event, on_event) or stopped_reason
             on_event(f"[claude-code] {turns} turns"
                      + (f", ${cost:.4f}" if isinstance(cost, (int, float)) else ""))
 

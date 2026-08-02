@@ -203,6 +203,76 @@ def test_an_errored_run_says_so_rather_than_looking_finished(cli):
     assert "error" in result.stopped_reason and "error_max_turns" in result.stopped_reason
 
 
+# --- permission: the harness must be able to TEST what it wrote --------------
+#
+# Found by running the executor for real, not by reading it. With
+# `--permission-mode acceptEdits` and no allowlist the CLI edited the file, wrote
+# the test, and was then refused permission to RUN it — and reported
+# `is_error: false`, so the harness saw a finished build. The failure surfaced
+# two steps later as "the test wasn't run", which is a true sentence about the
+# wrong thing.
+
+def test_the_cli_may_run_the_tests_it_writes(cli):
+    """Editing without executing breaks the harness's central promise."""
+    captured = cli(_stream({"type": "result", "subtype": "success", "num_turns": 1}))
+
+    run_claude_code("t", "s", on_event=lambda _: None, provider="claude_code")
+
+    allowed = captured["command"][captured["command"].index("--allowedTools") + 1].split()
+    assert "Bash" in allowed, "it could write a test and not be allowed to run it"
+    assert {"Write", "Edit", "MultiEdit"} <= set(allowed)
+
+
+def test_only_tools_the_gates_can_read_are_pre_approved(cli):
+    """The allowlist is derived from the translation map, so a tool whose work no
+    gate could see never gets approved by accident."""
+    captured = cli(_stream({"type": "result", "subtype": "success", "num_turns": 1}))
+
+    run_claude_code("t", "s", on_event=lambda _: None, provider="claude_code")
+
+    allowed = set(captured["command"][captured["command"].index("--allowedTools") + 1].split())
+    assert allowed == set(TOOL_NAMES)
+    assert "WebFetch" not in allowed
+
+
+def test_a_refused_permission_is_not_reported_as_a_finished_run(cli):
+    """THE case. `is_error` is false on a session that spent itself asking."""
+    seen: list[str] = []
+    cli(_stream({"type": "result", "subtype": "success", "is_error": False, "num_turns": 2,
+                 "permission_denials": [{"tool_name": "Bash",
+                                         "tool_input": {"command": "pytest -q"}}]}))
+
+    result = run_claude_code("t", "s", on_event=seen.append, provider="claude_code")
+
+    assert "refused permission" in result.stopped_reason
+    assert "Bash" in result.stopped_reason
+    # And it must point at the harness's own configuration, not at the model.
+    assert "claude_code.py" in result.stopped_reason
+    assert any("refused permission to use Bash" in line for line in seen)
+
+
+def test_an_incidental_denial_is_reported_without_failing_the_run(cli):
+    """A denied WebFetch says so, but did not stop it writing or testing code."""
+    seen: list[str] = []
+    cli(_stream({"type": "result", "subtype": "success", "is_error": False, "num_turns": 3,
+                 "permission_denials": [{"tool_name": "WebFetch"}]}))
+
+    result = run_claude_code("t", "s", on_event=seen.append, provider="claude_code")
+
+    assert result.stopped_reason == ""
+    assert any("refused permission to use WebFetch" in line for line in seen)
+
+
+def test_a_turn_cap_it_cannot_enforce_is_said_out_loud(cli):
+    """The CLI has no turn limit, so a caller's cap is not quietly swallowed."""
+    seen: list[str] = []
+    cli(_stream({"type": "result", "subtype": "success", "num_turns": 1}))
+
+    run_claude_code("t", "s", on_event=seen.append, max_turns=40, provider="claude_code")
+
+    assert any("does not apply" in line for line in seen)
+
+
 def test_a_nonzero_exit_is_reported(cli):
     cli(_stream({"type": "system", "subtype": "init"}), returncode=1)
 
