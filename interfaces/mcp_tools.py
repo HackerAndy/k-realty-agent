@@ -1100,7 +1100,8 @@ def llm_status() -> dict:
             # What each provider would run if the operator doesn't name a model,
             # so the form can show the truth instead of its own copy of a constant.
             "defaults": {"anthropic": llm_provider.DEFAULT_MODEL,
-                         "openai_compatible": llm_provider.DEFAULT_OMLX_MODEL}}
+                         "openai_compatible": llm_provider.DEFAULT_OMLX_MODEL,
+                         "claude_code": llm_provider.DEFAULT_CLAUDE_CODE_MODEL}}
 
 
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
@@ -1124,6 +1125,10 @@ def _llm_is_offsite(cfg: dict) -> bool:
 def _llm_destination(cfg: dict) -> str:
     if not cfg:
         return "no LLM is set up yet"
+    if cfg.get("provider") == "claude_code":
+        # Still offsite, and it should not read as "local" just because the
+        # command runs here: the CLI on this machine talks to Anthropic.
+        return "the Anthropic API, via the Claude Code CLI on this machine"
     if cfg.get("provider") != "openai_compatible":
         return "the Anthropic API"
     from urllib.parse import urlparse
@@ -1616,8 +1621,16 @@ def set_llm_provider(
     model: str | None = None,
 ) -> dict:
     """Store which LLM the harness uses (encrypted in .secrets/) and load it into
-    the environment immediately. 'anthropic' needs an api_key; 'openai_compatible'
-    needs base_url + model, key optional."""
+    the environment immediately.
+
+    Three shapes, because the third is not a model endpoint at all:
+      anthropic          — needs an api_key.
+      openai_compatible  — needs base_url + model, key optional.
+      claude_code        — the Claude Code CLI on this machine. It authenticates
+                           itself, so a key is OPTIONAL here; supplying one just
+                           means the subprocess bills that key instead. Only the
+                           model alias is required, and it defaults.
+    """
     if provider not in llm_provider.PROVIDERS:
         raise ToolError(f"Unknown provider '{provider}'. Known: {list(llm_provider.PROVIDERS)}")
 
@@ -1636,6 +1649,14 @@ def set_llm_provider(
     if provider == "anthropic":
         if not api_key:
             raise ToolError("An Anthropic API key is required.")
+    elif provider == "claude_code":
+        from orchestration.claude_code import available as _cli_available
+        if not _cli_available():
+            raise ToolError(
+                f"The '{llm_provider.CLAUDE_CODE_BINARY}' command isn't on this machine's "
+                "PATH, so the harness can't run it. Install the Claude Code CLI, or pick "
+                "a different coding method.")
+        base_url = None  # not an endpoint; storing one would be a fiction
     else:
         if not base_url:
             raise ToolError("A base URL is required for an OpenAI-compatible server.")

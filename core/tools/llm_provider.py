@@ -39,13 +39,19 @@ DEFAULT_PROVIDER = "anthropic"
 #   anthropic          — the Claude API (needs an api_key)
 #   openai_compatible  — any local/hosted OpenAI-compatible server (OMLX, Ollama,
 #                        LM Studio, vLLM …); needs base_url + model, key optional.
-PROVIDERS = ("anthropic", "openai_compatible")
+#   claude_code        — the Claude Code CLI on this machine. NOT an endpoint:
+#                        it is a whole agent with its own tool loop, so the
+#                        harness hands it the task instead of driving turns. See
+#                        `LLMChoice.is_agent` and orchestration/claude_code.py.
+PROVIDERS = ("anthropic", "openai_compatible", "claude_code")
 
 # Aliases the operator (or an env var, or a caller) may use for each provider.
 _ALIASES = {
     "anthropic": "anthropic", "claude": "anthropic",
     "openai_compatible": "openai_compatible", "openai": "openai_compatible",
     "omlx": "openai_compatible", "local": "openai_compatible",
+    "claude_code": "claude_code", "claude-code": "claude_code",
+    "cli": "claude_code", "claude_cli": "claude_code",
 }
 
 # Last-resort defaults, used only when nothing is stored and nothing is in the
@@ -56,6 +62,14 @@ DEFAULT_MODEL = "claude-opus-4-8"
 DEFAULT_OMLX_MODEL = "qwen2.5-coder:7b"
 DEFAULT_OMLX_BASE_URL = "http://klabss-MacBook-Pro.local:9090/v1"
 DEFAULT_OMLX_API_KEY = "local"
+# An alias rather than a pinned name, so the CLI resolves whatever is current
+# instead of the harness pinning a model that will age out.
+DEFAULT_CLAUDE_CODE_MODEL = "sonnet"
+# The CLI usually authenticates itself (subscription login or its own keychain
+# entry), so a stored key is optional here — unlike every other provider. When
+# one IS stored it is exported to the subprocess, which is what an operator on
+# a metered API key will want.
+CLAUDE_CODE_BINARY = "claude"
 
 _WHERE = {
     "settings": "chosen in Settings",
@@ -88,6 +102,17 @@ class LLMChoice:
     @property
     def is_anthropic(self) -> bool:
         return self.provider == "anthropic"
+
+    @property
+    def is_agent(self) -> bool:
+        """True when this provider is a whole agent, not a model endpoint.
+
+        The harness drives its own tool loop against an endpoint. Claude Code
+        brings its own loop, its own tools and its own context management, so it
+        is handed the task and left to it — a different code path entirely, and
+        the reason this is a property rather than another adapter.
+        """
+        return self.provider == "claude_code"
 
     def describe(self) -> str:
         """One line, for a log or a screen: what ran, and why it was picked."""
@@ -145,6 +170,19 @@ def resolve(
         return LLMChoice(
             provider=resolved_provider,
             model=chosen_model,
+            api_key=own.get("api_key") or os.getenv("ANTHROPIC_API_KEY"),
+            provider_source=provider_source,
+            model_source=model_source,
+        )
+
+    if resolved_provider == "claude_code":
+        chosen_model, model_source = _pick(
+            model, own.get("model"), "CLAUDE_CODE_MODEL", DEFAULT_CLAUDE_CODE_MODEL)
+        return LLMChoice(
+            provider=resolved_provider,
+            model=chosen_model,
+            # Optional on purpose: the CLI normally has its own login. Passing
+            # None means "use whatever the CLI is already authenticated as".
             api_key=own.get("api_key") or os.getenv("ANTHROPIC_API_KEY"),
             provider_source=provider_source,
             model_source=model_source,

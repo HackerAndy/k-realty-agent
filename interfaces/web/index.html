@@ -2373,6 +2373,7 @@
     const seg = '<div class="seg">' +
       '<button class="' + (llmForm.provider === 'anthropic' ? 'on' : '') + '" onclick="pickProvider(\'anthropic\')">Claude API</button>' +
       '<button class="' + (llmForm.provider === 'openai_compatible' ? 'on' : '') + '" onclick="pickProvider(\'openai_compatible\')">Local server</button>' +
+      '<button class="' + (llmForm.provider === 'claude_code' ? 'on' : '') + '" onclick="pickProvider(\'claude_code\')">Claude Code CLI</button>' +
       '</div>';
 
     // A key already in the vault never has to be retyped: leaving the field
@@ -2385,7 +2386,27 @@
     const keyPlaceholder = keyStored ? '•••••••••••• saved' : 'sk-ant-…';
 
     let form;
-    if (llmForm.provider === 'anthropic') {
+    if (llmForm.provider === 'claude_code') {
+      // Not an endpoint but a whole coding agent, so this panel says what
+      // changes about the run rather than pretending it is another model box.
+      form =
+        '<div class="kv" style="margin-bottom:12px">Runs the <code>claude</code> command on this ' +
+        'machine and lets it edit the repository directly. It brings its own tools and its own ' +
+        'context handling, so the harness hands it the job instead of driving each step — the ' +
+        'test gate, reconciliation and every other check still run exactly the same way ' +
+        'afterwards.</div>' +
+        '<div class="field"><label for="llm-model">Model</label>' +
+        '<input type="text" id="llm-model" value="' +
+        esc(sameProvider && cfg.model ? cfg.model : ((cfg.defaults || {}).claude_code || 'sonnet')) +
+        '" placeholder="sonnet, opus, or a full model name">' +
+        '<span class="sub">An alias such as <code>sonnet</code> or <code>opus</code> lets the CLI ' +
+        'pick the current version; a full name pins one.</span></div>' +
+        '<div class="field"><label for="llm-key">Anthropic API key <span class="sub">(optional)</span></label>' +
+        '<input type="password" id="llm-key" placeholder="' +
+        (keyStored ? '•••••••••••• saved' : 'blank — use the CLI\'s own login') + '" autocomplete="off">' +
+        '<span class="sub">Leave blank and it uses whatever <code>claude</code> is already signed ' +
+        'in as. Supply one only to bill a specific key instead.</span></div>';
+    } else if (llmForm.provider === 'anthropic') {
       form =
         '<div class="field"><label for="llm-key">Anthropic API key</label>' +
         '<input type="password" id="llm-key" placeholder="' + keyPlaceholder + '" autocomplete="off">' +
@@ -2862,7 +2883,9 @@
     const args = { provider: llmForm.provider };
     const keyEl = el('llm-key');
     args.api_key = keyEl ? keyEl.value : null;
-    if (llmForm.provider === 'openai_compatible') {
+    if (llmForm.provider === 'claude_code') {
+      args.model = el('llm-model') ? el('llm-model').value : null;
+    } else if (llmForm.provider === 'openai_compatible') {
       args.base_url = el('llm-base').value;
       const sel = el('llm-model-sel');
       args.model = sel ? sel.value : (el('llm-model') ? el('llm-model').value : null);

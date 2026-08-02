@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+from core.tools import llm_provider
 from orchestration import agent_tools
 from orchestration.agent import AgentResult, run_agent
 from orchestration.verify import (
@@ -252,6 +253,25 @@ def fold_noop(verification: dict, tool_calls: list[tuple[str, dict]]) -> dict:
     return verification
 
 
+def _executor(provider: str | None = None, model: str | None = None,
+              api_url: str | None = None, **_ignored):
+    """Which thing does the work: the harness's own loop, or the Claude Code CLI.
+
+    Resolved through llm_provider like every other model decision, so Settings
+    remains the single answer to "what is this harness running" — a second
+    opinion here is exactly what the one-model-choice rule forbids.
+
+    Both sides return the same AgentResult and leave their changes on disk, so
+    everything downstream — the test gate, coverage, reconciliation, lint, the
+    bench — is identical either way. Only who edits the files differs.
+    """
+    choice = llm_provider.resolve(provider=provider, model=model, base_url=api_url)
+    if choice.is_agent:
+        from orchestration.claude_code import run_claude_code
+        return run_claude_code
+    return run_agent
+
+
 def run_codegen_gated(
     task: str,
     system: str,
@@ -313,7 +333,8 @@ def run_codegen_gated(
         [p for p in (reconcile_path, test_path) if p] if require_changes else []
     )
 
-    result = run_agent(task, CODE_STANDARDS + "\n\n" + system, on_event=on_event, **kwargs)
+    execute = _executor(**kwargs)
+    result = execute(task, CODE_STANDARDS + "\n\n" + system, on_event=on_event, **kwargs)
     verification = _assess(result)
 
     for _ in range(max_retries):
@@ -414,7 +435,7 @@ def run_codegen_gated(
             break
 
         on_event("\nThe harness rejected that run: " + " ".join(reasons) + "\nRetrying once.\n")
-        result = run_agent(
+        result = execute(
             "\n\n".join(reasons) + f"\n\nOriginal task, for context:\n{task}",
             CODE_STANDARDS + "\n\n" + system,
             on_event=on_event,
