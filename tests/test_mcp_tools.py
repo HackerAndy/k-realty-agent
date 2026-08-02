@@ -237,7 +237,8 @@ def test_set_llm_provider_stores_and_loads(monkeypatch):
     result = mcp_tools.set_llm_provider("openai_compatible", base_url=" http://x/v1 ", model=" m ")
     assert result["saved"] is True
     # Whitespace trimmed so a stray paste can't produce an unreachable URL.
-    assert stored == {"provider": "openai_compatible", "api_key": None, "base_url": "http://x/v1", "model": "m"}
+    assert stored == {"provider": "openai_compatible", "api_key": None,
+                      "base_url": "http://x/v1", "model": "m", "activate": True}
 
 
 def test_set_llm_provider_keeps_stored_key_when_field_left_blank(monkeypatch):
@@ -263,6 +264,49 @@ def test_set_llm_provider_does_not_reuse_a_key_across_providers(monkeypatch):
 
     with pytest.raises(mcp_tools.ToolError, match="API key is required"):
         mcp_tools.set_llm_provider("anthropic")
+
+
+def test_llm_status_reports_all_three_providers_and_which_is_armed(monkeypatch):
+    """The picker draws itself from this: three cards, a tick on one. A payload
+    that only described the active provider is what made the Settings page label
+    the Claude Code CLI 'Local / OpenAI-compatible'."""
+    saved = {"anthropic": {"api_key": "sk", "model": "claude-opus-4-8"},
+             "openai_compatible": {}, "claude_code": {}}
+    # Both patched: resolve() reads them, and a test must never reach the
+    # operator's real vault — a failure would print their actual key.
+    monkeypatch.setattr(mcp_tools.llm_provider, "settings_for", lambda p: saved[p])
+    monkeypatch.setattr(mcp_tools.llm_provider, "configured_provider", lambda: "anthropic")
+    monkeypatch.setattr(mcp_tools.llm_provider, "current_config",
+                        lambda: {"provider": "anthropic", "model": "claude-opus-4-8"})
+    monkeypatch.setattr(mcp_tools.llm_provider, "is_configured", lambda: True)
+
+    providers = mcp_tools.llm_status()["providers"]
+
+    assert [p["provider"] for p in providers] == list(mcp_tools.llm_provider.PROVIDERS)
+    assert [p["active"] for p in providers].count(True) == 1
+    assert next(p for p in providers if p["active"])["provider"] == "anthropic"
+    assert {p["label"] for p in providers} == {"Claude API", "Local server", "Claude Code CLI"}
+    # A provider with nothing saved says so, and says what would fix it, rather
+    # than offering a switch that arms something the next run can't use.
+    local = next(p for p in providers if p["provider"] == "openai_compatible")
+    assert local["blocked"] and local["blocked_fix"] == "settings"
+    # Never the key itself, for any provider.
+    assert all("api_key" not in p for p in providers)
+
+
+def test_the_screen_and_the_save_path_agree_on_what_is_configured(monkeypatch):
+    """One validator, called by both. Two copies drift silently: the picker offers
+    a switch, the save behind it refuses, and neither explains the other."""
+    monkeypatch.setattr(mcp_tools.llm_provider, "settings_for", lambda p: {})
+    monkeypatch.setattr(mcp_tools.llm_provider, "configured_provider", lambda: "anthropic")
+    monkeypatch.setattr(mcp_tools.llm_provider, "stored_api_key", lambda provider=None: None)
+
+    reported = next(p for p in mcp_tools.llm_status()["providers"]
+                    if p["provider"] == "anthropic")["blocked"]
+    with pytest.raises(mcp_tools.ToolError) as refused:
+        mcp_tools.set_llm_provider("anthropic")
+
+    assert reported == str(refused.value)
 
 
 def test_llm_status_reports_key_presence_not_the_key(monkeypatch):

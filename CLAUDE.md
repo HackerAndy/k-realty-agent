@@ -141,6 +141,17 @@ same code. Two rules the screen depends on:
   environment → documented default (Settings beats a stale env var). Whatever
   runs a model also says which one: the agent announces it, an extraction
   records it on the run, Settings shows the resolved model.
+  **Three providers keep their settings, one is armed.** Each of `anthropic` /
+  `openai_compatible` / `claude_code` stores its own key, model and URL under
+  `llm_provider:<name>`; the `llm_provider` record holds nothing but a pointer to
+  the active one. Configuring a second provider must never cost you the first
+  one's key — the single-record shape did exactly that, and you found out on
+  switching back. On the Settings screen the tick, and only the tick, means "this
+  is what runs"; saving a provider you are not using does not switch to it.
+  `claude_code` exports **no** key into the environment (a stored one reaches its
+  subprocess and nothing else): blank means the CLI's own subscription login, and
+  a key means per-token API billing, so a variable set for another provider must
+  never decide that.
 - **Portability.** `core/` and `evals/` never import langgraph/langchain (CI lint:
   `scripts/check_portability.py`). The anthropic SDK is allowed.
 - **Logging standard.** Every deterministic failure → one structured record via

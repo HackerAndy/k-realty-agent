@@ -18,7 +18,7 @@ import core.tools.credential_store as cs
 import core.tools.llm_provider as lp
 
 _ENV_VARS = ("LLM_PROVIDER", "ANTHROPIC_API_KEY", "AGENT_MODEL",
-             "OMLX_BASE_URL", "OMLX_MODEL", "OMLX_API_KEY")
+             "OMLX_BASE_URL", "OMLX_MODEL", "OMLX_API_KEY", "CLAUDE_CODE_MODEL")
 
 
 def _isolate(tmp_path, monkeypatch):
@@ -66,7 +66,81 @@ def test_stored_api_key_is_scoped_to_its_provider(tmp_path, monkeypatch):
 
     assert lp.stored_api_key("anthropic") == "sk-test"
     assert lp.stored_api_key("openai_compatible") is None
-    assert lp.stored_api_key() == "sk-test"  # unscoped: whatever is stored
+    assert lp.stored_api_key() == "sk-test"  # unscoped: whatever is active
+
+
+def test_claude_code_exports_no_key_into_the_environment(tmp_path, monkeypatch):
+    """A billing decision, not a detail. The CLI reads ANTHROPIC_API_KEY from its
+    environment, so exporting one here would settle who pays for every process
+    that inherits it — including ones the operator never pointed at the CLI."""
+    _isolate(tmp_path, monkeypatch)
+    lp.store_llm_credential("claude_code", api_key="sk-metered", model="opus")
+
+    assert lp.load_into_env() is True
+    assert os.environ["LLM_PROVIDER"] == "claude_code"
+    assert os.environ["CLAUDE_CODE_MODEL"] == "opus"
+    assert "ANTHROPIC_API_KEY" not in os.environ
+    # It still reaches the one place that needs it: the CLI's own subprocess.
+    assert lp.resolve().api_key == "sk-metered"
+
+
+# --- three providers, one of them armed --------------------------------------
+#
+# The store used to hold a single record: the active provider WITH its settings.
+# Configuring a second provider therefore overwrote the first one's key, and the
+# operator only found out on switching back. Each provider now keeps its own
+# settings and the record holds nothing but a pointer.
+
+def test_each_provider_keeps_its_own_settings(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    lp.store_llm_credential("anthropic", api_key="sk-test", model="claude-opus-4-8")
+    lp.store_llm_credential("openai_compatible", base_url="http://box:9090/v1", model="qwen-30b")
+
+    assert lp.configured_provider() == "openai_compatible"
+    assert lp.stored_api_key("anthropic") == "sk-test", "switching must not discard a key"
+    assert lp.resolve(provider="anthropic").model == "claude-opus-4-8"
+    assert lp.resolve().model == "qwen-30b"
+
+
+def test_saving_a_provider_can_leave_the_running_one_alone(tmp_path, monkeypatch):
+    """Editing a provider you are not using must not switch the harness onto it."""
+    _isolate(tmp_path, monkeypatch)
+    lp.store_llm_credential("anthropic", api_key="sk-test")
+
+    lp.store_llm_credential("openai_compatible", base_url="http://box:9090/v1",
+                            model="qwen-30b", activate=False)
+
+    assert lp.configured_provider() == "anthropic"
+    assert lp.resolve().provider == "anthropic"
+    assert lp.settings_for("openai_compatible")["model"] == "qwen-30b"
+
+
+def test_the_first_provider_saved_is_armed_even_without_asking(tmp_path, monkeypatch):
+    """Otherwise a first-time setup stores a provider nothing uses, and the
+    harness reports no model for no visible reason."""
+    _isolate(tmp_path, monkeypatch)
+
+    lp.store_llm_credential("anthropic", api_key="sk-test", activate=False)
+
+    assert lp.configured_provider() == "anthropic"
+
+
+def test_a_legacy_store_keeps_its_key_when_another_provider_is_saved(tmp_path, monkeypatch):
+    """The old shape, written by an earlier version, must survive the split —
+    silently losing the key on first save would be the exact bug this prevents,
+    arriving at upgrade time instead."""
+    _isolate(tmp_path, monkeypatch)
+    lp.CredentialStore().set(lp.LLM_CREDENTIAL_KEY, provider="anthropic",
+                             api_key="sk-old", model="claude-opus-4-8")
+    assert lp.resolve().api_key == "sk-old", "the legacy shape must read before it migrates"
+
+    lp.store_llm_credential("claude_code", model="sonnet")
+
+    assert lp.configured_provider() == "claude_code"
+    assert lp.stored_api_key("anthropic") == "sk-old"
+    assert lp.resolve(provider="anthropic").model == "claude-opus-4-8"
+    # The pointer record now holds nothing but the pointer.
+    assert lp.CredentialStore().get(lp.LLM_CREDENTIAL_KEY) == {"provider": "claude_code"}
 
 
 # --- resolve(): the one answer to "which model" ------------------------------

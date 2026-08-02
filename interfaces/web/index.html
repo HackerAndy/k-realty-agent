@@ -79,6 +79,39 @@
   .seg { display: inline-flex; gap: 4px; border: 1px solid var(--border); border-radius: 999px; padding: 4px; margin-bottom: 16px; }
   .seg button { font-size: 13px; border: none; background: transparent; color: var(--muted); padding: 6px 14px; border-radius: 999px; }
   .seg button.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+
+  /* ── Which LLM runs: three cards, one of them armed ──────────────────────
+     Cards rather than a segmented control because each provider now keeps its
+     own settings, so each has its own state to show. Selecting one opens its
+     settings; the green tick says which one is actually running, and it is the
+     only thing on the card that means that — a highlighted border only ever
+     means "this is the one you are looking at". */
+  .picks { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-bottom: 12px; }
+  /* Explicitly top-aligned: a <button> centres its content, so a one-line card
+     next to a wrapped one had their names on different baselines. */
+  .pick { position: relative; display: flex; flex-direction: column; align-items: flex-start; justify-content: flex-start;
+    text-align: left; border: 1px solid var(--border); border-radius: 12px; background: var(--card); padding: 12px 30px 12px 14px; }
+  .pick:hover { border-color: var(--accent); }
+  .pick.sel { border-color: var(--accent); background: var(--accent-soft); }
+  .pick .pname { font-size: 13.5px; font-weight: 600; color: var(--text); display: block; }
+  .pick .psub { font-size: 11.5px; color: var(--muted); display: block; margin-top: 3px; line-height: 1.35; }
+  .pick .tick { position: absolute; top: 9px; right: 9px; width: 18px; height: 18px; border-radius: 50%;
+    background: var(--success); color: #fff; font-size: 11px; line-height: 18px; text-align: center; font-weight: 700; }
+  :root[data-theme="dark"] .pick .tick { color: #12160f; }
+
+  /* The switch that arms one. Radio semantics in a switch's shape: exactly one
+     provider runs, so this turns ON, and the way to turn it off is to turn
+     another one on. Saying that on screen beats a switch that silently ignores
+     a click. */
+  .switch { display: inline-flex; align-items: center; gap: 10px; border: none; background: transparent; padding: 0; text-align: left; }
+  .switch .track { width: 40px; height: 23px; border-radius: 999px; background: var(--border); position: relative; flex: none; transition: background .15s ease; }
+  .switch .knob { position: absolute; top: 3px; left: 3px; width: 17px; height: 17px; border-radius: 50%; background: var(--card); box-shadow: var(--shadow); transition: left .15s ease; }
+  .switch.on .track { background: var(--success); }
+  .switch.on .knob { left: 20px; }
+  .switch .slabel { font-size: 13px; color: var(--text); }
+  .switch .slabel .sub2 { display: block; font-size: 11.5px; color: var(--faint); }
+  .switch[disabled] { cursor: default; }
+  .switch[disabled] .track { opacity: .5; }
   .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .kv { font-size: 12.5px; color: var(--muted); margin-bottom: 14px; }
   .kv b { color: var(--text); font-weight: 600; }
@@ -2347,7 +2380,54 @@
   }
 
   // ── Settings: which LLM the harness drives. Stored encrypted in .secrets/. ──
+  //
+  // Each provider keeps its own settings and exactly one is armed, so this
+  // screen has two separate jobs and must not blur them: the CARDS say which is
+  // running (the green tick, and nothing else, means that), and the SWITCH under
+  // them is the only control that changes it. Selecting a card just opens its
+  // settings — an operator can look at, or edit, a provider they are not using
+  // without disturbing the one that is.
   const llmForm = { provider: null, models: [] };
+
+  /** The three choices, each showing its own state, the armed one ticked. */
+  function providerPicksHTML(providers) {
+    return '<div class="picks">' + providers.map(p => {
+      const sub = p.blocked
+        ? '<span style="color:var(--danger)">Needs setting up</span>'
+        : esc(p.model) + (p.base_url ? '<br>' + esc(hostOnly(p.base_url)) : '');
+      return '<button class="pick' + (p.provider === llmForm.provider ? ' sel' : '') + '"' +
+        ' aria-pressed="' + (p.provider === llmForm.provider) + '"' +
+        ' onclick="pickProvider(\'' + p.provider + '\')">' +
+        (p.active ? '<span class="tick" aria-label="In use" title="In use for every model call">&#10003;</span>' : '') +
+        '<span class="pname">' + esc(p.label) + '</span>' +
+        '<span class="psub">' + sub + '</span></button>';
+    }).join('') + '</div>';
+  }
+
+  /** The switch that arms the selected provider — first thing under the three. */
+  function providerSwitchHTML(sel) {
+    if (!sel) return '';
+    // Dead only when nothing on this screen could fix it (the CLI isn't
+    // installed). A provider that merely lacks a key stays live: the switch
+    // saves the form first, so filling the key and flipping it is one step.
+    const dead = sel.active || sel.blocked_fix === 'install';
+    const label = sel.active
+      ? 'In use for every model call<span class="sub2">Exactly one provider runs. ' +
+        'To stop using this one, turn another on.</span>'
+      : (sel.blocked_fix === 'install'
+        ? 'Can’t be used yet<span class="sub2">' + esc(sel.blocked) + '</span>'
+        : 'Use ' + esc(sel.label) + ' for every model call<span class="sub2">Switches the ' +
+          'harness over and saves anything typed below. The other two keep their settings.</span>');
+    return '<button class="switch' + (sel.active ? ' on' : '') + '" role="switch"' +
+      ' aria-checked="' + !!sel.active + '"' + (dead ? ' disabled' : '') +
+      ' onclick="saveLlmProvider(true)" style="margin-bottom:16px">' +
+      '<span class="track"><span class="knob"></span></span>' +
+      '<span class="slabel">' + label + '</span></button>';
+  }
+
+  function hostOnly(url) {
+    try { return new URL(url).host; } catch (e) { return url; }
+  }
 
   async function renderSettings() {
     setPanelLoading('<div class="empty">Loading settings…</div>', 'settings');
@@ -2356,30 +2436,25 @@
     if (!credCache) await loadCredentials();
     if (llmForm.provider === null) llmForm.provider = cfg.provider || 'anthropic';
 
+    const providers = cfg.providers || [];
+    const sel = providers.find(p => p.provider === llmForm.provider) || null;
+
     // `model` here is what will ACTUALLY run, not just what was typed into the
     // field: a provider saved without one still runs something, and a screen
     // that stayed blank while a built-in default ran is a black box.
     const modelNote = cfg.model_source === 'default'
       ? ' <span class="sub">(built-in default — nothing chosen yet)</span>'
       : (cfg.model_source === 'environment' ? ' <span class="sub">(from the environment)</span>' : '');
+    const activeLabel = (providers.find(p => p.active) || {}).label || cfg.provider;
     const currently = cfg.configured
-      ? 'Currently: <b>' + esc(cfg.provider === 'anthropic' ? 'Claude API' : 'Local / OpenAI-compatible') + '</b>' +
-        (cfg.model ? ' · <b>' + esc(cfg.model) + '</b>' + modelNote : '') +
-        (cfg.base_url ? ' · ' + esc(cfg.base_url) : '') +
-        '<div class="sub" style="margin-top:4px">Every model call the harness makes — reading a ' +
-        'document, suggesting a name, building a parser — uses this one.</div>'
+      ? 'Every model call the harness makes — reading a document, suggesting a name, building a ' +
+        'parser — goes to <b>' + esc(activeLabel) + '</b>' +
+        (cfg.model ? ' · <b>' + esc(cfg.model) + '</b>' + modelNote : '') + '.'
       : 'No LLM provider is set up yet.';
-
-    const seg = '<div class="seg">' +
-      '<button class="' + (llmForm.provider === 'anthropic' ? 'on' : '') + '" onclick="pickProvider(\'anthropic\')">Claude API</button>' +
-      '<button class="' + (llmForm.provider === 'openai_compatible' ? 'on' : '') + '" onclick="pickProvider(\'openai_compatible\')">Local server</button>' +
-      '<button class="' + (llmForm.provider === 'claude_code' ? 'on' : '') + '" onclick="pickProvider(\'claude_code\')">Claude Code CLI</button>' +
-      '</div>';
 
     // A key already in the vault never has to be retyped: leaving the field
     // blank keeps it. Only the fact that one is stored is shown, never its value.
-    const sameProvider = cfg.provider === llmForm.provider;
-    const keyStored = !!cfg.api_key_set && sameProvider;
+    const keyStored = !!(sel && sel.api_key_set);
     const keyHint = keyStored
       ? '<span class="sub">A key is already saved in .secrets/ — leave blank to keep it, or type a new one to replace it.</span>'
       : '<span class="sub">Stored encrypted in .secrets/ — never written into the repo.</span>';
@@ -2396,8 +2471,7 @@
         'test gate, reconciliation and every other check still run exactly the same way ' +
         'afterwards.</div>' +
         '<div class="field"><label for="llm-model">Model</label>' +
-        '<input type="text" id="llm-model" value="' +
-        esc(sameProvider && cfg.model ? cfg.model : ((cfg.defaults || {}).claude_code || 'sonnet')) +
+        '<input type="text" id="llm-model" value="' + esc(sel ? sel.model : '') +
         '" placeholder="sonnet, opus, or a full model name">' +
         '<span class="sub">An alias such as <code>sonnet</code> or <code>opus</code> lets the CLI ' +
         'pick the current version; a full name pins one.</span></div>' +
@@ -2416,15 +2490,14 @@
         '<input type="password" id="llm-key" placeholder="' + keyPlaceholder + '" autocomplete="off">' +
         keyHint + '</div>' +
         '<div class="field"><label for="llm-model">Model</label>' +
-        '<input type="text" id="llm-model" value="' +
-        esc(sameProvider && cfg.model ? cfg.model : ((cfg.defaults || {}).anthropic || '')) + '"></div>';
+        '<input type="text" id="llm-model" value="' + esc(sel ? sel.model : '') + '"></div>';
     } else {
       const opts = llmForm.models.length
         ? '<div class="field"><label for="llm-model-sel">Model</label><select id="llm-model-sel">' +
-          llmForm.models.map(m => '<option' + (sameProvider && m === cfg.model ? ' selected' : '') + '>' + esc(m) + '</option>').join('') +
+          llmForm.models.map(m => '<option' + (sel && m === sel.model ? ' selected' : '') + '>' + esc(m) + '</option>').join('') +
           '</select><span class="sub">Listed live from that server.</span></div>'
         : '';
-      const baseVal = (sameProvider && cfg.base_url) ? cfg.base_url : 'http://klabss-MacBook-Pro.local:9090/v1';
+      const baseVal = (sel && sel.base_url) || '';
       form =
         '<div class="field"><label for="llm-base">Base URL</label>' +
         '<input type="text" id="llm-base" value="' + esc(baseVal) + '"></div>' +
@@ -2435,14 +2508,21 @@
         opts +
         (llmForm.models.length ? '' :
           '<div class="field"><label for="llm-model">Model</label><input type="text" id="llm-model" value="' +
-          esc(sameProvider && cfg.model ? cfg.model : '') + '" placeholder="type it exactly, or list them above"></div>');
+          esc(sel ? sel.model : '') + '" placeholder="type it exactly, or list them above"></div>');
     }
 
+    // "Save" never switches provider — that is the switch's job alone. Editing
+    // the local server's model while Claude Code is running must not quietly
+    // move the harness back onto the local server.
+    const saveLabel = sel && sel.active ? 'Save changes' : 'Save without switching';
+
     setPanel(
-      '<div class="setting"><h2>LLM provider</h2>' +
-      '<p class="note">Which model the harness uses to build parsers/scrapers and extract data.</p>' +
-      '<div class="kv">' + currently + '</div>' + seg + form +
-      '<div class="row"><button class="btn" onclick="saveLlmProvider()">Save provider</button></div></div>' +
+      '<div class="setting"><h2>Coding method &amp; model</h2>' +
+      '<p class="note">Which model the harness uses to build parsers/scrapers and extract data. ' +
+      'All three keep their own settings; the one with a &#10003; is the one that runs.</p>' +
+      '<div class="kv">' + currently + '</div>' +
+      providerPicksHTML(providers) + providerSwitchHTML(sel) + form +
+      '<div class="row"><button class="btn" onclick="saveLlmProvider(false)">' + saveLabel + '</button></div></div>' +
       credentialsHTML(), 'settings');
   }
 
@@ -2882,9 +2962,14 @@
     }
   }
 
-  async function saveLlmProvider() {
+  /** Save the visible provider's settings. `activate` also arms it.
+   *
+   *  The switch saves as well as arming, deliberately: a key typed into the form
+   *  and not yet saved would otherwise be thrown away by the very click meant to
+   *  start using it. */
+  async function saveLlmProvider(activate) {
     clearToast();
-    const args = { provider: llmForm.provider };
+    const args = { provider: llmForm.provider, activate: !!activate };
     const keyEl = el('llm-key');
     args.api_key = keyEl ? keyEl.value : null;
     if (llmForm.provider === 'claude_code') {
@@ -2898,13 +2983,22 @@
     }
     try {
       const r = await callTool('set_llm_provider', args);
-      toast('LLM provider saved.' + (r.reused_stored_api_key ? ' Kept the API key already in the vault.' : ''), true);
+      const name = (r.providers || []).find(p => p.provider === llmForm.provider);
+      // toast() writes textContent, so nothing here is escaped — it must not be.
+      toast((activate ? (name ? name.label : 'That provider') + ' is now in use for every model call.'
+                      : 'Saved. Still using ' + providerInUse(r) + '.') +
+            (r.reused_stored_api_key ? ' Kept the API key already in the vault.' : ''), true);
       await loadStatus();
       llmForm.models = [];
       await renderSettings();
     } catch (e) {
       toast('Couldn’t save: ' + e.message, false);
     }
+  }
+
+  function providerInUse(status) {
+    const active = (status.providers || []).find(p => p.active);
+    return active ? active.label : (status.provider || 'nothing');
   }
 
   // Stop waiting after this long. Without a deadline a wedged worker — or an

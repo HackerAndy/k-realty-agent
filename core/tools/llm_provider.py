@@ -31,6 +31,14 @@ log = get_logger("core.tools.llm_provider")
 
 # Reserved key under which the LLM credential lives in the credential store —
 # stored "alongside the rest" of the secrets, but not a data source.
+#
+# It holds ONE field: which provider is active. Each provider's own settings —
+# key, model, base URL — live beside it under `llm_provider:<provider>`, so
+# switching provider is a pointer move and nothing is lost. The old shape kept
+# the active provider's details in this record, which meant configuring a second
+# provider overwrote the first one's key: the operator would switch back and
+# find it gone, with nothing on screen having said so. `_migrate_pointer()`
+# lifts an old store into the new shape the first time anything is written.
 LLM_CREDENTIAL_KEY = "llm_provider"
 
 DEFAULT_PROVIDER = "anthropic"
@@ -119,11 +127,57 @@ class LLMChoice:
         return f"{self.model} ({self.provider}, {_WHERE.get(self.model_source, self.model_source)})"
 
 
-def _stored() -> dict:
+def _settings_key(provider: str) -> str:
+    """Where one provider's own settings live, active or not."""
+    return f"{LLM_CREDENTIAL_KEY}:{normalise_provider(provider)}"
+
+
+def _pointer() -> dict:
+    """The record naming the active provider. `{}` when nothing is set up."""
     try:
         return dict(CredentialStore().get(LLM_CREDENTIAL_KEY))
     except CredentialStoreError:
         return {}
+
+
+def settings_for(provider: str) -> dict:
+    """That provider's saved settings — key, model, base URL — whether or not it
+    is the active one.
+
+    Kept per provider so the three can be configured independently and switched
+    between. Falls back to the legacy single-record shape when the store predates
+    the split, so an existing setup keeps working before it is ever rewritten.
+    """
+    provider = normalise_provider(provider)
+    if not provider:
+        return {}
+    try:
+        own = CredentialStore().try_get(_settings_key(provider))
+    except CredentialStoreError:
+        return {}
+    if own is not None:
+        return dict(own)
+    legacy = _pointer()
+    if normalise_provider(legacy.get("provider")) == provider:
+        return {k: v for k, v in legacy.items() if k != "provider"}
+    return {}
+
+
+def _migrate_pointer(store: CredentialStore) -> None:
+    """Lift a legacy store into the split shape, before anything overwrites it.
+
+    Idempotent, and only ever moves details DOWN into the provider they already
+    belonged to — so running it can't hand one provider another's key. A store
+    already in the new shape has nothing to move.
+    """
+    pointer = _pointer()
+    provider = normalise_provider(pointer.get("provider"))
+    details = {k: v for k, v in pointer.items() if k != "provider"}
+    if not provider or not details:
+        return
+    if store.try_get(_settings_key(provider)) is None:
+        store.set(_settings_key(provider), **details)
+    store.set(LLM_CREDENTIAL_KEY, provider=provider)
 
 
 def _pick(explicit: str | None, stored: str | None, env_var: str, default: str) -> tuple[str, str]:
@@ -150,20 +204,16 @@ def resolve(
     environment deliberately — the GUI is where the choice is made and shown, so
     a stale env var must not quietly redirect a run somewhere else.
 
-    A stored model/base_url/key is only used when the stored credential is for
-    the provider being resolved. Otherwise switching provider would carry the
-    other one's model name across, and the request fails (or worse, runs
-    something unintended).
+    Settings are read from the provider being resolved and from nowhere else, so
+    switching provider can never carry the other one's model name or key across
+    — that would fail the request, or worse, run something unintended.
     """
-    cred = _stored()
-    stored_provider = normalise_provider(cred.get("provider"))
     resolved_provider, provider_source = _pick(
-        normalise_provider(provider) or None, stored_provider or None,
+        normalise_provider(provider) or None, configured_provider(),
         "LLM_PROVIDER", DEFAULT_PROVIDER,
     )
     resolved_provider = normalise_provider(resolved_provider) or DEFAULT_PROVIDER
-    # Only trust the stored details if they belong to this provider.
-    own = cred if stored_provider == resolved_provider else {}
+    own = settings_for(resolved_provider)
 
     if resolved_provider == "anthropic":
         chosen_model, model_source = _pick(model, own.get("model"), "AGENT_MODEL", DEFAULT_MODEL)
@@ -226,12 +276,8 @@ def chat_completion(base_url: str, api_key: str, payload: dict, timeout_s: int =
 
 
 def is_configured() -> bool:
-    """True if an LLM credential is stored (needs the master key to check)."""
-    try:
-        CredentialStore().get(LLM_CREDENTIAL_KEY)
-        return True
-    except CredentialStoreError:
-        return False
+    """True if a provider has been made active (needs the master key to check)."""
+    return configured_provider() is not None
 
 
 def store_llm_credential(
@@ -239,52 +285,62 @@ def store_llm_credential(
     api_key: str | None = None,
     base_url: str | None = None,
     model: str | None = None,
+    activate: bool = True,
 ) -> None:
-    """Store the harness's LLM choice as a secret. `api_key` for anthropic;
-    `base_url`+`model` (key optional) for an openai_compatible server."""
-    fields: dict[str, str] = {"provider": provider}
+    """Save one provider's settings. `api_key` for anthropic; `base_url`+`model`
+    (key optional) for an openai_compatible server; model only for claude_code.
+
+    Saving and choosing are separate acts: `activate=False` records the settings
+    without changing which provider runs, so the operator can set up a second one
+    while the first keeps working. When nothing is active yet, the first provider
+    saved becomes the active one regardless — a stored provider that nothing uses
+    would leave the harness with no model for no visible reason.
+    """
+    provider = normalise_provider(provider) or DEFAULT_PROVIDER
+    store = CredentialStore()
+    _migrate_pointer(store)
+    fields: dict[str, str] = {}
     if api_key:
         fields["api_key"] = api_key
     if base_url:
         fields["base_url"] = base_url
     if model:
         fields["model"] = model
-    CredentialStore().set(LLM_CREDENTIAL_KEY, **fields)
+    store.set(_settings_key(provider), **fields)
+    if activate or configured_provider() is None:
+        store.set(LLM_CREDENTIAL_KEY, provider=provider)
 
 
 def configured_provider() -> str | None:
-    try:
-        return CredentialStore().get(LLM_CREDENTIAL_KEY).get("provider", DEFAULT_PROVIDER)
-    except CredentialStoreError:
+    """Which provider is active, or None if none has been chosen."""
+    pointer = _pointer()
+    if not pointer:
         return None
+    return normalise_provider(pointer.get("provider")) or DEFAULT_PROVIDER
 
 
 def current_config() -> dict | None:
-    """The stored provider config with the api_key masked — for display."""
-    try:
-        cred = dict(CredentialStore().get(LLM_CREDENTIAL_KEY))
-    except CredentialStoreError:
+    """The ACTIVE provider's settings with the api_key masked — for display."""
+    provider = configured_provider()
+    if provider is None:
         return None
-    if cred.get("api_key"):
-        cred["api_key"] = "<stored>"
-    return cred
+    cfg = {"provider": provider, **settings_for(provider)}
+    if cfg.get("api_key"):
+        cfg["api_key"] = "<stored>"
+    return cfg
 
 
 def stored_api_key(provider: str | None = None) -> str | None:
     """The RAW stored api_key, so a caller can reuse it when the operator didn't
     re-type it. Server-side only — never return this to a client.
 
-    `provider` guards against handing an Anthropic key to an OpenAI-compatible
-    server (or vice versa): the key is only returned if the stored credential is
-    for that same provider.
+    Scoped to one provider, which is what stops an Anthropic key being handed to
+    a local OpenAI-compatible server. Omitting `provider` means the active one.
     """
-    try:
-        cred = CredentialStore().get(LLM_CREDENTIAL_KEY)
-    except CredentialStoreError:
+    provider = normalise_provider(provider) if provider else configured_provider()
+    if not provider:
         return None
-    if provider is not None and cred.get("provider", DEFAULT_PROVIDER) != provider:
-        return None
-    return cred.get("api_key") or None
+    return settings_for(provider).get("api_key") or None
 
 
 def is_local_network_host(host: str) -> bool:
@@ -379,23 +435,37 @@ def list_models(base_url: str, api_key: str | None = None) -> list[str]:
 
 
 def load_into_env() -> bool:
-    """Load the stored provider config into the env vars orchestration/agent.py
+    """Load the ACTIVE provider's settings into the env vars orchestration/agent.py
     reads (LLM_PROVIDER, plus ANTHROPIC_API_KEY/AGENT_MODEL or OMLX_*). Returns
-    True if a usable provider was loaded. No-op-safe if nothing is stored."""
-    try:
-        cred = CredentialStore().get(LLM_CREDENTIAL_KEY)
-    except CredentialStoreError:
+    True if a usable provider was loaded. No-op-safe if nothing is stored.
+
+    Only the active provider's own variables are exported — never another
+    provider's. Nothing is unset, so a key that was already in the real
+    environment before the harness started stays there; `resolve()` is what
+    decides whether it is used, and for claude_code it deliberately does not.
+    """
+    provider = configured_provider()
+    if provider is None:
         return False
-    provider = cred.get("provider", DEFAULT_PROVIDER)
+    cred = settings_for(provider)
     os.environ["LLM_PROVIDER"] = provider
 
-    if provider in ("anthropic", "claude"):
+    if provider == "anthropic":
         api_key = cred.get("api_key")
         if not api_key:
             return False
         os.environ["ANTHROPIC_API_KEY"] = api_key
         if cred.get("model"):
             os.environ["AGENT_MODEL"] = cred["model"]
+        return True
+
+    if provider == "claude_code":
+        # No key is exported, even when one is stored. The CLI reads
+        # ANTHROPIC_API_KEY from its environment, so exporting it here would
+        # decide a billing question process-wide; `run_claude_code` passes the
+        # stored key (or removes the variable) for its own subprocess only.
+        if cred.get("model"):
+            os.environ["CLAUDE_CODE_MODEL"] = cred["model"]
         return True
 
     # openai_compatible / local — a key isn't always required

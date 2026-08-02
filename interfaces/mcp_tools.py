@@ -1075,6 +1075,73 @@ def pending_approvals() -> list[dict]:
     return [{"key": s.key, "label": s.label} for s in source_status.pending_approvals(services)]
 
 
+# What each provider is called on screen. One map, so a provider added to
+# llm_provider.PROVIDERS and forgotten here shows its raw key rather than being
+# silently mislabelled as another provider — which is what happened when the
+# Settings page described claude_code as "Local / OpenAI-compatible".
+PROVIDER_LABELS = {
+    "anthropic": "Claude API",
+    "openai_compatible": "Local server",
+    "claude_code": "Claude Code CLI",
+}
+
+
+def provider_label(provider: str | None) -> str:
+    return PROVIDER_LABELS.get(provider or "", provider or "none")
+
+
+def _provider_problem(provider: str, settings: dict) -> tuple[str, str]:
+    """Why this provider can't run, and what would fix it. `("", "")` when it can.
+
+    ONE function, called both when saving settings and when reporting a
+    provider's state to the screen. Two copies of "is this configured?" drift,
+    and the drift is silent: the screen offers a switch that arms a provider the
+    next run can't use.
+
+    The second value is `"settings"` when this screen's own form fixes it and
+    `"install"` when it takes something outside the harness — the difference
+    between a switch worth leaving live and one that can only fail.
+    """
+    if provider == "anthropic":
+        if not settings.get("api_key"):
+            return "An Anthropic API key is required.", "settings"
+    elif provider == "claude_code":
+        from orchestration.claude_code import available as cli_available
+        if not cli_available():
+            return (f"The '{llm_provider.CLAUDE_CODE_BINARY}' command isn't on this machine's "
+                    "PATH, so the harness can't run it. Install the Claude Code CLI, or pick "
+                    "a different coding method.", "install")
+    else:
+        if not settings.get("base_url"):
+            return "A base URL is required for an OpenAI-compatible server.", "settings"
+        if not settings.get("model"):
+            return "A model is required — list the server's models and pick one.", "settings"
+    return "", ""
+
+
+def _provider_status(provider: str, active: str | None) -> dict:
+    """One provider's saved settings for the picker — never the key itself."""
+    settings = llm_provider.settings_for(provider)
+    choice = llm_provider.resolve(provider=provider)
+    problem, fix = _provider_problem(provider, settings)
+    return {"provider": provider,
+            "label": provider_label(provider),
+            "active": provider == active,
+            # Saved settings of its own, as opposed to running on defaults.
+            "configured": bool(settings),
+            # Both RESOLVED — what a run would actually use, defaults included —
+            # so the form can be filled from the server's own answer instead of
+            # the page keeping a second copy of every default.
+            "model": choice.model,
+            "model_source": choice.model_source,
+            "base_url": choice.base_url,
+            "api_key_set": bool(settings.get("api_key")),
+            # Empty when this provider could be switched to right now. The
+            # picker shows it instead of letting the operator arm a broken one.
+            "blocked": problem,
+            "blocked_fix": fix}
+
+
 def llm_status() -> dict:
     """Which LLM provider and model the harness will actually use. `api_key_set`
     says whether a key is in the vault — never the key itself.
@@ -1086,22 +1153,26 @@ def llm_status() -> dict:
     """
     cfg = llm_provider.current_config() or {}
     choice = llm_provider.resolve()
+    active = cfg.get("provider") or choice.provider
+    # Note there is no separate map of per-provider default models: each entry in
+    # `providers` already reports the model that provider WOULD run, defaults
+    # included, with `model_source` saying whether the operator chose it. Two
+    # answers to "what will run" is the black box the resolved values close.
     return {"configured": llm_provider.is_configured(),
-            "provider": cfg.get("provider") or choice.provider,
+            "provider": active,
             "model": choice.model,
             "model_source": choice.model_source,
             "base_url": cfg.get("base_url") or choice.base_url,
             "api_key_set": bool(cfg.get("api_key")),
+            # Every provider, not just the active one: each keeps its own
+            # settings now, so the screen can show all three at once and say
+            # which is running rather than only describing the one in front.
+            "providers": [_provider_status(name, active) for name in llm_provider.PROVIDERS],
             # Where a document's text would actually GO. Asking "may I send this
             # off your machine?" when the model runs on the LAN would be a lie,
             # and the answer differs per provider, so it's computed, not assumed.
             "destination": _llm_destination(cfg),
-            "offsite": _llm_is_offsite(cfg),
-            # What each provider would run if the operator doesn't name a model,
-            # so the form can show the truth instead of its own copy of a constant.
-            "defaults": {"anthropic": llm_provider.DEFAULT_MODEL,
-                         "openai_compatible": llm_provider.DEFAULT_OMLX_MODEL,
-                         "claude_code": llm_provider.DEFAULT_CLAUDE_CODE_MODEL}}
+            "offsite": _llm_is_offsite(cfg)}
 
 
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
@@ -1619,9 +1690,10 @@ def set_llm_provider(
     api_key: str | None = None,
     base_url: str | None = None,
     model: str | None = None,
+    activate: bool = True,
 ) -> dict:
-    """Store which LLM the harness uses (encrypted in .secrets/) and load it into
-    the environment immediately.
+    """Store one provider's settings (encrypted in .secrets/) and load the active
+    provider into the environment.
 
     Three shapes, because the third is not a model endpoint at all:
       anthropic          — needs an api_key.
@@ -1630,6 +1702,10 @@ def set_llm_provider(
                            itself, so a key is OPTIONAL here; supplying one just
                            means the subprocess bills that key instead. Only the
                            model alias is required, and it defaults.
+
+    Each provider keeps its own settings, so `activate=False` saves without
+    changing which one runs — that is how the operator edits a provider they are
+    not currently using without disturbing the one that is.
     """
     if provider not in llm_provider.PROVIDERS:
         raise ToolError(f"Unknown provider '{provider}'. Known: {list(llm_provider.PROVIDERS)}")
@@ -1646,25 +1722,17 @@ def set_llm_provider(
         api_key = llm_provider.stored_api_key(provider)
         reused_key = api_key is not None
 
-    if provider == "anthropic":
-        if not api_key:
-            raise ToolError("An Anthropic API key is required.")
-    elif provider == "claude_code":
-        from orchestration.claude_code import available as _cli_available
-        if not _cli_available():
-            raise ToolError(
-                f"The '{llm_provider.CLAUDE_CODE_BINARY}' command isn't on this machine's "
-                "PATH, so the harness can't run it. Install the Claude Code CLI, or pick "
-                "a different coding method.")
+    if provider == "claude_code":
         base_url = None  # not an endpoint; storing one would be a fiction
-    else:
-        if not base_url:
-            raise ToolError("A base URL is required for an OpenAI-compatible server.")
-        if not model:
-            raise ToolError("A model is required — list the server's models and pick one.")
+
+    problem, _fix = _provider_problem(
+        provider, {"api_key": api_key, "base_url": base_url, "model": model})
+    if problem:
+        raise ToolError(problem)
 
     try:
-        llm_provider.store_llm_credential(provider, api_key=api_key, base_url=base_url, model=model)
+        llm_provider.store_llm_credential(provider, api_key=api_key, base_url=base_url,
+                                          model=model, activate=activate)
         llm_provider.load_into_env()
     except Exception as exc:
         raise ToolError(f"Couldn't save the LLM provider: {exc}") from exc

@@ -311,7 +311,7 @@ def test_an_ambient_api_key_does_not_move_the_operator_off_their_subscription(cl
 
 def test_the_resolver_does_not_invent_a_key_from_the_environment(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ambient")
-    monkeypatch.setattr(claude_code.llm_provider, "_stored", lambda: {})
+    monkeypatch.setattr(claude_code.llm_provider, "settings_for", lambda provider: {})
 
     choice = claude_code.llm_provider.resolve(provider="claude_code")
 
