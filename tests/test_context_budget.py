@@ -226,6 +226,15 @@ class _RecordingAdapter:
                         for r in results)
 
 
+def _distinct_turn(i):
+    """A turn whose tool call differs from the others, so the repetition detector
+    stays out of the way of whatever is actually under test."""
+    from orchestration.agent import ProviderTurn, ToolCall
+    return ProviderTurn(assistant_payload=[], text_blocks=[f"step {i}"],
+                        tool_calls=[ToolCall(id=str(i), name="run_command",
+                                             input={"command": f"pytest tests/test_{i}.py"})])
+
+
 def _cmd_turn(call_id):
     from orchestration.agent import ProviderTurn, ToolCall
     return ProviderTurn(assistant_payload=[], text_blocks=["thinking"],
@@ -546,3 +555,49 @@ def test_a_second_refusal_gives_up_rather_than_looping(monkeypatch):
         raise AssertionError("a hopeless run must not be swallowed")
 
     assert any("where it went" in e for e in events), "and it explains what filled it"
+
+
+# --- the turn budget the agent could not see --------------------------------
+
+def test_the_agent_is_told_when_its_budget_runs_low(monkeypatch):
+    """The turn cap ended four of nine builds, and the model had no idea it was
+    approaching one: on_event goes to the operator's screen, not the
+    conversation. Something that cannot see a limit cannot ration against it."""
+    from orchestration import agent
+
+    # Distinct commands per turn: identical ones trip the repetition detector,
+    # which ends the run long before any budget warning is due.
+    turns = [_distinct_turn(i) for i in range(12)]
+    adapter = _RecordingAdapter(turns)
+    monkeypatch.setattr(agent, "_build_adapter", lambda choice: adapter)
+    monkeypatch.setattr(agent.agent_tools, "dispatch", lambda n, a: ("ok", False))
+
+    agent.run_agent("task", "system", on_event=lambda _: None, max_turns=12)
+
+    delivered = "\n".join(str(m.get("content", "")) for m in adapter.messages_seen[-1])
+    assert "10 turns left of 12" in delivered, "warned in time to change course"
+    assert "3 turns left of 12" in delivered, "and told to land it"
+    assert "PASSES" in delivered, "landing means leaving something that works"
+
+
+def test_a_short_run_is_not_nagged_about_a_budget_it_will_not_reach(monkeypatch):
+    from orchestration import agent
+
+    adapter = _RecordingAdapter([_cmd_turn("a")])
+    monkeypatch.setattr(agent, "_build_adapter", lambda choice: adapter)
+    monkeypatch.setattr(agent.agent_tools, "dispatch", lambda n, a: ("ok", False))
+
+    agent.run_agent("task", "system", on_event=lambda _: None, max_turns=40)
+
+    delivered = "\n".join(str(m.get("content", "")) for m in adapter.messages_seen[-1])
+    assert "turns left" not in delivered
+
+
+def test_the_warning_rides_on_a_tool_result():
+    """A standalone message cannot be interleaved with tool_use blocks — providers
+    reject it. Same rail the loop and repetition nudges already use."""
+    from orchestration.agent import _budget_note
+
+    assert _budget_note(turn=30, max_turns=40).startswith("[10 turns left")
+    assert _budget_note(turn=37, max_turns=40).startswith("[3 turns left")
+    assert _budget_note(turn=5, max_turns=40) == ""

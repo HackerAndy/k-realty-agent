@@ -30,12 +30,27 @@ of the run. In that order:
   the numbers `search_files` just gave you.
 - **`read_file(path)`** whole, only for a file you are about to rewrite.
 
-**When something you run fails, call `read_logs` first.** The harness records
-every deterministic failure as a structured record (component, operation, code,
-context, cause, remediation). Read it, understand the actual cause, and fix that
-— don't guess. Some failures are NOT yours to fix (an API usage/billing limit, a
-missing credential, a CAPTCHA, the network): say so plainly and stop, rather than
-thrashing.
+**When something fails, read the failure before you run anything else.** The
+harness records every deterministic failure as a structured record (component,
+operation, code, context, cause, remediation) — call `read_logs` and fix the
+actual cause, don't guess. A pytest failure likewise already states what was
+expected and what it got. Some failures are NOT yours to fix (an API
+usage/billing limit, a missing credential, a CAPTCHA, the network): say so
+plainly and stop, rather than thrashing.
+
+**Do not debug by re-running a script with print statements.** It is the most
+expensive habit available here and it is the one that ends runs: each
+`python -c` spends a turn and fills your context with output you read once, and
+on the runs where it takes hold the budget is gone before the code is right.
+Measured on this harness — eight consecutive debug scripts in a single run, and
+the turn cap reached in four builds out of nine.
+
+If you need to see an intermediate value, assert it in the test instead: the
+failure prints the value for you, costs no extra turn, and leaves a test that is
+better than it was. Change one thing per run and re-read the failure.
+
+**Nothing you ship contains debug output.** A test that prints `DEBUG:` lines is
+one you were still writing.
 
 **Don't repeat yourself.** If you find yourself restating your analysis, stop and
 act instead — write the file, run the test, or say what's blocking you. Text that

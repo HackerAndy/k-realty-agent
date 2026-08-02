@@ -490,6 +490,7 @@ def run_agent(
         nudges = [
             degeneration.LOOP_WARNING if turn_result.looped is not None else "",
             degeneration.RESTATEMENT_WARNING if repeating_itself else "",
+            _budget_note(turn, max_turns),
         ]
         nudge = "\n\n".join(n for n in nudges if n)
         if nudge and results:
@@ -506,6 +507,34 @@ def run_agent(
         AgentResult(final_text, max_turns, tool_calls, context=ledger,
                     stopped_reason=f"Hit the {max_turns}-turn cap without finishing."),
         on_event)
+
+
+# When to tell the agent how much budget is left. Twice, at fixed points, so the
+# warning is information rather than a drumbeat that costs context every turn.
+BUDGET_SLOW_DOWN = 10   # turns left: stop exploring, make the change
+BUDGET_LAND_IT = 3      # turns left: leave it working, or say what's wrong
+
+
+def _budget_note(turn: int, max_turns: int) -> str:
+    """What to tell the agent about its remaining turns, or "" for most of a run.
+
+    It cannot see the budget otherwise. `on_event` goes to the operator's screen,
+    not into the conversation, so a model that has spent 36 of 40 turns has no
+    idea — and the turn cap was the single most common way builds ended, four of
+    nine on the last measured run. Something that cannot see a limit cannot
+    ration against it.
+    """
+    remaining = max_turns - turn
+    if remaining == BUDGET_SLOW_DOWN:
+        return (f"[{remaining} turns left of {max_turns}.] Stop exploring and make the "
+                "change. If you are still deciding between approaches, pick the simpler "
+                "one and implement it — an unfinished run leaves the operator nothing.")
+    if remaining == BUDGET_LAND_IT:
+        return (f"[{remaining} turns left of {max_turns}.] Finish now: leave the code and "
+                "its test in a state that PASSES, even if narrower than you intended. If "
+                "you cannot, stop and say plainly what is wrong and what you would try "
+                "next — that is worth more than a half-applied edit.")
+    return ""
 
 
 def _finish(result: AgentResult, on_event: Callable[[str], None]) -> AgentResult:

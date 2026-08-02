@@ -27,6 +27,25 @@ of the run. In that order:
 - **`read_file(path)`** whole, only for a file you are about to rewrite, and for
   the sample document you were given.
 
+**When something fails, read the failure before you run anything else.** A
+pytest failure already states what was expected and what it got; `read_logs` has
+the structured record (component, operation, code, context, cause, remediation)
+for anything the harness ran. Neither costs a turn to re-derive.
+
+**Do not debug by re-running a script with print statements.** It is the most
+expensive habit available here and it is the one that ends runs: each
+`python -c` spends a turn and fills your context with output you read once, and
+on the runs where it takes hold the budget is gone before the parser is right.
+Measured on this harness — eight consecutive debug scripts in a single run, and
+the turn cap reached in four builds out of nine.
+
+If you need to see an intermediate value, assert it in the test instead: the
+failure prints the value for you, costs no extra turn, and leaves a test that is
+better than it was. Change one thing per run and re-read the failure.
+
+**Nothing you ship contains debug output.** A test that prints `DEBUG:` lines is
+one you were still writing.
+
 **Don't repeat yourself.** If you find yourself restating your analysis, stop and
 act instead — write the file, run the test, or say what's blocking you. Text that
 re-states what you already said is trimmed and counts against the run.
