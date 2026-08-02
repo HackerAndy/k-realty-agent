@@ -37,6 +37,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+from core import reconcile
 from core.models import Transaction
 from core.parsers.base import ParseError
 
@@ -140,9 +141,17 @@ def parse(path: Path) -> list[Transaction]:
     # Reconcile the running-balance chain to the penny. Rows are newest-first,
     # so each row's balance must equal the NEXT (older) row's balance plus this
     # row's signed amount. Any mismatch means an amount or balance was misread.
+    # Routed through reconcile.record so the check is VISIBLE, not just enforced.
+    # It was neither reported to the operator nor detectable by the build gate
+    # before — the harness could not tell this parser, which verifies every row
+    # to the penny, from one that checks nothing. record() returns the real
+    # comparison with or without an active run, so the raise below still fires in
+    # a plain unit test.
     for i in range(len(parsed) - 1):
         expected = parsed[i + 1]["balance_c"] + parsed[i]["amount_c"]
-        if parsed[i]["balance_c"] != expected:
+        if not reconcile.record(f"balance chain at line {parsed[i]['lineno']}",
+                                expected=expected / 100,
+                                actual=parsed[i]["balance_c"] / 100):
             r = parsed[i]
             nxt = parsed[i + 1]
             raise ParseError(

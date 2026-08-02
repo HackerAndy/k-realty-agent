@@ -37,6 +37,7 @@ from pathlib import Path
 
 import pdfplumber
 
+from core import reconcile
 from core.models import Transaction
 from core.parsers.base import ParseError
 
@@ -119,6 +120,7 @@ def parse_statement(pdf_path: Path) -> list[Transaction]:
     transactions: list[Transaction] = []
     sign: int | None = None  # +1 additions, -1 subtractions; carries across pages
     current: dict | None = None
+    section_totals: list[tuple[str, int, float]] = []
 
     def finalize(row: dict) -> None:
         property_name = _clean_property(row["cells"][1])
@@ -178,6 +180,15 @@ def parse_statement(pdf_path: Path) -> list[Transaction]:
                     if current:
                         finalize(current)
                         current = None
+                    # The statement's own arithmetic, which this parser used to
+                    # walk straight past. "Total from additions to cash $1,250.00"
+                    # is the only thing in the document that can tell a complete
+                    # read from a partial one — the test cannot, because it is
+                    # written from this parser's own output.
+                    if joined.startswith("Total from") and sign is not None:
+                        stated = _stated_total(joined)
+                        if stated is not None:
+                            section_totals.append((joined, sign, stated))
                     continue
 
                 cells = _bucket(line, col_x)
@@ -216,4 +227,45 @@ def parse_statement(pdf_path: Path) -> list[Transaction]:
             "table found, or the layout differs from expectations.",
             extracted_text=extract_text(pdf_path),
         )
+
+    _reconcile_sections(transactions, section_totals, pdf_path)
     return transactions
+
+
+def _stated_total(line: str) -> float | None:
+    """The money figure a "Total from ..." line states, if it has one."""
+    matches = re.findall(r"\(?-?\$?[\d,]+\.\d{2}\)?", line)
+    if not matches:
+        return None
+    text = matches[-1]
+    negative = text.startswith("(") and text.endswith(")")
+    value = float(text.strip("()").replace(",", "").replace("$", ""))
+    return -value if negative else value
+
+
+def _reconcile_sections(transactions: list[Transaction],
+                        section_totals: list[tuple[str, int, float]],
+                        pdf_path: Path) -> None:
+    """Check each cash section against the total the statement states for it.
+
+    A section total is stated unsigned — "Total from subtractions from cash
+    $850.00" — so it is compared against the magnitude of what was extracted
+    under that section's sign. Missing a row, or dropping one to a page break,
+    breaks this; nothing else in the parser or its test would notice.
+
+    Raises rather than only recording, because handing back a number known to
+    disagree with the document is worse than failing loudly. record() returns
+    the real comparison with or without an active run, so this fires in a unit
+    test too.
+    """
+    if not section_totals:
+        return
+    for label, sign, stated in section_totals:
+        extracted = sum(t.amount for t in transactions if (t.amount >= 0) == (sign > 0))
+        if not reconcile.record(label, expected=stated, actual=abs(extracted)):
+            raise ParseError(
+                f"{label}: the statement says {stated:,.2f} but {abs(extracted):,.2f} was "
+                f"extracted. Rows are missing or misread — refusing to return a partial "
+                f"read of a financial document.",
+                extracted_text=extract_text(pdf_path),
+            )

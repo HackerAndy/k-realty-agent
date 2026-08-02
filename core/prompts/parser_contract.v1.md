@@ -69,7 +69,42 @@ re-states what you already said is trimmed and counts against the run.
    row is unreadable, raise `ParseError` (from `core.parsers.base`, carrying the
    extracted text) rather than fabricate — this is financial data.
 
-4. **A self-contained test — REQUIRED, not optional.** `tests/test_parser_<key>.py`,
+4. **Reconcile against the document's own arithmetic. THE BUILD FAILS WITHOUT
+   THIS.** Most financial documents state their own numbers: a `Totals` row, an
+   ending or running balance, a per-section subtotal, a "New Balance", a row
+   count. Find one and check yourself against it:
+
+   ```python
+   from core import reconcile
+   from core.parsers.base import ParseError
+   ...
+   if not reconcile.record("statement total", expected=stated_total, actual=sum(amounts)):
+       raise ParseError(f"Extracted {sum(amounts):.2f}, statement says {stated_total:.2f}",
+                        extracted_text=raw)
+   ```
+
+   `reconcile.record` returns whether it balanced whether or not a run is
+   active, so this one line both reports the check to the operator and refuses
+   to hand back numbers you know are wrong — and it behaves identically in your
+   test. A running balance IS a control total: consecutive rows must differ by
+   the amount between them.
+
+   **This is the only check that can tell a complete read from a partial one.**
+   Your test cannot: you write it from your own parser's output, so it agrees
+   with whatever the parser does. A parser that found one of six transactions
+   passes a count assertion of one. Only the document's own total disagrees.
+
+   If the document genuinely publishes NOTHING to check against, say so and the
+   build accepts it:
+
+   ```python
+   NO_CONTROL_TOTALS = "Bare rows: no total, no balance, no count, no summary line."
+   ```
+
+   Say what you looked for and what wasn't there. Never invent a check, and
+   never leave it silent — silence is the one thing the gate rejects.
+
+5. **A self-contained test — REQUIRED, not optional.** `tests/test_parser_<key>.py`,
    pytest, against a SMALL representative sample **embedded inline** — NOT a file
    under `data/` (gitignored; it won't exist when the test runs later). Assert:
    - the transaction count,

@@ -704,3 +704,44 @@ def test_a_newly_created_file_has_no_original(monkeypatch, tmp_path):
     codegen.agent_tools.forget_originals()
     codegen.agent_tools.write_file("tests/test_brand_new.py", _suite(3))
     assert codegen.agent_tools.originals() == {}
+
+
+# --- parsers reconcile too ---------------------------------------------------
+
+def test_the_reconciliation_gate_is_wired_up_for_parsers(monkeypatch, tmp_path):
+    """Scrapers have had this rule all along; parsers only had the suggestion.
+
+    On the bench, three of nine builds were APPROVED while wrong — one having
+    extracted a single transaction out of six. Its own test asserted a count of
+    one and passed. Only the document's stated total disagrees with a partial
+    read, so the check that consults it has to be mandatory, not advised.
+    """
+    from orchestration import build_parser
+
+    seen = {}
+
+    def capture(task, system, verify, on_event=print, **kwargs):
+        seen.update(kwargs)
+        return _Result(_wrote("core/parsers/x.py")), {"ok": True}
+
+    monkeypatch.setattr(build_parser, "run_codegen_gated", capture)
+    sample = tmp_path / "s.pdf"
+    sample.write_bytes(b"x")
+
+    build_parser.build_parser_for_source("acme_bank", sample, on_event=lambda _: None)
+    assert seen["reconcile_path"] == "core/parsers/acme_bank.py"
+
+    seen.clear()
+    build_parser.revise_parser_for_source("acme_bank", sample, "wrong signs",
+                                          on_event=lambda _: None)
+    assert seen["reconcile_path"] == "core/parsers/acme_bank.py", "revise too"
+
+
+def test_the_shipped_parsers_satisfy_the_rule_they_are_copied_from():
+    """The builder prompt tells the agent to study these as the pattern. A pattern
+    that does not follow the contract teaches the agent not to follow it."""
+    from orchestration import verify as _v
+
+    for path in ("core/parsers/buildium_owner_statement.py",
+                 "core/parsers/dfcu_financial_bank.py"):
+        assert _v.reconciles(path)["ok"], f"{path} does not check its own arithmetic"

@@ -55,7 +55,15 @@ def build_parser_for_source(
     )
 
     result, verification = run_codegen_gated(
-        task, system, lambda: verify_parser(source_key, sample_path), on_event=on_event, test_path=test_path_for("parser", source_key)
+        task, system, lambda: verify_parser(source_key, sample_path), on_event=on_event,
+        test_path=test_path_for("parser", source_key),
+        # Same rule scrapers have had all along. A parser that reads half a
+        # statement passes every other gate: its test agrees with it, the
+        # coverage is real, nothing is hardcoded. Measured on the bench, three of
+        # nine builds were APPROVED while wrong, one having extracted one
+        # transaction out of six — which the source's own subtotals would have
+        # caught on arithmetic alone.
+        reconcile_path=f"core/parsers/{source_key}.py",
     )
     return {
         "source_key": source_key,
@@ -95,6 +103,7 @@ def revise_parser_for_source(
         task, system, lambda: verify_parser(source_key, sample_path),
         on_event=on_event, require_changes=True,
         test_path=test_path_for("parser", source_key),
+        reconcile_path=f"core/parsers/{source_key}.py",
     )
     return {
         "source_key": source_key,

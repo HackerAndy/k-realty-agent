@@ -65,8 +65,20 @@ def channel(name: str):
 
 
 def record(label: str, expected: float, actual: float, tolerance: float = DEFAULT_TOLERANCE) -> bool:
-    """Record one control-total check. Returns whether it balanced, so extraction
-    code can react inline if it wants to. No-op (returns True) with no channel."""
+    """Record one control-total check, and say whether it balanced.
+
+    The return value is the REAL comparison, always — with no active channel the
+    recording is skipped but the arithmetic still happens. That is what makes
+
+        if not reconcile.record("balance chain", expected=stated, actual=summed):
+            raise ParseError(...)
+
+    behave the same inside a run and inside a unit test, which is the only way a
+    parser can both report its check to the operator and refuse to hand back
+    numbers it knows are wrong. The docstring previously claimed it returns True
+    without a channel; that would have silently disabled exactly that pattern
+    everywhere except a live run.
+    """
     try:
         expected_f, actual_f = float(expected), float(actual)
     except (TypeError, ValueError):
