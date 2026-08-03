@@ -601,3 +601,36 @@ def test_the_warning_rides_on_a_tool_result():
     assert _budget_note(turn=30, max_turns=40).startswith("[10 turns left")
     assert _budget_note(turn=37, max_turns=40).startswith("[3 turns left")
     assert _budget_note(turn=5, max_turns=40) == ""
+
+
+# --- a partial view must not read as a small conversation --------------------
+#
+# The Claude Code executor sees the prose and tool-call arguments that stream out
+# of the CLI, and nothing else — no tool results, no schemas, none of the CLI's
+# own context handling. It reported ~3k tokens where the local model reported
+# ~34k, which invites reading a tenth of the VIEW as a tenth of the context.
+
+def test_a_watched_conversation_says_it_is_a_floor():
+    ledger = Ledger(system=400, complete=False)
+    ledger.note_prose("x" * 800)
+
+    line = ledger.summary()
+
+    assert "floor, not a total" in line
+    assert "in the conversation" not in line, "that phrase claims an account it does not have"
+
+
+def test_a_held_conversation_still_reports_plainly():
+    ledger = Ledger(system=400)
+    ledger.note_prose("x" * 800)
+
+    assert "in the conversation" in ledger.summary()
+    assert "floor" not in ledger.summary()
+
+
+def test_the_breakdown_says_what_it_could_not_see():
+    """A missing row reads as 'that cost nothing' unless it says otherwise."""
+    ledger = Ledger(system=400, complete=False)
+    ledger.note_call("run_command", {"command": "pytest -q"})
+
+    assert "absent rather than zero" in ledger.breakdown()

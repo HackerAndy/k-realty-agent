@@ -365,19 +365,49 @@ the mechanism the hard case exists to test, and put the property name in
 
 What this does NOT establish: n=1 per case, so summit — the case the retracted
 `5b59f43` claim was about — deserves `--repeat 3` before it is treated as
-settled. And 3a's context work is unmeasurable here: Claude Code manages its own
-context, so the ledger reports ~3k tokens because it only ever sees prose and
-tool calls.
+settled.
+
+### The two paths measure context differently, and that is not a reason to drop one
+
+I first wrote that 3a's context work was "unmeasurable" under Claude Code and
+implied Phase 3 was therefore aimed at a path no longer in use. Both halves were
+wrong, and the operator corrected them.
+
+**Token cost is worth optimising on whichever path is running.** A harness that
+only economises when the model is small has the priority backwards: on the local
+path context is a hard wall, and on a metered API path it is the bill. Phase 3
+stands.
+
+**The paths are chosen whole, not mixed.** A run is either the harness driving
+its own loop against an endpoint or the CLI driving itself; each carries its own
+context handling, its own measurements, and its own numbers. Numbers are compared
+*within* a path across commits, never across paths, and no measurement is
+discarded because the other path produces a different one.
+
+What the CLI path really reports is a **partial view, not a small conversation** —
+prose and tool-call arguments only, with the tool results and the CLI's own
+management invisible from outside. `Ledger.complete` now carries that: the same
+line that said "~3,121 tok in the conversation" says "a floor, not a total", and
+the breakdown says the missing rows are absent rather than zero. Without it, ~3k
+against the local path's ~34k reads as a tenth of the context when it is about a
+tenth of the view.
 
 ### What that changes
 
-**Phase 3 (condensation) moves ahead of Phase 2 (more loop rounds).** The two
-harder cases cannot finish inside the local model's context at all, so:
+**Phase 3 (condensation) moves ahead of Phase 2 (more loop rounds)** — on the
+local path, which is where that ordering was derived and where it still holds.
+The two harder cases cannot finish inside the local model's context at all, so:
 
 - more judged rounds would make the binding constraint strictly worse;
 - the bench cannot grade Phase 2 while two of its three cases die of context.
 
 Phase 1 does not fix this and was never going to.
+
+On the CLI path the ordering is untested rather than reversed: nothing there has
+died of context, so the argument above simply has no evidence either way. Grade
+each phase on the path it is meant to improve, at `--repeat 3`, and record which
+path the number came from — `summary.json` carries the resolved model for exactly
+that reason.
 
 ### What actually fills the context — measured, not assumed
 

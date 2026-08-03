@@ -222,7 +222,10 @@ def run_claude_code(
     final_text = ""
     turns = 0
     stopped_reason = ""
-    ledger = Ledger(system=len(system))
+    # `complete=False`: the CLI holds the conversation and manages it itself, so
+    # what streams out here is a floor. See Ledger's docstring — the two paths'
+    # numbers answer different questions and must not be read side by side.
+    ledger = Ledger(system=len(system), complete=False)
 
     process = subprocess.Popen(
         command, cwd=str(REPO_ROOT), env=env,

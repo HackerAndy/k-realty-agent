@@ -118,7 +118,19 @@ def stub_for(tool: str, size: int) -> str:
 
 @dataclass
 class Ledger:
-    """Where the conversation's characters came from, by source."""
+    """Where the conversation's characters came from, by source.
+
+    `complete` is False when the harness only WATCHED a conversation it did not
+    hold. The Claude Code executor sees the prose and the tool-call arguments
+    that stream out of the CLI and nothing else — no tool results, no schemas,
+    none of the CLI's own context management. What it can count is then a FLOOR,
+    and printing it the same way as a real total invites the worst reading
+    available: the CLI reported ~3k where the local model reported ~34k, which
+    looks like a tenth of the context and is really about a tenth of the view.
+
+    Both numbers are worth having — token cost matters on whichever path is
+    running — but they are answers to different questions and the line says so.
+    """
 
     system: int = 0
     schemas: int = 0
@@ -127,6 +139,7 @@ class Ledger:
     results: Counter = field(default_factory=Counter)
     trimmed_chars: int = 0
     trimmed_count: int = 0
+    complete: bool = True
 
     def note_prose(self, text: str) -> None:
         self.prose += len(text or "")
@@ -149,7 +162,9 @@ class Ledger:
     def summary(self) -> str:
         """One line for the event stream, so a run says what filled it."""
         live = self.live_total
-        parts = [f"~{live // CHARS_PER_TOKEN:,} tok in the conversation"]
+        parts = [f"~{live // CHARS_PER_TOKEN:,} tok in the conversation"] if self.complete else [
+            f"~{live // CHARS_PER_TOKEN:,} tok of prose and tool arguments — a floor, not a "
+            f"total: the agent holds its own conversation and this only saw what streamed out"]
         if self.trimmed_count:
             parts.append(f"{self.trimmed_count} stale result(s) trimmed, "
                          f"saving ~{self.trimmed_chars // CHARS_PER_TOKEN:,} tok")
@@ -163,9 +178,16 @@ class Ledger:
         rows += [(f"{tool} results", n) for tool, n in self.results.most_common()]
         rows = [(label, n) for label, n in rows if n]
         width = max((len(label) for label, _ in rows), default=0)
-        return "\n".join(
+        detail = "\n".join(
             f"  {label:<{width}}  {n:>8,} chars  ~{n // CHARS_PER_TOKEN:>6,} tok"
             for label, n in sorted(rows, key=lambda r: -r[1]))
+        if self.complete:
+            return detail
+        # Said here too, because a breakdown is read when something went wrong —
+        # exactly when a missing row reads as "that cost nothing" instead of
+        # "that was never visible from here".
+        return detail + "\n  (tool results and the agent's own context management are not " \
+                        "visible from outside it, so they are absent rather than zero)"
 
 
 # Argument keys worth keeping whole however old the call is. They are short, and
