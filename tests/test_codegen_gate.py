@@ -910,3 +910,86 @@ def test_the_same_file_edited_repeatedly_is_named_once():
 
     assert codegen.files_written(calls) == ["core/parsers/harbor.py"]
     assert codegen.untested_code_files(calls) == ["core/parsers/harbor.py"]
+
+
+# --- the same sequence, end to end, against the real gates --------------------
+#
+# The live re-run that was meant to confirm the fix never exercised it: harbor
+# came back 3/3 with rounds=1, because no run produced a blocking lint finding
+# and so no retry happened. Waiting for a stochastic retry is not verification.
+# This drives the real folds — real ruff, on real files — through the exact
+# sequence that failed: refused for a dead store, corrected by editing only the
+# code, no new test written because one already exists.
+
+_WITH_A_DEAD_STORE = '''\
+"""A parser with the fault the gate caught in the field."""
+
+
+def parse(rows):
+    total = 0          # assigned, never read — ruff F841
+    return [dict(row) for row in rows]
+'''
+
+_CORRECTED = '''\
+"""A parser with the fault the gate caught in the field."""
+
+
+def parse(rows):
+    return [dict(row) for row in rows]
+'''
+
+
+def test_the_field_sequence_end_to_end(monkeypatch, tmp_path):
+    code, test = "core/parsers/harbor.py", "tests/test_parser_harbor.py"
+    for relative in (code, test):
+        (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / code).write_text(_WITH_A_DEAD_STORE, encoding="utf-8")
+    (tmp_path / test).write_text("def test_it():\n    assert True\n", encoding="utf-8")
+    monkeypatch.setattr(_verify_mod, "REPO_ROOT", tmp_path)
+
+    rounds = iter([
+        _Result(_wrote(code, test)),                 # writes the parser AND its test
+        # The correction, exactly as the CLI did it: edit the code, write no test.
+        _Result([("str_replace", {"path": code}) for _ in range(4)]),
+    ])
+
+    def executor(task, system, on_event=print, **kw):
+        result = next(rounds)
+        if "does nothing" in task:               # the retry — actually fix the file
+            (tmp_path / code).write_text(_CORRECTED, encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(codegen, "run_agent", executor)
+    events: list[str] = []
+
+    _, v = codegen.run_codegen_gated(
+        "build the harbor parser", "SYSTEM",
+        lambda: {"ok": True, "test": {"ok": True}}, on_event=events.append)
+
+    assert any("harness rejected that run" in e for e in events), "ruff should have refused round 1"
+    assert any("F841" in e for e in events)
+    assert "untested_code" not in v, "the test from round 1 is still there"
+    assert v["ok"] is True, f"the corrected build should pass: {_verify_mod.blockers(v)}"
+
+
+def test_the_field_sequence_still_fails_when_the_correction_does_not_correct(monkeypatch, tmp_path):
+    """The counterpart: accumulating tool calls must not turn the lint gate off."""
+    code, test = "core/parsers/harbor.py", "tests/test_parser_harbor.py"
+    for relative in (code, test):
+        (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / code).write_text(_WITH_A_DEAD_STORE, encoding="utf-8")
+    (tmp_path / test).write_text("def test_it():\n    assert True\n", encoding="utf-8")
+    monkeypatch.setattr(_verify_mod, "REPO_ROOT", tmp_path)
+
+    _runner(monkeypatch, [
+        _Result(_wrote(code, test)),
+        _Result([("str_replace", {"path": code})]),   # claims a fix, changes nothing
+    ])
+
+    _, v = codegen.run_codegen_gated(
+        "build the harbor parser", "SYSTEM",
+        lambda: {"ok": True, "test": {"ok": True}}, on_event=lambda _: None)
+
+    assert v["ok"] is False
+    assert v["lint"], "the dead store is still there and must still refuse the build"
+    assert any("does nothing" in line for line in _verify_mod.blockers(v))

@@ -403,6 +403,28 @@ the same way.
 Also: four edits to one file were reported as three separate untested files.
 `files_written` and `untested_code_files` dedupe now.
 
+### Harbor ×3 at `741b0f5`: 3/3 — and it did not verify the fix
+
+Ran to confirm the gate had stopped refusing correct work. **gate 3/3, correct
+3/3**, so harbor now stands at 6/6 correct across the two sessions. But all three
+came back `rounds: 1`: no run produced a blocking lint finding, so no retry
+happened, so the accumulation path was never executed. A green run that never
+entered the code under test is not evidence about it, and waiting for a
+stochastic retry is not a verification strategy.
+
+Closed deterministically instead, at no further cost:
+`test_the_field_sequence_end_to_end` drives `run_codegen_gated` through the exact
+field sequence against the **real** gates — a real file carrying a real F841, ruff
+actually run on it, refused, then corrected by editing only the code with no new
+test — and asserts the build passes. Its counterpart asserts that a "correction"
+which changes nothing is still refused, so accumulating tool calls across rounds
+cannot become an amnesty for the lint gate.
+
+Worth keeping in view: two of three harbor runs hit a retry in the previous
+session and none did in this one, on identical inputs. Whether a rule fires at
+all is itself variable, which is the argument for gates being covered by tests
+rather than by having been observed once.
+
 ### The two paths measure context differently, and that is not a reason to drop one
 
 I first wrote that 3a's context work was "unmeasurable" under Claude Code and
