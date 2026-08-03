@@ -356,10 +356,18 @@ requirement, a different model, and two cases that never worked now work. The
 harness-side work already done (reconciliation, the gate classification, the
 budget note) is what those runs passed through, and it held.
 
-What this does NOT establish: n=1 per case, and 3a's context work is
-unmeasurable here (Claude Code manages its own context — the ledger reports
-~3k tokens because it only sees prose and tool calls). Harbor is unmeasured
-until it is re-run against the scrubbed worktree.
+**Harbor re-run at `ed7c23c`, scrubbed: gate pass, correct, 18 turns, 420s.** The
+log touches none of the four key files — it could not; they are not in the
+checkout. It reconciled against the document's own "Net owner activity", which is
+the mechanism the hard case exists to test, and put the property name in
+`fields["Property"]`. So the contaminated run's *answer* was right; only its
+*provenance* was worthless. All three cases now stand on clean runs.
+
+What this does NOT establish: n=1 per case, so summit — the case the retracted
+`5b59f43` claim was about — deserves `--repeat 3` before it is treated as
+settled. And 3a's context work is unmeasurable here: Claude Code manages its own
+context, so the ledger reports ~3k tokens because it only ever sees prose and
+tool calls.
 
 ### What that changes
 
