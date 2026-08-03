@@ -6,7 +6,14 @@ Always invoked as a subprocess with the worktree as its cwd, never in-process:
 to be running inside that copy. That is also what keeps a bench run from writing
 `core/parsers/bench_*.py` into the repo you are working in.
 
-    poetry run python -m orchestration.bench.one <case_key> <result.json>
+    poetry run python -m orchestration.bench.one <key> <label> <document> <result.json>
+
+The case arrives as arguments rather than by importing `cases.py`, and only the
+three fields the agent would have been given anyway: what the source is called,
+what it is called on screen, and which file to read. The rest of `cases.py` is
+the answer key, and this process runs inside the checkout the agent explores —
+so importing it here would be handing over the marking scheme. Scoring happens
+in the parent, which is the only place that knows the answers.
 """
 
 from __future__ import annotations
@@ -17,9 +24,10 @@ import time
 import traceback
 from pathlib import Path
 
-from orchestration.bench.cases import BY_KEY
 from orchestration.build_parser import build_parser_for_source
 from orchestration.verify import blockers
+
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # codegen.py emits this line when a gate sends the agent back around. Counting it
 # is how a round count is obtained without changing run_codegen_gated, which is
@@ -28,8 +36,12 @@ REJECTION_MARKER = "The harness rejected that run"
 
 
 def main(argv: list[str]) -> int:
-    case = BY_KEY[argv[0]]
-    out_path = Path(argv[1])
+    key, label, document, out = argv
+    # Resolved against THIS repo, never the parent's: an absolute path handed in
+    # from outside would have the build reading a file the worktree does not
+    # contain, which is not the thing being measured.
+    sample_path = REPO_ROOT / document
+    out_path = Path(out)
 
     events: list[str] = []
 
@@ -49,12 +61,12 @@ def main(argv: list[str]) -> int:
                 for line in events if line.strip().startswith("→ ")]
 
     started = time.monotonic()
-    record: dict = {"case_key": case.key, "difficulty": case.difficulty}
+    record: dict = {"case_key": key}
     try:
         built = build_parser_for_source(
-            source_key=case.key,
-            sample_path=case.path,
-            source_label=case.label,
+            source_key=key,
+            sample_path=sample_path,
+            source_label=label,
             on_event=on_event,
         )
         verification = built.get("verification") or {}

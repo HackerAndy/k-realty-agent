@@ -34,12 +34,30 @@ from pathlib import Path
 
 from core.tools import llm_provider
 from orchestration import context_budget
-from orchestration.bench.cases import BY_KEY, CASES, score
+from orchestration.bench.cases import BY_KEY, CASES, Case, score
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 RESULTS_ROOT = Path(__file__).resolve().parent / "results"
 VENV = REPO_ROOT / ".venv"
 SECRETS = REPO_ROOT / ".secrets"
+
+# Files that state what the documents contain. They are removed from the
+# worktree before any build runs, because "an answer key the agent never sees"
+# was not true: the key sits in the same repository the agent is handed, and on
+# the hard case an agent that explores properly simply read it —
+# `orchestration/bench/cases.py`, then `tests/test_bench.py`, and then reported a
+# total matching the key exactly. Nothing failed; the number was just no longer
+# a measurement of reading the document.
+#
+# Keep this list in step with reality: `tests/test_bench.py` fails if any of
+# these paths goes missing, or if a case's expected total turns up in a tracked
+# file that is not on the list.
+ANSWER_KEY = (
+    "orchestration/bench/cases.py",                 # counts, totals, sign splits, columns
+    "tests/test_bench.py",                          # asserts those same numbers
+    "tests/fixtures/generate_bench_documents.py",   # the rows themselves
+    "docs/agent-harvest-plan.md",                   # measured results, case by case
+)
 
 
 def _git(*args: str, cwd: Path = REPO_ROOT) -> str:
@@ -105,6 +123,26 @@ def _reset(worktree: Path, sha: str) -> None:
     _git("reset", "--hard", sha, cwd=worktree)
     _git("clean", "-fd", "-e", ".venv", "-e", ".secrets", cwd=worktree)
     _link_support_dirs(worktree)
+    _scrub_answer_key(worktree)
+
+
+def _scrub_answer_key(worktree: Path) -> None:
+    """Take the answer key out of the checkout, and out of its HEAD.
+
+    Deleting the files stops the agent reading them, which is what actually
+    happened. Committing the deletion also stops `git show HEAD:<path>` — and
+    keeps `verify.changed_lines`, which diffs the agent's files against HEAD,
+    working exactly as before, since HEAD now differs only by these removals.
+
+    Not airtight, and worth saying plainly: the worktree shares the parent's
+    object database, so `git log -p` would still turn the key up. What it closes
+    is the case that occurred — a file sitting in the tree, read on purpose,
+    while looking for the project's conventions.
+    """
+    for relative in ANSWER_KEY:
+        (worktree / relative).unlink(missing_ok=True)
+    _git("commit", "-q", "--allow-empty", "-a",
+         "-m", "bench: the answer key is not part of this checkout", cwd=worktree)
 
 
 def _preflight(worktree: Path, expected: str) -> None:
@@ -131,7 +169,7 @@ def _preflight(worktree: Path, expected: str) -> None:
         )
 
 
-def _run_case(worktree: Path, case_key: str, out_json: Path, log: Path, timeout: int,
+def _run_case(worktree: Path, case: Case, out_json: Path, log: Path, timeout: int,
               keep_last: int | None = None) -> None:
     """Drive one build in the worktree, teeing the agent's own progress to a log.
 
@@ -139,12 +177,16 @@ def _run_case(worktree: Path, case_key: str, out_json: Path, log: Path, timeout:
     workflow between here and `run_agent` takes no such argument, and threading
     one through it for the bench's benefit would be the bench changing
     production code to measure it.
+
+    Only the case's public fields cross over — the same three things the operator
+    would have typed into the GUI. The answer key stays in this process.
     """
     env = dict(os.environ)
     if keep_last is not None:
         env["AGENT_KEEP_LAST_RESULTS"] = str(keep_last)
     proc = subprocess.Popen(
-        ["poetry", "run", "python", "-m", "orchestration.bench.one", case_key, str(out_json)],
+        ["poetry", "run", "python", "-m", "orchestration.bench.one",
+         case.key, case.label, f"tests/fixtures/{case.document}", str(out_json)],
         cwd=str(worktree),
         env=env,
         stdout=subprocess.PIPE,
@@ -258,7 +300,7 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"\n{'=' * 78}\n[bench] {tag} ({case.difficulty})\n{'=' * 78}")
                     _reset(worktree, sha)
                     out_json = results_dir / f"{tag}.json"
-                    _run_case(worktree, case.key, out_json, results_dir / f"{tag}.log",
+                    _run_case(worktree, case, out_json, results_dir / f"{tag}.log",
                               args.timeout, keep_last=keep_last)
                     _keep_artifacts(worktree, case.key, results_dir / tag)
 

@@ -322,6 +322,45 @@ impossible to report by accident.
 
 Either answer redirects the work. Neither can be guessed from here.
 
+### Answered, `904aae1` — it was the model, and the bench was leaking
+
+Ran the same three cases against Claude Code (sonnet), `--repeat 1`. **gate 3/3,
+correct 3/3.** `correct` had never been above 2/9 before, and summit had been
+wrong in every run since the bench existed.
+
+Two things have to be said about that number before it is used.
+
+**Harbor's result does not count.** While looking for the project's conventions
+the agent read `orchestration/bench/cases.py` and `tests/test_bench.py` — the
+answer key and the file asserting `Decimal("3547.75")` — and then reported "6
+rows, total +3547.75". Nothing errored. The run simply stopped being a
+measurement of reading the document. The bench's premise, "an answer key the
+agent never sees", was never true: the key sat in the repository the agent is
+handed and told to explore. The local 30B never went looking, so the hole stayed
+shut by luck for eighteen runs. `_scrub_answer_key` now removes those files from
+the worktree and commits the removal, so `git show HEAD:` cannot reach them
+either, and `one.py` takes the case as arguments instead of importing it.
+`tests/test_bench.py` greps every tracked file for each case's total and fails if
+one appears somewhere the bench does not scrub. Residual, and worth stating: the
+worktree shares the parent's object database, so `git log -p` would still find it.
+
+**What does count: riverbend and summit, both clean, both correct.** Neither log
+touches the key. Summit is the sign-convention case — the one that was wrong in
+every previous run, and the one the retracted `5b59f43` claim was about — and it
+inverted the sign correctly and reconciled against the document's own "New
+Balance 367.92". That is a real first, on n=1.
+
+So the blocking question resolves toward **the model's ceiling, not the
+harness's fault**: the same prompts, the same gates, the same reconciliation
+requirement, a different model, and two cases that never worked now work. The
+harness-side work already done (reconciliation, the gate classification, the
+budget note) is what those runs passed through, and it held.
+
+What this does NOT establish: n=1 per case, and 3a's context work is
+unmeasurable here (Claude Code manages its own context — the ledger reports
+~3k tokens because it only sees prose and tool calls). Harbor is unmeasured
+until it is re-run against the scrubbed worktree.
+
 ### What that changes
 
 **Phase 3 (condensation) moves ahead of Phase 2 (more loop rounds).** The two

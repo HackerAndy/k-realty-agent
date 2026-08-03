@@ -13,10 +13,14 @@ from __future__ import annotations
 
 import csv
 from decimal import Decimal
+import subprocess
 
 import pytest
 
+from orchestration.bench import __main__ as bench_main
 from orchestration.bench.cases import BY_KEY, CASES, score
+
+REPO_ROOT = bench_main.REPO_ROOT
 
 
 def _money(text: str) -> Decimal:
@@ -148,3 +152,52 @@ def test_score_reports_a_parser_that_never_ran():
     assert outcome.gate_ok is False
     assert outcome.correct is False
     assert "ModuleNotFoundError" in outcome.misses[0]
+
+
+# --- the answer key must not be inside the checkout the agent explores --------
+#
+# It was. On the hard case an agent that explores properly read
+# `orchestration/bench/cases.py` and `tests/test_bench.py` while looking for the
+# project's conventions, then reported a total matching the key exactly. Nothing
+# errored; the run simply stopped being a measurement of reading the document.
+# `_scrub_answer_key` removes these files from the worktree — which is only worth
+# anything if the list stays true, hence both tests below.
+
+def test_every_scrubbed_path_still_exists():
+    """A rename would turn the scrub into a silent no-op, and the next bench run
+    would look exactly like a good one."""
+    missing = [p for p in bench_main.ANSWER_KEY if not (REPO_ROOT / p).is_file()]
+
+    assert not missing, f"ANSWER_KEY names files that are gone: {missing}"
+
+
+@pytest.mark.parametrize("case", CASES, ids=lambda c: c.key)
+def test_a_cases_total_appears_only_where_the_bench_scrubs_it(case):
+    """The real guard: grep every tracked file for the expected total. Anything
+    holding it that the bench does not remove is a leak into the next run.
+
+    The documents themselves are allowed — a statement stating its own control
+    total is the thing the parser is supposed to reconcile against, and is the
+    whole point of the medium and hard cases.
+    """
+    needle = f"{abs(case.total):,.2f}"
+    plain = f"{abs(case.total):.2f}"
+    tracked = subprocess.run(["git", "ls-files"], cwd=REPO_ROOT,
+                             capture_output=True, text=True, check=True).stdout.split()
+
+    holders = []
+    for relative in tracked:
+        path = REPO_ROOT / relative
+        if not path.is_file() or relative.startswith("tests/fixtures/"):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        if needle in text or plain in text:
+            holders.append(relative)
+
+    leaked = [h for h in holders if h not in bench_main.ANSWER_KEY]
+    assert not leaked, (
+        f"{case.key}'s expected total {case.total} appears in {leaked}, which the "
+        f"bench leaves in the worktree. Add it to ANSWER_KEY or take the number out.")
