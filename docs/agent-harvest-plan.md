@@ -363,9 +363,45 @@ the mechanism the hard case exists to test, and put the property name in
 `fields["Property"]`. So the contaminated run's *answer* was right; only its
 *provenance* was worthless. All three cases now stand on clean runs.
 
-What this does NOT establish: n=1 per case, so summit — the case the retracted
-`5b59f43` claim was about — deserves `--repeat 3` before it is treated as
-settled.
+### `--repeat 3` at `be5b63c` — correct 9/9, and the gate refused one of them
+
+| case | difficulty | gate | correct |
+| --- | --- | --- | --- |
+| riverbend | easy | 3/3 | 3/3 |
+| summit | medium | 3/3 | 3/3 |
+| harbor | hard | 2/3 | 3/3 |
+
+**correct 9/9 (100%), gate 8/9 (89%).** Summit — wrong in every run since the
+bench existed, and the case the retracted `5b59f43` claim was about — is 3/3.
+n=1 is now n=3 and it held.
+
+The interesting number is the one that went the other way. For the first time
+the gate refused work that was **right**, which is the inverse of the failure
+reconciliation was built to fix, and it exposed two bugs.
+
+**The gate judged a round, not a build.** `harbor.3` round 1 wrote the parser,
+registered it, wrote the test and ran it; the lint gate refused it for two unused
+locals. Round 2 did exactly what it was told — four edits to the parser — and
+wrote no `tests/` file because none was needed. `_assess` only ever saw the
+latest round's tool calls, so `fold_untested` found code written and no test
+written and refused a build whose test existed and passed. **The more precisely
+the agent obeyed the correction, the more certainly it failed the next gate** —
+and every fold asking "what did this build change?" had the same defect. They now
+read the accumulated calls across rounds. `fold_noop` deliberately does not: "did
+THIS round write anything?" is the question it means.
+
+**The refusal could not say what it was.** `untested_code` was the only key that
+sets `ok=False` with no branch in `verify.blockers()`, so the operator got *"The
+build was refused, but no reason was recorded."* — the exact sentence that
+function exists to make impossible. This was the two-blocker-list debt (
+`verify.blockers()` vs codegen's retry `reasons`) finally biting. The branch is
+written; more usefully, a test now derives the refusal keys from `codegen.py`'s
+AST — block-scoped, so informational keys like `coverage` are not demanded — and
+fails if any of them reaches the fallback. A hand-kept list would have gone stale
+the same way.
+
+Also: four edits to one file were reported as three separate untested files.
+`files_written` and `untested_code_files` dedupe now.
 
 ### The two paths measure context differently, and that is not a reason to drop one
 

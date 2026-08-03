@@ -80,9 +80,16 @@ def untested_code_files(tool_calls: list[tuple[str, dict]]) -> list[str]:
         for name, inp in tool_calls
         if name in agent_tools.WRITE_TOOLS and isinstance(inp, dict)
     ]
-    code = [p for p in written if _is_code_file(p)]
+    code = _unique(p for p in written if _is_code_file(p))
     wrote_test = any(p.startswith("tests/") for p in written)
     return code if (code and not wrote_test) else []
+
+
+def _unique(paths) -> list[str]:
+    """Each path once, in the order it was first touched. Four edits to one file
+    are one changed file — every caller here means the set, and the operator-
+    facing message named the same file three times before this."""
+    return list(dict.fromkeys(paths))
 
 
 def files_written(tool_calls: list[tuple[str, dict]]) -> list[str]:
@@ -93,11 +100,11 @@ def files_written(tool_calls: list[tuple[str, dict]]) -> list[str]:
     doesn't recognise doesn't get a test required, coverage checked or lint run,
     and the run scores as a no-op that touched nothing.
     """
-    return [
+    return _unique(
         inp.get("path", "")
         for name, inp in tool_calls
         if name in agent_tools.WRITE_TOOLS and isinstance(inp, dict) and inp.get("path")
-    ]
+    )
 
 
 def fold_untested(verification: dict, tool_calls: list[tuple[str, dict]]) -> dict:
@@ -299,21 +306,32 @@ def run_codegen_gated(
     A genuinely FAILING test is not retried here: that's a real engineering
     problem for the operator to see and direct, not a rule the agent forgot.
     """
+    # Every call this BUILD made, across rounds — not just the latest one.
+    #
+    # Each fold below asks "what did this build change?", and after a retry the
+    # honest answer is cumulative. Judging a round in isolation punished the
+    # agent for obeying the retry instruction precisely: told to fix two unused
+    # locals, it edited only the parser, wrote no `tests/` file that round, and
+    # `fold_untested` refused a build whose test existed and passed. The better
+    # it followed the correction, the more certainly it failed the next gate.
+    performed: list[tuple[str, dict]] = []
+
     def _assess(res):
-        v = fold_untested(verify(), res.tool_calls)
+        performed.extend(res.tool_calls)
+        v = fold_untested(verify(), performed)
         # A loop that ended ITSELF (went in circles, hit the turn cap) has to say
         # so: the files it left behind may still be fine, but "it stopped early"
         # changes how much weight to put on them.
         if getattr(res, "stopped_reason", ""):
             v["agent_stopped"] = res.stopped_reason
         if test_path and not v.get("untested_code"):
-            v = fold_uncovered(v, res.tool_calls, test_path)
-        v = fold_hardcoded(v, res.tool_calls)
-        v = fold_lint(v, res.tool_calls)
+            v = fold_uncovered(v, performed, test_path)
+        v = fold_hardcoded(v, performed)
+        v = fold_lint(v, performed)
         if reconcile_path and (REPO_ROOT / reconcile_path).is_file():
             v = fold_reconciliation(v, reconcile_path)
         if require_changes:
-            v = fold_noop(v, res.tool_calls)
+            v = fold_noop(v, res.tool_calls)   # "did THIS round write anything?"
             # The snapshot wins on conflict: it was taken before the run, whereas
             # a recorded original could be from a second write of the same file.
             v = fold_rewrite(v, {**agent_tools.originals(), **before})

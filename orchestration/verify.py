@@ -548,6 +548,16 @@ def blockers(verification: dict) -> list[str]:
                    "at all. Whatever its test proves, it is not reading this source — "
                    "activating it would ingest nothing, silently.")
 
+    # Distinct from `test.missing`: that one means the workflow's fixed test file
+    # isn't there, this one means the agent wrote code files and no test at all.
+    # It was the only key that could set ok=False with nothing here to name it,
+    # and it duly refused a build with "no reason was recorded" — the exact
+    # sentence this function exists to make impossible.
+    untested = verification.get("untested_code") or []
+    if untested:
+        out.append("Code was written with no test covering it — " + ", ".join(untested) +
+                   ". The harness won't ship untested code.")
+
     test = verification.get("test") or {}
     if test.get("missing"):
         out.append("No test was written for the change, and the harness won't ship untested code.")

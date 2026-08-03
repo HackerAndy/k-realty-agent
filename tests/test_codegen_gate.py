@@ -745,3 +745,168 @@ def test_the_shipped_parsers_satisfy_the_rule_they_are_copied_from():
     for path in ("core/parsers/buildium_owner_statement.py",
                  "core/parsers/dfcu_financial_bank.py"):
         assert _v.reconciles(path)["ok"], f"{path} does not check its own arithmetic"
+
+
+# --- every refusal has to be able to say what it was -------------------------
+#
+# `blockers()` exists so the screen never says "its test failed" about something
+# else. It has one fallback — "refused, but no reason was recorded" — and a real
+# build hit it: `fold_untested` set ok=False under `untested_code`, and that was
+# the single key with no branch. The operator would have seen a refused build
+# with no reason at all.
+#
+# The list of keys is DERIVED from codegen.py rather than kept by hand here,
+# because a hand-kept list goes stale in exactly the way that caused this.
+
+import ast                                                      # noqa: E402
+from pathlib import Path                                        # noqa: E402
+
+from orchestration import verify as _verify_mod                 # noqa: E402
+
+FALLBACK = "no reason was recorded"
+
+# One representative value per key, enough to trip its branch. A key that turns
+# up in codegen.py without an entry here fails the guard below, which is the
+# prompt to add both the sample and the sentence.
+REFUSAL_SAMPLES = {
+    "untested_code": ["core/parsers/x.py"],
+    "uncovered_changes": {"core/parsers/x.py": [12, 13]},
+    "hardcoded_options": {"core/parsers/x.py": [{"line": 4, "detail": "a 30-day window"}]},
+    # The real shape ruff produces — `code` and all, because codegen's retry
+    # message formats it with f['code'] and verify's with f['detail'].
+    "lint": [{"path": "core/parsers/x.py", "line": 9, "code": "F841",
+              "detail": "Local variable `x` is assigned to but never used"}],
+    "unreconciled": "nothing checks the extraction",
+    "no_changes": True,
+    "wholesale_rewrite": {"core/parsers/x.py": 0.05},
+    "removed_tests": {"tests/test_x.py": ["test_one"]},
+    "extracted_nothing": True,
+}
+
+
+def _verification_key(target) -> str | None:
+    """`verification["x"] = ...` -> "x", anything else -> None."""
+    if (isinstance(target, ast.Subscript)
+            and isinstance(target.value, ast.Name) and target.value.id == "verification"
+            and isinstance(target.slice, ast.Constant) and isinstance(target.slice.value, str)):
+        return target.slice.value
+    return None
+
+
+def _keys_that_refuse_a_build() -> set[str]:
+    """Every verification key set in the same BLOCK as `ok = False`.
+
+    Block-scoped, not function-scoped: `fold_uncovered` records `coverage`
+    unconditionally and only sets `uncovered_changes` alongside the refusal, so a
+    whole-function scan would demand a blocker sentence for a key that is just
+    information. What has to be explainable is the reason a build was refused.
+    """
+    tree = ast.parse(Path(codegen.__file__).read_text(encoding="utf-8"))
+    keys: set[str] = set()
+    for node in ast.walk(tree):
+        for field in ("body", "orelse", "finalbody"):
+            block = getattr(node, field, None)
+            if not isinstance(block, list):
+                continue
+            here, refuses = set(), False
+            for statement in block:
+                for target in getattr(statement, "targets", []):
+                    name = _verification_key(target)
+                    if name is None:
+                        continue
+                    if name == "ok" and getattr(statement.value, "value", None) is False:
+                        refuses = True
+                    elif name != "ok":
+                        here.add(name)
+            if refuses:
+                keys |= here
+    return keys
+
+
+def test_every_key_that_refuses_a_build_has_a_sample():
+    """Guard on the guard: a new fold_* must arrive with both."""
+    missing = _keys_that_refuse_a_build() - set(REFUSAL_SAMPLES)
+    assert not missing, (
+        f"codegen sets {missing} when refusing a build, but this test has no sample for "
+        f"it — add one, and a branch in verify.blockers(), or the operator gets "
+        f"'{FALLBACK}'.")
+
+
+@pytest.mark.parametrize("key", sorted(REFUSAL_SAMPLES))
+def test_no_refusal_reason_falls_through_to_the_fallback(key):
+    out = _verify_mod.blockers({"ok": False, key: REFUSAL_SAMPLES[key]})
+
+    assert out, f"{key} refused the build and blockers() said nothing"
+    assert not any(FALLBACK in line for line in out), (
+        f"{key} reaches the fallback: {out}")
+
+
+def test_untested_code_names_the_files():
+    out = _verify_mod.blockers({"ok": False, "untested_code": ["core/parsers/x.py"]})
+
+    assert any("core/parsers/x.py" in line for line in out)
+    assert not any(FALLBACK in line for line in out)
+
+
+def test_the_fallback_still_exists_for_a_refusal_nothing_explains():
+    """Not removed — a verification that is not-ok for no recorded reason is
+    itself worth showing, rather than an empty list that reads as approval."""
+    out = _verify_mod.blockers({"ok": False})
+
+    assert len(out) == 1 and FALLBACK in out[0]
+
+
+# --- a retry is part of the same build ---------------------------------------
+#
+# Found in a real run. Round 1 wrote the parser, registered it, wrote the test
+# and ran it; the lint gate refused it for two unused locals. Round 2 did exactly
+# what it was told — four edits to the parser — and wrote no `tests/` file,
+# because none was needed. `fold_untested` then refused a build whose test
+# existed and passed. The better the agent obeyed the correction, the more
+# certainly it failed the next gate.
+
+def test_a_retry_that_only_fixes_the_fault_is_not_called_untested(monkeypatch):
+    seen = _runner(monkeypatch, [
+        _Result(_wrote("core/parsers/harbor.py", "tests/test_parser_harbor.py")),
+        # The correction: same file, four edits, no new test — nothing else was wrong.
+        _Result([("str_replace", {"path": "core/parsers/harbor.py"}) for _ in range(4)]),
+    ])
+    verifications = iter([
+        {"ok": False, "test": {"ok": True},
+         "lint": [{"path": "core/parsers/harbor.py", "line": 131, "code": "F841",
+                   "detail": "Local variable `current_property` is assigned to but never used"}]},
+        {"ok": True, "test": {"ok": True}},
+    ])
+
+    _, v = codegen.run_codegen_gated(
+        "build the parser", "SYSTEM", lambda: dict(next(verifications)),
+        on_event=lambda _: None)
+
+    assert len(seen["tasks"]) == 2, "the lint finding should have triggered the retry"
+    assert "untested_code" not in v, (
+        "the test written in round 1 still exists — a build is all of its rounds")
+    assert v["ok"] is True
+
+
+def test_a_build_that_never_writes_a_test_is_still_refused(monkeypatch):
+    """The accumulation must not become an amnesty: no test in ANY round is
+    still no test."""
+    seen = _runner(monkeypatch, [
+        _Result(_wrote("core/parsers/harbor.py")),
+        _Result(_wrote("core/parsers/harbor.py")),
+    ])
+
+    _, v = codegen.run_codegen_gated(
+        "build the parser", "SYSTEM", lambda: {"ok": True}, on_event=lambda _: None)
+
+    assert len(seen["tasks"]) == 2
+    assert v["untested_code"] == ["core/parsers/harbor.py"]
+    assert v["ok"] is False
+
+
+def test_the_same_file_edited_repeatedly_is_named_once():
+    """Four edits to one file are one changed file; the message said it thrice."""
+    calls = [("str_replace", {"path": "core/parsers/harbor.py"}) for _ in range(4)]
+
+    assert codegen.files_written(calls) == ["core/parsers/harbor.py"]
+    assert codegen.untested_code_files(calls) == ["core/parsers/harbor.py"]
