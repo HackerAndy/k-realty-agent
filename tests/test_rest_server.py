@@ -5,6 +5,7 @@ endpoint. Verifies dispatch, error mapping, and that the dashboard is served.
 """
 
 from pathlib import Path
+import re
 
 import pytest
 
@@ -53,8 +54,17 @@ def test_bad_arguments_map_to_400():
 
 
 def test_dashboard_is_served():
+    """The built frontend (frontend/ -> Vite -> interfaces/web/dist/) is served
+    at '/', asset-hashed JS and all. Minification renames the callTool
+    identifier itself, so the thing worth pinning is the string literal it
+    fetches — '/api/tool/' — the actual transport-swap-point contract between
+    the frontend and this server."""
     r = client.get("/")
-    assert r.status_code == 200 and "K-Realty" in r.text and "callTool" in r.text
+    assert r.status_code == 200 and "K-Realty" in r.text
+
+    bundle_src = re.search(r'src="([^"]+\.js)"', r.text).group(1)
+    bundle = client.get(bundle_src)
+    assert bundle.status_code == 200 and "/api/tool/" in bundle.text
 
 
 def test_upload_ingest_success(monkeypatch):

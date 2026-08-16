@@ -1,0 +1,13 @@
+{
+  "name": "k-realty-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Desktop shell for K-Realty — spawns the local agent-web backend and opens it in a native window.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^43.0.0"
+  }
+}

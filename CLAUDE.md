@@ -11,10 +11,12 @@
 ## Quick reference
 
 - Setup: `poetry install`. Two entry points ([pyproject.toml](pyproject.toml)):
-  `poetry run agent-web` (REST + browser UI, [interfaces/rest_server.py](interfaces/rest_server.py) +
-  [interfaces/web/index.html](interfaces/web/index.html)) and `poetry run agent-mcp`
+  `poetry run agent-web` (REST + browser UI, [interfaces/rest_server.py](interfaces/rest_server.py)
+  serving [frontend/](frontend/)'s Vite build) and `poetry run agent-mcp`
   (MCP server, [interfaces/mcp_server.py](interfaces/mcp_server.py)). The GUI is the sole
-  front-end; the questionary TUI was deleted once the GUI reached parity.
+  front-end; the questionary TUI was deleted once the GUI reached parity. The GUI
+  also ships as a desktop app — [desktop/](desktop/), an Electron shell that
+  spawns this same backend and points a window at it; no separate frontend code.
   [scripts/manage_secrets.py](scripts/manage_secrets.py) remains as a CLI for key
   generation and bulk credential edits.
 - Python **3.14**, Poetry. Tests: `poetry run pytest`. Portability lint (`core/`/`evals/`

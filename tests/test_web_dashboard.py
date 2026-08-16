@@ -1,11 +1,17 @@
-"""Cheap guards on the single-file web dashboard.
+"""Cheap guards on the web dashboard's JS.
 
-interfaces/web/index.html carries ~1000 lines of hand-written JS and no build
-step, so nothing catches a syntax error before the operator opens the page — and
-a broken parse takes out the WHOLE app silently: every handler becomes undefined,
-the panel renders empty, and no console error necessarily surfaces. That happened
-during development (a duplicated `let paths` left behind by an edit), and cost
-more to diagnose than this file costs to keep.
+frontend/src/legacy/app.js still carries ~3000 lines of hand-written,
+template-string-rendering JS (the pre-modularization dashboard, moved
+mechanically into a Vite project — see frontend/README or the promotion-log
+note on the frontend/desktop split). Vite's own build catches a hard syntax
+error, but not a silently-wrong one (a duplicated `let paths` left behind by
+an edit passed `vite build` fine and still bricked every handler on the page —
+that's the incident these guards exist for), so this file keeps checking the
+source directly rather than trusting the bundler alone.
+
+As views get extracted out of app.js into frontend/src/views/*.js (see
+docs/frontend-migration notes), each extracted file should get the same
+`node --check` + dangling-handler guards, not lose them.
 """
 
 import json
@@ -16,30 +22,52 @@ from pathlib import Path
 
 import pytest
 
-DASHBOARD = Path("interfaces/web/index.html")
+DASHBOARD_HTML = Path("frontend/index.html")
+SRC_DIR = Path("frontend/src")
+
+
+def _source_files() -> list[Path]:
+    return sorted(SRC_DIR.rglob("*.js"))
 
 
 def _script() -> str:
-    html = DASHBOARD.read_text()
-    scripts = re.findall(r"<script>(.*?)</script>", html, re.S)
-    assert scripts, "the dashboard has no inline script"
-    return "\n".join(scripts)
+    """All of the dashboard's JS, concatenated — for definition-scanning and
+    for pulling one self-contained function's source out via
+    _function_source(). NOT meant to be run as a single program: it's several
+    ES modules now (legacy/app.js + views/*.js), each syntax-checked
+    separately by test_the_dashboard_scripts_parse."""
+    return "\n".join(p.read_text() for p in _source_files())
+
+
+def _all_markup() -> str:
+    """Every place an onclick/onchange attribute can appear: the static shell
+    in frontend/index.html, and the dynamic template strings the scripts build
+    panels from — the wizard/source panels are innerHTML'd from JS, not
+    present in the shell markup at all."""
+    return DASHBOARD_HTML.read_text() + "\n" + _script()
 
 
 @pytest.mark.skipif(not shutil.which("node"), reason="node not installed")
-def test_the_dashboard_script_parses():
-    """The guard that matters: a parse error bricks every button on the page."""
-    proc = subprocess.run(["node", "--check", "-"], input=_script(),
-                          capture_output=True, text=True, timeout=30)
-    assert proc.returncode == 0, f"index.html script does not parse:\n{proc.stderr}"
+def test_the_dashboard_scripts_parse():
+    """The guard that matters: a parse error bricks every button on the page.
+
+    Each file is checked separately (as an ES module — they use import/export
+    now) rather than concatenated into one program: a concatenation would
+    parse import/export statements from multiple files as one module and
+    prove nothing about whether any individual file is valid on its own.
+    """
+    for path in _source_files():
+        proc = subprocess.run(["node", "--check", "--input-type=module", "-"],
+                              input=path.read_text(), capture_output=True, text=True, timeout=30)
+        assert proc.returncode == 0, f"{path} does not parse:\n{proc.stderr}"
 
 
 def test_every_inline_handler_names_a_function_that_exists():
     """A typo'd handler is invisible until someone clicks (or picks a file)."""
-    html = DASHBOARD.read_text()
+    markup = _all_markup()
     script = _script()
     called = {m.group(1)
-              for m in re.finditer(r"on(?:click|change)=[\"'](?:event\.\w+\(\);)?(\w+)\(", html)}
+              for m in re.finditer(r"on(?:click|change)=[\"'](?:event\.\w+\(\);)?(\w+)\(", markup)}
     defined = set()
     for pattern in (
         r"(?:async\s+)?function\s+(\w+)\s*\(",     # function foo(...)
@@ -49,6 +77,47 @@ def test_every_inline_handler_names_a_function_that_exists():
         defined |= {m.group(1) for m in re.finditer(pattern, script)}
     missing = called - defined
     assert not missing, f"onclick handlers with no definition: {sorted(missing)}"
+
+
+def test_every_inline_handler_is_reachable_from_window():
+    """Existing (in some file) is not the same as callable (from an inline
+    handler). ES modules don't expose their top-level declarations globally
+    the way the old single classic <script> did, so each file that generates
+    onclick/onchange markup explicitly re-attaches what that markup calls onto
+    `window` (see the Object.assign(window, {...}) block at the bottom of
+    legacy/app.js and views/wizard.js). A function can be defined, tested, and
+    still be invisible to a click if that line is missing — this is the gap
+    that let `runRoute`, `renderIngest`, and the bare `wiz.carrier=...`/
+    `wiz.fork=...`/`wiz.label=...` mutations slip through during the module
+    migration despite every function existing and every test up to this one
+    passing. `event` is the one implicit global inline handlers get for free.
+
+    Handles two shapes: a bare call (`onclick="foo('x')"`, optionally after an
+    `event.stopPropagation();`-style prefix) and a bare property mutation
+    (`onchange="wiz.carrier=this.value"`) — both need their LEADING identifier
+    on window, whether it turns out to be a function or a plain object.
+    """
+    markup = _all_markup()
+    script = _script()
+
+    called = set()
+    for m in re.finditer(r'on(?:click|change|input)="((?:[^"\\]|\\.)*)"', markup):
+        for stmt in m.group(1).replace("\\'", "'").split(";"):
+            ref = re.match(r"^([a-zA-Z_]\w*)\s*(?:\(|\.|=)", stmt.strip())
+            if ref:
+                called.add(ref.group(1))
+    called.discard("event")
+
+    exported = set()
+    for block in re.finditer(r"Object\.assign\(window,\s*\{(.*?)\}\s*\)", script, re.S):
+        exported |= {name for name in re.findall(r"(\w+)\s*(?:,|$)", block.group(1)) if name}
+
+    missing = called - exported
+    assert not missing, (
+        f"inline handlers reference {sorted(missing)}, which no "
+        "Object.assign(window, {...}) block exports — defined somewhere is not "
+        "the same as reachable from a click."
+    )
 
 
 # --- the graph's two columns line up ----------------------------------------
@@ -216,11 +285,11 @@ def test_no_way_to_pin_a_favourite_route_is_left_on_the_page():
     """The star set a default the operator then had to keep in sync with what
     actually ran. Opening onto the last run answers the same question from
     history, so the control — and its handler — are gone rather than dormant."""
-    html = DASHBOARD.read_text()
+    markup = _all_markup()
 
-    assert "pinDefault" not in html
-    assert "set_default_transport" not in html
-    assert "★" not in html and "☆" not in html
+    assert "pinDefault" not in markup
+    assert "set_default_transport" not in markup
+    assert "★" not in markup and "☆" not in markup
 
 
 def test_the_transport_tool_surface_the_page_calls_actually_exists():
@@ -232,9 +301,9 @@ def test_the_transport_tool_surface_the_page_calls_actually_exists():
     """
     from interfaces import mcp_tools
 
-    html = DASHBOARD.read_text()
+    script = _script()
     names = {fn.__name__ for fn in mcp_tools.ALL_TOOLS}
-    called = set(re.findall(r"callTool\(\s*'(\w+)'", html))
-    called |= set(re.findall(r"\bact\(\s*'(\w+)'", html))
+    called = set(re.findall(r"callTool\(\s*'(\w+)'", script))
+    called |= set(re.findall(r"\bact\(\s*'(\w+)'", script))
     missing = called - names
     assert not missing, f"page calls tools that are not registered: {sorted(missing)}"

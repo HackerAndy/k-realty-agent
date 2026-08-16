@@ -46,7 +46,13 @@ run in CI on every push/PR (see [.github/workflows/ci.yml](.github/workflows/ci.
 
 ```bash
 poetry install
+cd frontend && npm install && npm run build && cd ..
 ```
+
+The frontend build is a one-time (or per-change) step, not something
+`agent-web` does for you — it serves whatever's already in
+`interfaces/web/dist/` (gitignored, generated). Rebuild after touching
+anything under `frontend/src/`.
 
 ## Running the agent
 
@@ -68,6 +74,40 @@ The same tool surface is also exposed over MCP for a Claude host:
 ```bash
 poetry run agent-mcp
 ```
+
+### Desktop app
+
+```bash
+cd desktop && npm install && npm start
+```
+
+Opens the same GUI in a native window — `desktop/main.js` spawns `poetry run
+agent-web` as a child process, waits for it to answer, and points a
+`BrowserWindow` at it. No separate frontend code: it's the identical
+`frontend/dist` bundle making the identical `/api/tool/...` calls, just inside
+Electron's Chromium instead of your regular browser. Requires Poetry and the
+frontend build to already be set up (see Setup, above) — packaging a
+self-contained desktop build that doesn't need Poetry installed is not done
+yet.
+
+### Frontend development
+
+```bash
+cd frontend && npm run dev
+```
+
+Runs Vite's dev server with hot reload, proxying `/api/*` to a separately
+running `poetry run agent-web` (port 8765) so `callTool()`'s relative
+`fetch('/api/tool/...')` keeps working unchanged. `frontend/src/legacy/app.js`
+is the pre-modularization dashboard, moved into this project mechanically and
+unchanged in behavior; `frontend/src/views/` is where logic is being pulled
+out of it view-by-view (see `wizard.js` for the pattern: import shared state
+and helpers from `legacy/app.js`, export what `legacy/app.js` needs back —
+`addSourceHTML` — and re-attach every function an inline `onclick`/`onchange`
+in this file's own generated markup calls onto `window`, since ES modules
+don't do that automatically the way the old single `<script>` did).
+`tests/test_web_dashboard.py` guards this contract — a function that exists
+but isn't window-exported is invisible to a click, not a compile error.
 
 **Adding a source.** `core/policies/services.yaml` is the registry: each source
 with its `input_type`, `access`, `parser`/`scraper`, and `status`. The code that

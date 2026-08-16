@@ -25,21 +25,35 @@ import time
 
 from fastapi import Body, FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from interfaces import mcp_tools
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-WEB_DIR = Path(__file__).resolve().parent / "web"
+# frontend/ (a Vite project) builds here — see frontend/vite.config.js. Not
+# interfaces/web/ directly: that stayed a plain static dir pre-modularization,
+# this is generated output, gitignored like any other build artifact.
+WEB_DIR = Path(__file__).resolve().parent / "web" / "dist"
 
 # Same tool surface the MCP server exposes — one source of truth.
 TOOLS = {fn.__name__: fn for fn in mcp_tools.ALL_TOOLS}
 
 app = FastAPI(title="k-realty")
 
+if (WEB_DIR / "assets").is_dir():
+    app.mount("/assets", StaticFiles(directory=WEB_DIR / "assets"), name="assets")
+
 
 @app.get("/")
 def index() -> FileResponse:
-    return FileResponse(WEB_DIR / "index.html")
+    index_html = WEB_DIR / "index.html"
+    if not index_html.exists():
+        raise HTTPException(
+            status_code=500,
+            detail=f"Frontend not built — run 'npm install && npm run build' in frontend/ "
+                    f"(expected {index_html}).",
+        )
+    return FileResponse(index_html)
 
 
 @app.post("/api/tool/{name}")

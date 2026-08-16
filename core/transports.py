@@ -25,7 +25,7 @@ upload" long after Epic's website had taken over, and the automation verdict
 computed from it then called a self-running source manual. Each route already
 carries `available` and `unattended`; anything that needs to choose one reads
 those and says WHICH route it chose. The screen selects the route that last RAN
-(interfaces/web/index.html, lastRunRoute) — history, which cannot go stale.
+(frontend/src/legacy/app.js, lastRunRoute) — history, which cannot go stale.
 
 This module must stay framework-free (no langgraph/langchain imports).
 """

@@ -54,5 +54,17 @@ jobs:
       # removing this step loses the coverage silently — leave it.
       - name: Install Chromium
         run: poetry run playwright install --with-deps chromium
+      # rest_server.py serves frontend/'s Vite build (interfaces/web/dist/,
+      # gitignored like any build artifact), and test_dashboard_is_served
+      # fetches the real built bundle — so it has to exist before pytest runs,
+      # same as any other generated file the tests depend on.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Build frontend
+        run: |
+          cd frontend
+          npm ci
+          npm run build
       - name: Run tests
         run: poetry run pytest
