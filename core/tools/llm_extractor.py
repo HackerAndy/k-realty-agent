@@ -23,8 +23,6 @@ Framework-free (the anthropic SDK is plain Python, allowed in core/).
 
 from __future__ import annotations
 
-import json
-import re
 from datetime import datetime
 from pathlib import Path
 
@@ -90,44 +88,6 @@ def _parse_date(date_str: str) -> datetime:
     ))
 
 
-def _rows_from_anthropic(choice, system: str, user: str) -> list[_Row]:
-    import anthropic
-
-    response = anthropic.Anthropic(api_key=choice.api_key).messages.parse(
-        model=choice.model,
-        max_tokens=16000,
-        system=system,
-        messages=[{"role": "user", "content": user}],
-        output_format=_Extracted,
-    )
-    return response.parsed_output.transactions
-
-
-def _rows_from_openai_compatible(choice, system: str, user: str) -> list[_Row]:
-    """The same job against any OpenAI-compatible server. No structured-output
-    API to lean on, so the shape is asked for in the prompt and the reply is
-    parsed leniently — local models like to say hello before the JSON."""
-    data = llm_provider.chat_completion(
-        choice.base_url,
-        choice.api_key,
-        {
-            "model": choice.model,
-            "max_tokens": 16000,
-            "temperature": 0,
-            "messages": [
-                {"role": "system", "content": f"{system}\n\n{JSON_INSTRUCTION}"},
-                {"role": "user", "content": user},
-            ],
-        },
-        timeout_s=600,   # a long document on a local box is minutes, not seconds
-    )
-    raw = data["choices"][0]["message"]["content"] or ""
-    match = re.search(r"\{.*\}", raw, re.S)
-    if not match:
-        raise ValueError(f"the reply contained no JSON object (started {raw[:120]!r})")
-    return _Extracted.model_validate(json.loads(match.group(0))).transactions
-
-
 def extract_with_model(
     document_text: str, source_key: str, source_label: str
 ) -> tuple[list[Transaction], llm_provider.LLMChoice]:
@@ -141,8 +101,12 @@ def extract_with_model(
     )
 
     try:
-        rows = (_rows_from_anthropic(choice, system, user) if choice.is_anthropic
-                else _rows_from_openai_compatible(choice, system, user))
+        rows = llm_provider.complete_json(
+            choice, system, user, _Extracted,
+            json_instruction=JSON_INSTRUCTION,
+            max_tokens=16000,
+            timeout_s=600,   # a long document on a local box is minutes, not seconds
+        ).transactions
     except Exception as exc:
         raise ExtractionError(log.failure(
             operation="llm_extract",

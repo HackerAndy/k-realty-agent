@@ -57,30 +57,7 @@ def _complete(system: str, user: str) -> str:
     from core.tools import llm_provider
 
     choice = llm_provider.resolve()
-
-    if choice.is_anthropic:
-        import anthropic
-
-        message = anthropic.Anthropic(api_key=choice.api_key).messages.create(
-            model=choice.model,
-            max_tokens=64,
-            system=system,
-            messages=[{"role": "user", "content": user}],
-        )
-        return "".join(b.text for b in message.content if b.type == "text")
-
-    data = llm_provider.chat_completion(
-        choice.base_url,
-        choice.api_key,
-        {
-            "model": choice.model,
-            "max_tokens": 64,
-            "temperature": 0,
-            "messages": [{"role": "system", "content": system},
-                         {"role": "user", "content": user}],
-        },
-    )
-    return data["choices"][0]["message"]["content"]
+    return llm_provider.complete_text(choice, system, user, max_tokens=64)
 
 
 DESCRIBE_SYSTEM = (

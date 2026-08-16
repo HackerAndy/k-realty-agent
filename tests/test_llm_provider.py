@@ -224,6 +224,35 @@ def test_describe_says_which_model_and_where_it_came_from(tmp_path, monkeypatch)
     assert "qwen-30b" in described and "Settings" in described
 
 
+# --- one-shot completions ----------------------------------------------------
+#
+# complete_text/complete_json used to be hand-rolled independently at each call
+# site (naming.py, llm_extractor.py), and neither checked for anything but
+# "is this anthropic" — so choosing claude_code (a real, supported provider)
+# sent them down the openai_compatible branch with base_url=None and crashed on
+# .rstrip(). A clear refusal is the fix, not a mystery AttributeError.
+
+def test_complete_text_refuses_the_agent_provider(tmp_path, monkeypatch):
+    _isolate(tmp_path, monkeypatch)
+    lp.store_llm_credential("claude_code", model="sonnet")
+
+    with pytest.raises(ValueError, match="claude_code"):
+        lp.complete_text(lp.resolve(), "system", "user")
+
+
+def test_complete_json_refuses_the_agent_provider(tmp_path, monkeypatch):
+    from pydantic import BaseModel
+
+    class _Schema(BaseModel):
+        ok: bool
+
+    _isolate(tmp_path, monkeypatch)
+    lp.store_llm_credential("claude_code", model="sonnet")
+
+    with pytest.raises(ValueError, match="claude_code"):
+        lp.complete_json(lp.resolve(), "system", "user", _Schema, json_instruction="{}")
+
+
 # --- local-network detection -------------------------------------------------
 
 @pytest.mark.parametrize(

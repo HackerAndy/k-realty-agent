@@ -82,11 +82,13 @@ def test_the_anthropic_path_uses_the_chosen_model_too(tmp_path, monkeypatch):
     lp.store_llm_credential("anthropic", api_key="sk-test", model="claude-haiku-4-5-20251001")
     used = {}
 
-    def fake_rows(choice, system, user):
+    def fake_complete_json(choice, system, user, schema, **kwargs):
         used["model"] = choice.model
-        return [extractor._Row(date="5/16/2026", description="Rent", amount=1200.0)]
+        return extractor._Extracted(
+            transactions=[extractor._Row(date="5/16/2026", description="Rent", amount=1200.0)]
+        )
 
-    monkeypatch.setattr(extractor, "_rows_from_anthropic", fake_rows)
+    monkeypatch.setattr(lp, "complete_json", fake_complete_json)
 
     extractor.extract_with_model("text", "fresh", "A New Source")
 

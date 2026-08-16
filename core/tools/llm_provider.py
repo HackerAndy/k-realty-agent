@@ -20,9 +20,12 @@ import errno as _errno
 import ipaddress
 import json
 import os
+import re
 import sys
 from urllib import error, request
 from urllib.parse import urlparse
+
+from pydantic import BaseModel
 
 from core.observability import get_logger
 from core.tools.credential_store import CredentialStore, CredentialStoreError
@@ -273,6 +276,102 @@ def chat_completion(base_url: str, api_key: str, payload: dict, timeout_s: int =
         raise RuntimeError(f"OpenAI-compatible API error {exc.code}: {detail}") from exc
     except error.URLError as exc:
         raise RuntimeError(f"Could not reach OpenAI-compatible API at {url}: {exc}") from exc
+
+
+def _refuse_agent_provider(choice: "LLMChoice", fn_name: str) -> None:
+    if choice.is_agent:
+        raise ValueError(
+            f"{fn_name}() doesn't support '{choice.provider}' — it drives its own tool loop, "
+            "not a single request/response call. Route this through orchestration/agent.py, "
+            "or resolve a different provider."
+        )
+
+
+def complete_text(choice: "LLMChoice", system: str, user: str, *, max_tokens: int = 1024) -> str:
+    """One-shot plain-text completion on WHATEVER the operator chose in Settings.
+
+    For the cheap single-answer calls (a naming suggestion, a document
+    description) — not the multi-turn, tool-using agent loop; see
+    orchestration/agent.py for that.
+    """
+    _refuse_agent_provider(choice, "complete_text")
+
+    if choice.is_anthropic:
+        import anthropic
+
+        message = anthropic.Anthropic(api_key=choice.api_key).messages.create(
+            model=choice.model,
+            max_tokens=max_tokens,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+        )
+        return "".join(b.text for b in message.content if b.type == "text")
+
+    data = chat_completion(
+        choice.base_url,
+        choice.api_key,
+        {
+            "model": choice.model,
+            "max_tokens": max_tokens,
+            "temperature": 0,
+            "messages": [{"role": "system", "content": system},
+                         {"role": "user", "content": user}],
+        },
+    )
+    return data["choices"][0]["message"]["content"]
+
+
+def complete_json(
+    choice: "LLMChoice",
+    system: str,
+    user: str,
+    schema: type[BaseModel],
+    *,
+    json_instruction: str,
+    max_tokens: int = 4096,
+    timeout_s: int = 120,
+) -> BaseModel:
+    """One-shot structured completion, validated against `schema`.
+
+    Anthropic gets real structured output (`messages.parse`). An OpenAI-compatible
+    server has no such API, so the shape is spelled out in `json_instruction`
+    (caller-supplied — tuned wording matters here, small local models answer more
+    reliably to a worked example than to a raw JSON-schema dump) and the reply is
+    parsed leniently, since local models like to chat before the JSON.
+    """
+    _refuse_agent_provider(choice, "complete_json")
+
+    if choice.is_anthropic:
+        import anthropic
+
+        response = anthropic.Anthropic(api_key=choice.api_key).messages.parse(
+            model=choice.model,
+            max_tokens=max_tokens,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+            output_format=schema,
+        )
+        return response.parsed_output
+
+    data = chat_completion(
+        choice.base_url,
+        choice.api_key,
+        {
+            "model": choice.model,
+            "max_tokens": max_tokens,
+            "temperature": 0,
+            "messages": [
+                {"role": "system", "content": f"{system}\n\n{json_instruction}"},
+                {"role": "user", "content": user},
+            ],
+        },
+        timeout_s=timeout_s,
+    )
+    raw = data["choices"][0]["message"]["content"] or ""
+    match = re.search(r"\{.*\}", raw, re.S)   # local models like to chat first
+    if not match:
+        raise ValueError(f"the reply contained no JSON object (started {raw[:120]!r})")
+    return schema.model_validate(json.loads(match.group(0)))
 
 
 def is_configured() -> bool:
