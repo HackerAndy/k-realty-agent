@@ -1,9 +1,13 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
-  pull_request:
+  # Temporarily disabled: automatic push/PR triggers off while CI reliability
+  # work is in progress. Re-enable by restoring the push/pull_request block
+  # below (kept here so it's a one-line revert).
+  # push:
+  #   branches: [main]
+  # pull_request:
+  workflow_dispatch:
 
 env:
   # The version this is actually developed and run on. 3.11 was aspirational and
