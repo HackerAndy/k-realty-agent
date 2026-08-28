@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PROTOTYPE — acquiring vs reading, as two stages</title>
+<style>
+  /* Tokens copied from interfaces/web/index.html so this looks like the app. */
+  :root {
+    --bg: #faf9f5; --card: #ffffff; --border: #e7e5df; --text: #1c1b19;
+    --muted: #6b6a64; --accent: #3b6d3b; --danger: #a3312d; --success: #2c6a3a;
+    --radius: 10px; --accent-soft: #e9f1e7; --faint: #9a9c92;
+    --shadow: 0 1px 2px rgba(28,27,25,.05), 0 6px 20px rgba(28,27,25,.06);
+  }
+  :root[data-theme="dark"] {
+    --bg: #161818; --card: #202325; --border: #34393d; --text: #e8ecef;
+    --muted: #a2abb2; --accent: #88c888; --danger: #f08a84; --success: #94d89f;
+    --accent-soft: #26302a; --faint: #7c847c;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 8px 24px rgba(0,0,0,.35);
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); line-height: 1.5;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 22px 20px 120px; }
+  h1 { font-size: 21px; margin: 0 0 2px; letter-spacing: -.02em; }
+  .lede { color: var(--muted); font-size: 13px; margin: 0 0 18px; }
+  .assume { border: 1px dashed color-mix(in oklab, var(--accent) 40%, var(--border));
+    background: var(--accent-soft); border-radius: var(--radius); padding: 11px 13px;
+    font-size: 12.5px; margin-bottom: 18px; }
+  .assume > b:first-child { display: block; margin-bottom: 3px; }
+
+  .card { border: 1px solid var(--border); background: var(--card); border-radius: 12px;
+    box-shadow: var(--shadow); overflow: hidden; }
+  .cardhead { display: flex; align-items: center; gap: 10px; padding: 13px 16px;
+    border-bottom: 1px solid var(--border); }
+  .cardhead .dot { width: 8px; height: 8px; border-radius: 999px; background: var(--accent); }
+  .cardhead b { font-size: 15px; }
+  .cardhead .tag { font-size: 11px; color: var(--muted); border: 1px solid var(--border);
+    border-radius: 999px; padding: 1px 8px; }
+  .body { padding: 16px; }
+
+  /* stage scaffolding */
+  .stagelbl { font-size: 11px; text-transform: uppercase; letter-spacing: .07em;
+    color: var(--faint); margin-bottom: 7px; }
+  .stagelbl .n { display: inline-flex; width: 15px; height: 15px; border-radius: 999px;
+    background: color-mix(in oklab, var(--muted) 18%, var(--card)); color: var(--muted);
+    align-items: center; justify-content: center; font-size: 10px; margin-right: 6px; }
+
+  .doors { display: flex; flex-direction: column; gap: 8px; }
+  .door { display: flex; align-items: center; gap: 9px; font-size: 12.5px; cursor: pointer;
+    border: 1px solid var(--border); border-radius: 10px; padding: 9px 12px;
+    background: color-mix(in oklab, var(--muted) 5%, var(--card)); }
+  .door:hover { border-color: color-mix(in oklab, var(--accent) 55%, var(--border)); }
+  .door.sel { border-color: var(--accent); background: color-mix(in oklab, var(--accent) 12%, var(--card)); }
+  .door .t { font-weight: 600; }
+  .door .w { color: var(--muted); font-size: 11.5px; margin-left: auto; text-align: right; }
+  .door .star { width: 15px; flex: none; color: var(--accent); font-size: 13px; }
+  .door .run { flex: none; margin-left: 10px; width: 22px; height: 22px; border-radius: 6px;
+    border: 1px solid var(--border); display: flex; align-items: center; justify-content: center;
+    font-size: 13px; color: var(--muted); }
+  .door .run:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* the parser stage */
+  .parser { border: 1px solid var(--border); border-radius: 10px; padding: 11px 13px; cursor: pointer;
+    background: color-mix(in oklab, var(--muted) 5%, var(--card)); }
+  .parser:hover { border-color: color-mix(in oklab, var(--accent) 55%, var(--border)); }
+  .parser.sel { border-color: var(--accent); background: color-mix(in oklab, var(--accent) 12%, var(--card)); }
+  .parser .nm { font-weight: 600; font-size: 12.5px; display: flex; align-items: center; gap: 8px;
+    flex-wrap: wrap; }
+  .parser .nm code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
+    font-weight: 400; color: var(--muted); }
+  .parser .sub { color: var(--muted); font-size: 11.5px; margin-top: 3px; }
+  .pass { color: var(--success); font-size: 11px; border: 1px solid color-mix(in oklab, var(--success) 40%, var(--border));
+    border-radius: 999px; padding: 1px 8px; }
+
+  .count .big { font-size: 26px; font-weight: 700; letter-spacing: -.02em; line-height: 1.1; }
+  .count .cap { color: var(--muted); font-size: 12px; }
+
+  .pipe { color: var(--muted); opacity: .55; display: grid; place-items: center; }
+
+  /* settings slot + data */
+  .slot { border: 1px solid color-mix(in oklab, var(--accent) 35%, var(--border));
+    background: color-mix(in oklab, var(--accent) 6%, var(--card));
+    border-radius: 10px; padding: 13px; margin: 14px 0; font-size: 12.5px; }
+  .slot .h { font-weight: 600; margin-bottom: 6px; }
+  .slot .field { margin: 8px 0; }
+  .slot label { display: block; font-size: 11.5px; color: var(--muted); margin-bottom: 3px; }
+  .slot input, .slot select { width: 100%; padding: 7px 9px; border: 1px solid var(--border);
+    border-radius: 8px; background: var(--card); color: var(--text); font: inherit; font-size: 12.5px; }
+  .btn { border: 1px solid var(--border); background: var(--card); color: var(--text);
+    border-radius: 8px; padding: 6px 11px; font-size: 12.5px; cursor: pointer; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  :root[data-theme="dark"] .btn.primary { color: #12160f; }
+
+  .kstrip { display: flex; gap: 0; border: 1px solid var(--border); border-radius: 10px;
+    overflow: hidden; margin: 14px 0 10px; }
+  .kstrip .k { flex: 1; padding: 9px 12px; border-right: 1px solid var(--border); }
+  .kstrip .k:last-child { border-right: 0; }
+  .kstrip .l { font-size: 11px; color: var(--muted); }
+  .kstrip .v { font-weight: 700; }
+  .pos { color: var(--success); } .neg { color: var(--danger); }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; font-size: 11.5px; }
+  .empty { border: 1px dashed var(--border); border-radius: 10px; padding: 16px;
+    color: var(--muted); font-size: 12.5px; text-align: center; }
+
+  /* variant switcher */
+  .switcher { position: fixed; left: 0; right: 0; bottom: 0; background: var(--card);
+    border-top: 1px solid var(--border); padding: 9px 14px; display: flex; gap: 8px;
+    align-items: center; flex-wrap: wrap; z-index: 9; box-shadow: 0 -6px 20px rgba(0,0,0,.06); }
+  .switcher b { font-size: 12px; margin-right: 4px; }
+  .switcher a { font-size: 12.5px; text-decoration: none; color: var(--text);
+    border: 1px solid var(--border); border-radius: 999px; padding: 4px 12px; }
+  .switcher a.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  :root[data-theme="dark"] .switcher a.on { color: #12160f; }
+  .switcher .note { font-size: 11.5px; color: var(--muted); margin-left: auto; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>PROTOTYPE · getting the data and reading the data are two stages</h1>
+  <p class="lede" id="lede"></p>
+
+  <div class="assume">
+    <b>Assumption baked into all three — say if it's wrong.</b>
+    A <b>portal scrape</b> needs no parser: the scraper signs in and returns rows itself, so it
+    goes straight to the transactions. <b>File upload</b> and <b>email</b> both land a document,
+    so both flow through the parser. That's why the parser stage has two inputs, not three.
+  </div>
+
+  <div id="mount"></div>
+</div>
+
+<div class="switcher" id="switcher"></div>
+
+<script>
+/* PROTOTYPE — wipe me. Fake data, no server, no persistence. */
+
+const SOURCE = {
+  label: 'Epic Property Management',
+  // Stage 1 — getting at it. Each of these is a route, and carries the ★/⏵.
+  routes: [
+    { id: 'upload',  icon: '⬆', label: 'File upload', w: 'needs you',          reader: 'parser' },
+    { id: 'website', icon: '⌘', label: 'Website',     w: 'can run unattended', reader: 'api',
+      detail: 'epicpropertymanagement.managebuilding.com' },
+    { id: 'email',   icon: '✉', label: 'Mailbox',     w: 'can run unattended', reader: 'parser',
+      def: true, detail: 'rentals@krealtyllc.org' },
+  ],
+  // Stage 2 — reading it. Two kinds, because the two kinds really are different.
+  readers: {
+    parser: { label: 'Parser', code: 'buildium_owner_statement', kind: 'document',
+              test: 'test_parser_epic.py passing',
+              last: 'read 14 rows from Owner Statement 2026-05.pdf' },
+    api:    { label: 'API call', code: '/manager/api/generalLedger/transactions', kind: 'portal',
+              test: 'test_scraper_epic_property_management.py passing',
+              last: 'pulled 14 rows · 30-day window ending today' },
+  },
+  parser: {
+    name: 'buildium_owner_statement',
+    test: 'test_parser_epic.py passing',
+    last: 'read 14 rows from Owner Statement 2026-05.pdf',
+  },
+  live: 'email',                 // which route the data on screen came by
+  count: 14,
+  rows: [
+    ['5/16/2026', 'Rent — 1408 Oak, Unit 2', '1,200.00'],
+    ['5/18/2026', 'Plumbing repair — Fenn', '-340.50'],
+    ['5/31/2026', 'Management fee', '-96.00'],
+  ],
+};
+
+const VARIANTS = {
+  a: { name: 'A · CHOSEN — three ways in, two kinds of reading', render: variantA,
+       q: 'Chosen shape, refined: a website is a way IN, and the API call that reads it is its own node — as the parser is for documents. Click any node for its panel.' },
+  b: { name: 'B · three labelled stages', render: variantB,
+       q: 'Stacked bands that name the stages, so "separate processes" is stated, not implied.' },
+  c: { name: 'C · two panels in series', render: variantC,
+       q: 'Acquire and Read as two sibling panels, each with its own run control — re-read the file you already have without fetching it again.' },
+};
+
+let sel = null;        // selected stage: a route id, or 'parser'
+const variant = (new URLSearchParams(location.search).get('variant') || 'a').toLowerCase();
+
+/* ── shared pieces ─────────────────────────────────────────────────────── */
+
+const dataIsFrom = id => SOURCE.live === id;
+
+function doorHTML(r) {
+  return `<div class="door ${sel === r.id ? 'sel' : ''}" onclick="pick('${r.id}')">
+    <span class="star">${r.def ? '★' : '☆'}</span><span>${r.icon}</span>
+    <span class="t">${r.label}</span>
+    <span class="w">${dataIsFrom(r.id) ? 'last used' : r.w}</span>
+    <span class="run" title="Re-run this process" onclick="event.stopPropagation();run('${r.id}')">⏵</span>
+  </div>`;
+}
+
+/** Stage 2 nodes. A document is read by a PARSER; a portal is read by the API
+ *  call the agent found — different code, different failures, different fix, so
+ *  they are different nodes rather than one "reader". */
+function readerHTML(id) {
+  const r = SOURCE.readers[id];
+  const live = SOURCE.routes.find(x => x.id === SOURCE.live);
+  const isLive = live && live.reader === id;
+  return `<div class="parser ${sel === id ? 'sel' : ''}" onclick="pick('${id}')">
+    <div class="nm">${r.label} <code>${shortCode(r.code)}</code>
+      <span class="pass">tests pass</span>
+      <span class="run" style="margin-left:auto"
+            title="${id === 'parser' ? 'Read the document already on disk again'
+                                     : 'Call the API again with the session we have'}"
+            onclick="event.stopPropagation();run('${id}')">⏵</span></div>
+    <div class="sub">${isLive ? r.last : 'not what produced the rows below'}</div>
+  </div>`;
+}
+
+const shortCode = c => c.length > 34 ? '…' + c.slice(-33) : c;
+
+function parserHTML(compact) {
+  const p = SOURCE.parser;
+  return `<div class="parser ${sel === 'parser' ? 'sel' : ''}" onclick="pick('parser')">
+    <div class="nm">Parser <code>${p.name}</code> <span class="pass">tests pass</span>
+      <span class="run" style="margin-left:auto" title="Read the document we already have again"
+            onclick="event.stopPropagation();run('parser')">⏵</span></div>
+    ${compact ? '' : `<div class="sub">${p.last}</div>`}
+  </div>`;
+}
+
+function settingsSlot() {
+  if (!sel) return '';
+
+  if (sel === 'parser') {
+    // Andy: the agent is needed when a PARSE needs fixing — so the fix panel
+    // lives on this node and nowhere else.
+    return `<div class="slot"><div class="h">Parser — how a document is turned into rows</div>
+      <div>Committed code with a test of its own; the agent wrote both and you approved them.
+        Nothing here is a setting: if the layout changed, the fix is a new version of the code.</div>
+      <div class="field"><label>Code</label><input value="core/parsers/${SOURCE.readers.parser.code}.py" readonly></div>
+      <div class="field"><label>Its test</label><input value="${SOURCE.readers.parser.test}" readonly></div>
+      <div style="display:flex;gap:8px;margin-top:10px">
+        <button class="btn primary">Have the agent fix it</button>
+        <button class="btn">Read the last document again</button></div></div>`;
+  }
+
+  if (sel === 'api') {
+    return `<div class="slot"><div class="h">API call — how the portal hands over rows</div>
+      <div>The agent found the request the portal fires itself, so there are no clicks to replay:
+        it signs in for cookies, takes the XSRF token, then calls the endpoint directly.</div>
+      <div class="field"><label>Endpoint</label><input value="POST ${SOURCE.readers.api.code}" readonly></div>
+      <div class="field"><label>Its test</label><input value="${SOURCE.readers.api.test}" readonly></div>
+      <div style="margin:12px 0 4px;font-weight:600">What the call needs</div>
+      <div class="field"><label>Date range</label><input value="last 30 days, ending today"></div>
+      <div class="field"><label>Accounts</label><input value="every GL account (fetched first)"></div>
+      <div style="border:1px dashed var(--border);border-radius:8px;padding:9px;margin-top:8px;
+                  color:var(--muted);font-size:11.5px">
+        Honest state today: both of those are <b>hardcoded in the scraper</b>
+        (<code>date.today() - 30</code>), not settings — so this panel can't change them yet.
+        Making the agent declare them is issue #43, and this design is what makes that visible.</div>
+      <div style="display:flex;gap:8px;margin-top:10px">
+        <button class="btn primary">Have the agent fix it</button>
+        <button class="btn">Call it again</button></div></div>`;
+  }
+
+  const r = SOURCE.routes.find(x => x.id === sel);
+  if (r.id === 'website') {
+    return `<div class="slot"><div class="h">Website — how the harness gets in</div>
+      <div>The same sign-in as <b>Settings → Websites</b>; changing it here changes it there.
+        It is shared, so anything else using this portal gets the change too.</div>
+      <div class="field"><label>Address</label><input value="https://${r.detail}/manager"></div>
+      <div class="field"><label>Username</label><input value="andy.kaminski@krealtyllc.org"></div>
+      <div class="field"><label>Password</label><input type="password" placeholder="•••••••••••• saved"></div>
+      <div style="margin-top:10px"><button class="btn primary">Save</button></div></div>`;
+  }
+  if (r.id === 'email') {
+    return `<div class="slot"><div class="h">Mailbox — which message carries it</div>
+      <div>Signing in to the mailbox is shared, and lives in <b>Settings → Email</b>.
+        What to look for inside it is this source's own business, and lives here.</div>
+      <div class="field"><label>Look in</label><select><option>${r.detail}</option></select></div>
+      <div class="field"><label>From address</label><input value="mail@managebuilding.com"></div>
+      <div class="field"><label>Subject contains</label><input value="Owner's Statement"></div>
+      <div class="field"><label>Attachment ends with</label><input value=".pdf"></div>
+      <div style="margin-top:10px"><button class="btn primary">Save</button></div></div>`;
+  }
+  return `<div class="slot"><div class="h">File upload</div>
+    <div>Nothing to set up — press ⏵ on the chip to choose a document. What happens to it
+      afterwards belongs to the parser, one stage along.</div></div>`;
+}
+
+function dataHTML() {
+  const isReader = sel === 'parser' || sel === 'api';
+  const showing = !sel || isReader || dataIsFrom(sel);
+  if (!showing) {
+    const r = SOURCE.routes.find(x => x.id === sel);
+    const liveLabel = SOURCE.routes.find(x => x.id === SOURCE.live).label.toLowerCase();
+    return `<div class="empty"><b>${r.label}</b> hasn't run — nothing to show for it.
+      The ${SOURCE.count} rows this source does have came in by ${liveLabel};
+      press ⏵ to pull it this way instead.</div>`;
+  }
+  return `<div class="kstrip">
+      <div class="k"><div class="l">Money in</div><div class="v pos">$3,819.00</div></div>
+      <div class="k"><div class="l">Money out</div><div class="v neg">-$3,819.00</div></div>
+      <div class="k"><div class="l">Net</div><div class="v">$0.00</div></div>
+      <div class="k"><div class="l">Rows</div><div class="v">${SOURCE.count}</div></div>
+    </div>
+    <table><thead><tr><th>Date</th><th>Description</th><th style="text-align:right">Amount</th></tr></thead>
+    <tbody>${SOURCE.rows.map(r =>
+      `<tr><td>${r[0]}</td><td>${r[1]}</td><td style="text-align:right">${r[2]}</td></tr>`).join('')}
+    </tbody></table>`;
+}
+
+/** The count belongs to the run that produced it. Selecting a route that hasn't
+ *  run says "Not run" rather than showing another route's number, which would
+ *  read as this route's result. */
+function countHTML() {
+  const isReader = sel === 'parser' || sel === 'api';
+  if (sel && !isReader && !dataIsFrom(sel)) {
+    return `<div class="count" style="padding-left:6px">
+      <div class="big" style="color:var(--faint);font-size:20px">Not run</div>
+      <div class="cap">by this route</div></div>`;
+  }
+  return `<div class="count" style="padding-left:6px"><div class="big">${SOURCE.count}</div>
+    <div class="cap">transactions</div></div>`;
+}
+
+function shell(inner) {
+  return `<div class="card">
+    <div class="cardhead"><span class="dot"></span><b>${SOURCE.label}</b>
+      <span class="tag">implemented · pdf_statement</span></div>
+    <div class="body">${inner}</div></div>`;
+}
+
+/* ── A · one drawing, two hops ──────────────────────────────────────────── */
+
+function variantA() {
+  // Chosen shape. Three ways in on the left, the two kinds of reading in the
+  // middle, the rows on the right. The solid path is the one that produced what
+  // is on screen; dashed paths exist but weren't used.
+  const live = SOURCE.routes.find(x => x.id === SOURCE.live);
+  const H = 200;   // the reader column is the tallest thing in the row
+  const y = { upload: 46, website: 100, email: 154, parser: 46, api: 154, out: 100 };
+  const dashed = id => (live && live.id === id) ? '' : ' stroke-dasharray="3 3"';
+  const dashedReader = id => (live && live.reader === id) ? '' : ' stroke-dasharray="3 3"';
+  const curve = (y1, y2, dash) =>
+    `<path d="M2 ${y1} C34 ${y1}, 24 ${y2}, 56 ${y2}" stroke="currentColor" stroke-width="1.5"
+       fill="none"${dash}/>`;
+
+  const svgL = `<svg viewBox="0 0 58 ${H}" style="width:58px;height:${H}px" aria-hidden="true">
+      ${curve(y.upload, y.parser, dashed('upload'))}
+      ${curve(y.email, y.parser, dashed('email'))}
+      ${curve(y.website, y.api, dashed('website'))}
+    </svg>`;
+  const svgR = `<svg viewBox="0 0 58 ${H}" style="width:58px;height:${H}px" aria-hidden="true">
+      ${curve(y.parser, y.out, dashedReader('parser'))}
+      ${curve(y.api, y.out, dashedReader('api'))}
+      <circle cx="56" cy="${y.out}" r="3" fill="currentColor"/>
+    </svg>`;
+
+  return shell(`
+    <div style="display:grid;grid-template-columns:minmax(0,1fr) 58px minmax(0,1fr) 58px auto;
+                align-items:center;gap:0">
+      <div class="doors" style="justify-content:space-between;height:${H}px">
+        ${SOURCE.routes.map(doorHTML).join('')}</div>
+      <div class="pipe">${svgL}</div>
+      <div style="display:flex;flex-direction:column;justify-content:space-between;
+                  height:${H}px">
+        ${readerHTML('parser')}
+        ${readerHTML('api')}
+      </div>
+      <div class="pipe">${svgR}</div>
+      ${countHTML()}
+    </div>
+    <div style="font-size:12.5px;color:var(--success);font-weight:600;margin:10px 0 0">
+      ★ Can run itself — ${live ? live.label.toLowerCase() : 'nothing yet'}</div>
+    ${settingsSlot()}
+    ${dataHTML()}`);
+}
+
+/* ── B · three labelled stages ──────────────────────────────────────────── */
+
+function variantB() {
+  const arrow = `<div style="text-align:center;color:var(--muted);opacity:.5;font-size:18px;margin:2px 0">↓</div>`;
+  return shell(`
+    <div class="stagelbl"><span class="n">1</span>How it arrives</div>
+    <div class="doors">${SOURCE.routes.map(doorHTML).join('')}</div>
+    ${arrow}
+    <div class="stagelbl"><span class="n">2</span>How it's read
+      <span style="text-transform:none;letter-spacing:0;color:var(--faint)">
+        · uploads and email only; a scrape returns rows itself</span></div>
+    ${parserHTML(false)}
+    ${arrow}
+    <div class="stagelbl"><span class="n">3</span>What came out</div>
+    ${settingsSlot()}
+    ${dataHTML()}`);
+}
+
+/* ── C · two panels in series ───────────────────────────────────────────── */
+
+function variantC() {
+  return shell(`
+    <div style="display:grid;grid-template-columns:1fr auto 1fr;gap:14px;align-items:stretch">
+      <div style="border:1px solid var(--border);border-radius:10px;padding:12px">
+        <div class="stagelbl"><span class="n">1</span>Acquire</div>
+        <div class="doors">${SOURCE.routes.map(doorHTML).join('')}</div>
+      </div>
+      <div class="pipe" style="font-size:20px">→</div>
+      <div style="border:1px solid var(--border);border-radius:10px;padding:12px;display:flex;flex-direction:column">
+        <div class="stagelbl"><span class="n">2</span>Read</div>
+        ${parserHTML(false)}
+        <div style="font-size:11.5px;color:var(--muted);margin-top:auto;padding-top:10px">
+          Its own process: ⏵ here re-reads the document already on disk, without
+          fetching anything. A scrape arrives already read.</div>
+      </div>
+    </div>
+    <div style="text-align:center;color:var(--muted);opacity:.5;font-size:18px;margin:6px 0">↓</div>
+    <div class="count" style="text-align:center"><div class="big">${SOURCE.count}</div>
+      <div class="cap">transactions · however they arrived</div></div>
+    ${settingsSlot()}
+    ${dataHTML()}`);
+}
+
+/* ── plumbing ──────────────────────────────────────────────────────────── */
+
+function pick(id) { sel = (sel === id) ? null : id; draw(); }
+function run(id) {
+  // Prototype: "running" a route makes it the live one, so the data comes back.
+  if (id !== 'parser') SOURCE.live = id;
+  sel = null;
+  draw();
+}
+
+function draw() {
+  const v = VARIANTS[variant] || VARIANTS.a;
+  document.getElementById('lede').textContent = v.q + '  (click a chip or the parser; ⏵ pretends to run it)';
+  document.getElementById('mount').innerHTML = v.render();
+  document.getElementById('switcher').innerHTML =
+    '<b>Variant</b>' + Object.entries(VARIANTS).map(([k, val]) =>
+      `<a href="?variant=${k}" class="${k === variant ? 'on' : ''}">${val.name}</a>`).join('') +
+    `<span class="note">state: selected = ${sel || 'nothing'} · data came by ${SOURCE.live}</span>`;
+}
+
+draw();
+</script>
+</body>
+</html>
