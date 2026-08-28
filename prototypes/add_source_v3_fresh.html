@@ -1,0 +1,574 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PROTOTYPE · adding a data source</title>
+<!--
+  THROWAWAY PROTOTYPE — do not promote this code. Fake data throughout; nothing
+  here calls the harness.
+
+  Question: how does an operator add a new data source?
+
+  Four variants on the real Ingest page, switchable with ?variant=A|B|C|D and the
+  floating bar at the bottom. They disagree about STRUCTURE, not colour:
+
+    A  Artifact first   — no method question at all; one box, you hand it a thing
+    B  Three doors      — a stepped wizard: how it arrives → learn it → name it
+    C  Conversation     — the harness asks; you answer; it reports back
+    D  Row first        — the source appears in the list immediately and is
+                          filled in where it will live for the rest of its life
+
+  Two things every variant must honour, settled earlier and not up for redesign:
+    · the AGENT suggests the name, after it has seen the source — never a blank
+      "name this" field before anything has been learned;
+    · a website is CAPTURED from a demonstration — there is no URL field.
+
+  Run:  poetry run python -m http.server 8790 -d interfaces/web
+        http://127.0.0.1:8790/add_source.prototype.html?variant=A
+-->
+<style>
+  :root {
+    --bg:#faf9f5; --card:#fff; --border:#e7e5df; --text:#1c1b19; --muted:#6b6a64;
+    --accent:#3b6d3b; --danger:#a3312d; --success:#2c6a3a; --radius:10px;
+    --accent-soft:#e9f1e7; --faint:#9a9c92;
+    --shadow:0 1px 2px rgba(28,27,25,.05),0 6px 20px rgba(28,27,25,.06);
+  }
+  :root[data-theme="dark"] {
+    --bg:#161818; --card:#202325; --border:#34393d; --text:#e8ecef; --muted:#a2abb2;
+    --accent:#88c888; --danger:#f08a84; --success:#94d89f;
+    --accent-soft:#26302a; --faint:#7c847c;
+    --shadow:0 1px 2px rgba(0,0,0,.3),0 8px 24px rgba(0,0,0,.35);
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); line-height:1.5;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+  .wrap { max-width:900px; margin:0 auto; padding:24px 20px 140px; }
+  button { font:inherit; cursor:pointer; }
+  .btn { background:var(--card); border:1px solid var(--border); border-radius:var(--radius);
+    padding:7px 12px; color:var(--text); font-size:13px; }
+  .btn:hover { border-color:var(--accent); }
+  .btn.primary { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:550; }
+  :root[data-theme="dark"] .btn.primary { color:#12160f; }
+  .btn:disabled { opacity:.45; cursor:default; }
+  .btn.link { border:none; background:none; color:var(--accent); padding:4px 2px; text-decoration:underline; }
+
+  /* real app chrome, so the variants are judged in context */
+  .topbar { display:flex; align-items:center; justify-content:space-between; gap:16px; margin-bottom:22px; flex-wrap:wrap; }
+  .brand { display:flex; align-items:center; gap:10px; }
+  .brand .mark { width:28px; height:28px; border-radius:8px; background:var(--accent); color:#fff;
+    display:grid; place-items:center; font-weight:700; font-size:15px; }
+  :root[data-theme="dark"] .brand .mark { color:#12160f; }
+  .brand b { font-size:15px; font-weight:650; }
+  .pillars { display:flex; gap:4px; background:var(--card); border:1px solid var(--border);
+    border-radius:999px; padding:4px; box-shadow:var(--shadow); }
+  .pillars button { font-size:13px; border:none; background:transparent; color:var(--muted);
+    padding:7px 15px; border-radius:999px; display:inline-flex; align-items:center; gap:7px; }
+  .pillars button .step { font-size:10px; font-weight:700; color:var(--faint); }
+  .pillars button.on { background:var(--accent-soft); color:var(--accent); font-weight:600; }
+  .pillars button.on .step { color:var(--accent); }
+  .chip { font-size:12px; padding:4px 10px; border-radius:var(--radius); border:1px solid var(--border);
+    background:var(--card); color:var(--muted); }
+  .pagehead { margin:0 2px 18px; }
+  .pagehead h1 { font-size:20px; font-weight:650; letter-spacing:-.015em; margin:0; }
+  .pagehead p { margin:3px 0 0; color:var(--muted); font-size:13.5px; }
+
+  .acc { display:flex; flex-direction:column; gap:10px; }
+  .accitem { background:var(--card); border:1px solid var(--border); border-radius:12px; box-shadow:var(--shadow); }
+  .acchead { display:flex; align-items:center; gap:12px; padding:14px 16px; }
+  .sdot { width:8px; height:8px; border-radius:999px; background:#c9c9c1; flex:none; }
+  .sdot.ready { background:var(--success); }
+  .sdot.new { background:#d9a441; }
+  .acchead .nm { font-weight:640; font-size:14.5px; display:flex; align-items:center; gap:8px; }
+  .acchead .meta { color:var(--muted); font-size:12.5px; margin-top:1px; }
+  .acchead .rt { margin-left:auto; color:var(--faint); font-size:12px; text-align:right; }
+  .tag { font-size:11px; padding:2px 7px; border-radius:6px; background:#eceae3; color:var(--muted); }
+  :root[data-theme="dark"] .tag { background:#2b3033; }
+  .dim { opacity:.55; }
+  .accbody { border-top:1px solid var(--border); padding:16px; }
+
+  .note { color:var(--muted); font-size:13px; }
+  .sub { font-size:11.5px; color:var(--faint); }
+  .lbl { font-size:11px; font-weight:600; letter-spacing:.06em; text-transform:uppercase;
+    color:var(--faint); margin:16px 0 8px; }
+  .field { display:flex; flex-direction:column; gap:5px; max-width:460px; margin-bottom:12px; }
+  .field label { font-size:12.5px; color:var(--muted); }
+  .field input, .field select { font:inherit; font-size:13px; padding:8px 11px; border-radius:8px;
+    border:1px solid var(--border); background:var(--card); color:var(--text); }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:14px; }
+
+  /* the add-surface itself, per variant */
+  .addcard { background:var(--card); border:1px solid var(--border); border-radius:12px;
+    box-shadow:var(--shadow); margin-top:14px; }
+  .addcard.dashed { border-style:dashed; border-color:#cfccc2; box-shadow:none; background:transparent; }
+  :root[data-theme="dark"] .addcard.dashed { border-color:#41474b; }
+  .addhead { display:flex; align-items:center; gap:10px; padding:14px 16px; font-weight:600; font-size:14px; }
+  .addhead .plus { width:24px; height:24px; border-radius:7px; border:1px solid var(--border);
+    display:grid; place-items:center; color:var(--muted); font-size:15px; }
+  .addbody { padding:0 16px 18px; }
+
+  .drop { border:2px dashed #cfccc2; border-radius:12px; padding:30px 22px; text-align:center; }
+  :root[data-theme="dark"] .drop { border-color:#41474b; }
+  .drop.hot { border-color:var(--accent); background:var(--accent-soft); }
+  .drop .big { font-size:15px; font-weight:600; }
+  .drop .or { color:var(--faint); font-size:12px; margin:12px 0 10px; }
+
+  .opt { display:flex; align-items:center; gap:11px; border:1px solid var(--border); border-radius:10px;
+    padding:12px 13px; margin-bottom:8px; cursor:pointer; background:color-mix(in oklab,var(--muted) 4%,var(--card)); }
+  .opt:hover { border-color:var(--accent); }
+  .opt.on { border-color:var(--accent); background:var(--accent-soft); }
+  .opt .radio { width:15px; height:15px; border-radius:999px; border:1.5px solid #c3c0b6; flex:none; }
+  .opt.on .radio { border-color:var(--accent); background:var(--accent); box-shadow:inset 0 0 0 3px var(--card); }
+  .opt .ico { font-size:16px; width:20px; text-align:center; }
+  .opt .t { font-weight:600; font-size:13px; }
+  .opt .d { color:var(--muted); font-size:12px; }
+  .opt .w { margin-left:auto; font-size:11.5px; color:var(--faint); white-space:nowrap; text-align:right; }
+
+  .steps { display:flex; align-items:center; margin-bottom:18px; flex-wrap:wrap; }
+  .stepdot { display:flex; align-items:center; gap:8px; font-size:12.5px; color:var(--faint); }
+  .stepdot .n { width:21px; height:21px; border-radius:999px; border:1px solid #c3c0b6;
+    display:grid; place-items:center; font-size:11px; font-weight:700; }
+  .stepdot.on { color:var(--text); font-weight:600; }
+  .stepdot.on .n { background:var(--accent); border-color:var(--accent); color:#fff; }
+  :root[data-theme="dark"] .stepdot.on .n { color:#12160f; }
+  .stepdot.done .n { border-color:var(--accent); color:var(--accent); background:var(--accent-soft); }
+  .steparrow { color:var(--faint); margin:0 12px; }
+
+  .found { border:1px solid var(--border); border-radius:10px; padding:4px 14px;
+    background:color-mix(in oklab,var(--muted) 4%,var(--card)); }
+  .found .line { display:flex; justify-content:space-between; gap:16px; padding:8px 0;
+    border-top:1px solid var(--border); font-size:13px; }
+  .found .line:first-child { border-top:none; }
+  .found .k { color:var(--faint); font-size:11.5px; white-space:nowrap; }
+  .found .v { text-align:right; }
+  .cols { display:flex; gap:5px; flex-wrap:wrap; justify-content:flex-end; }
+  .col { font-size:11px; padding:2px 7px; border-radius:6px; background:#eceae3; color:var(--muted); }
+  :root[data-theme="dark"] .col { background:#2b3033; }
+
+  .doing { display:flex; align-items:center; gap:10px; color:var(--muted); font-size:13px; }
+  .spin { width:13px; height:13px; border-radius:999px; border:2px solid color-mix(in oklab,var(--accent) 30%,transparent);
+    border-top-color:var(--accent); animation:sp .7s linear infinite; flex:none; }
+  @keyframes sp { to { transform:rotate(360deg); } }
+  .flag { border:1px solid #e6d9b8; background:#fbf1e0; color:#6d5220; border-radius:9px;
+    padding:10px 12px; font-size:12.5px; margin-top:12px; }
+  :root[data-theme="dark"] .flag { background:#3f3525; border-color:#6c5a3e; color:#f3e2c4; }
+
+  /* C — conversation */
+  .talk { display:flex; flex-direction:column; gap:14px; }
+  .turn { display:flex; gap:11px; align-items:flex-start; }
+  .turn .who { width:26px; height:26px; border-radius:999px; flex:none; display:grid; place-items:center;
+    font-size:12px; font-weight:700; background:var(--accent-soft); color:var(--accent); }
+  .turn.me { justify-content:flex-end; }
+  .turn.me .bub { background:var(--accent-soft); border-color:transparent; }
+  .bub { border:1px solid var(--border); border-radius:12px; padding:11px 13px; font-size:13.5px; max-width:62ch; }
+  .bub .sub { margin-top:6px; }
+  .answers { display:flex; gap:8px; flex-wrap:wrap; margin-left:37px; }
+
+  /* D — in-place row */
+  .ghost { border-style:dashed; }
+  .inplace-name { font-style:italic; color:var(--faint); font-weight:500; }
+  .named { animation:pop 1s ease; }
+  @keyframes pop { 0%{background:var(--accent-soft);} 100%{background:transparent;} }
+
+  /* prototype-only furniture */
+  .state { margin-top:26px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11.5px;
+    color:var(--faint); border-top:1px dashed var(--border); padding-top:10px; white-space:pre-wrap; }
+  .switcher { position:fixed; left:50%; bottom:18px; transform:translateX(-50%); z-index:99;
+    display:flex; align-items:center; gap:4px; background:#1c1b19; color:#fff; border-radius:999px;
+    padding:5px 6px; box-shadow:0 8px 30px rgba(0,0,0,.35); font-size:13px; }
+  :root[data-theme="dark"] .switcher { background:#e8ecef; color:#161818; }
+  .switcher button { border:none; background:transparent; color:inherit; font-size:15px;
+    width:30px; height:28px; border-radius:999px; }
+  .switcher button:hover { background:rgba(255,255,255,.15); }
+  :root[data-theme="dark"] .switcher button:hover { background:rgba(0,0,0,.12); }
+  .switcher .now { padding:0 10px; white-space:nowrap; }
+  .switcher .now b { font-weight:650; }
+  .switcher .kbd { opacity:.5; font-size:11px; padding-right:6px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="topbar">
+    <div class="brand"><span class="mark">K</span><b>K-Realty</b></div>
+    <div class="pillars">
+      <button class="on"><span class="step">1</span>Ingest</button>
+      <button><span class="step">2</span>Process</button>
+      <button><span class="step">3</span>Report</button>
+    </div>
+    <div class="chip">PROTOTYPE · fake data</div>
+  </div>
+  <div class="pagehead">
+    <h1>Data sources</h1>
+    <p>Acquire and validate each source before processing.</p>
+  </div>
+
+  <div id="list" class="acc"></div>
+  <div id="view"></div>
+  <div id="state" class="state"></div>
+</div>
+
+<div class="switcher">
+  <button onclick="cycle(-1)">&#8249;</button>
+  <span class="now"><b id="vkey">A</b> — <span id="vname"></span></span>
+  <button onclick="cycle(1)">&#8250;</button>
+  <span class="kbd">&#8592;&#8594;</span>
+</div>
+
+<script>
+/* ─────────────────────────── fake data ─────────────────────────── */
+const EXISTING = [
+  { key:'epic', label:'Epic Property Management', meta:'implemented · upload, scrape, email', rt:'13 rows' },
+  { key:'dfcu', label:'DFCU Financial bank',      meta:'implemented · upload only',           rt:'6 rows'  },
+];
+
+// What the agent comes back with — the same source reached two different ways.
+const FOUND = {
+  website: {
+    name:'Shellpoint Mortgage',
+    where:'myaccount.shellpointmtg.com/loans/activity',
+    how:'Found the request behind “Search” — it can call that directly',
+    rows:42, span:'1 Jan – 26 Jul 2026',
+    cols:['Date','Description','Principal','Interest','Escrow','Amount'],
+    unattended:true,
+  },
+  document: {
+    name:'Shellpoint Mortgage',
+    where:'shellpoint-jul-2026.pdf',
+    how:'Read the statement table on pages 1–2',
+    rows:18, span:'16 Jun – 15 Jul 2026',
+    cols:['Date','Description','Amount','Balance'],
+    unattended:false,
+  },
+  email: {
+    name:'Shellpoint statements inbox',
+    where:'statements@shellpointmtg.com · .pdf attachment',
+    how:'3 matching messages, newest 12 Jul — read the newest one',
+    rows:18, span:'16 Jun – 15 Jul 2026',
+    cols:['Date','Description','Amount','Balance'],
+    unattended:true,
+  },
+};
+
+const METHODS = [
+  { id:'website',  ico:'&#8635;', t:'A website behind a login',
+    d:'Show it once; it signs in and pulls the data after that.', w:'Runs unattended',
+    act:'Open a browser and show it',
+    doing:'A browser is open. Sign in, set your filters, bring your data up on screen — then close the window.' },
+  { id:'document', ico:'&#8593;', t:'A document you already have',
+    d:'A statement or an export — PDF or CSV.', w:'You hand it the file',
+    act:'Choose a document',
+    doing:'Reading your document…' },
+  { id:'email',    ico:'&#9993;', t:'An email that delivers it',
+    d:'It watches an inbox and takes the attachment off the message.', w:'Runs unattended',
+    act:'Connect the inbox',
+    doing:'Looking through the inbox for messages that carry a document…' },
+];
+const M = id => METHODS.find(m => m.id === id);
+
+/* ─────────────────────────── shared bits ─────────────────────────── */
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+/** What the agent found. Every variant shows this BEFORE asking for a name —
+ *  that ordering is the whole point, so it lives in one place. */
+function foundHTML(f, opts = {}) {
+  return '<div class="found">' +
+    '<div class="line"><span class="k">Where it came from</span><span class="v">' + esc(f.where) + '</span></div>' +
+    '<div class="line"><span class="k">How it gets it</span><span class="v" style="color:var(--muted)">' + esc(f.how) + '</span></div>' +
+    '<div class="line"><span class="k">What it read</span><span class="v">' + f.rows + ' rows · ' + esc(f.span) + '</span></div>' +
+    '<div class="line"><span class="k">Its columns</span><span class="v"><span class="cols">' +
+      f.cols.map(c => '<span class="col">' + esc(c) + '</span>').join('') + '</span></span></div>' +
+    (opts.hideRun ? '' :
+      '<div class="line"><span class="k">Afterwards</span><span class="v" style="color:var(--muted)">' +
+      (f.unattended ? 'can run unattended' : 'needs you to hand it each file') + '</span></div>') +
+    '</div>';
+}
+
+function nameFieldHTML(value, id) {
+  return '<div class="field"><label for="' + id + '">Call it</label>' +
+    '<input type="text" id="' + id + '" value="' + esc(value) + '" oninput="S.name=this.value;paintState()">' +
+    '<span class="sub">Suggested from what it just read — change it to whatever you call it.</span></div>';
+}
+
+/** The fork that stops a second door being modelled as a second source. */
+function forkHTML() {
+  const opts = [{ key:'new', t:'A new source', d:'Nothing here covers this data yet.' }].concat(
+    EXISTING.map(e => ({ key:e.key, t:'Another way into ' + e.label, d:e.meta.replace('implemented · ','currently ') })));
+  return '<div class="lbl">Is this new, or another way into something you have?</div>' +
+    opts.map(o => '<div class="opt' + (S.fork === o.key ? ' on' : '') + '" onclick="S.fork=\'' + o.key + '\';paint()">' +
+      '<span class="radio"></span><span><div class="t">' + esc(o.t) + '</div>' +
+      '<div class="d">' + esc(o.d) + '</div></span></div>').join('');
+}
+
+/* ─────────────────────────── state ─────────────────────────── */
+const S = { step:1, method:null, learned:false, name:'', fork:'new', saved:false, talk:0, adding:false };
+
+function reset() {
+  Object.assign(S, { step:1, method:null, learned:false, name:'', fork:'new', saved:false, talk:0, adding:false });
+}
+
+function learn(id) {
+  S.method = id; S.learned = false; paint();
+  setTimeout(() => { S.learned = true; S.name = FOUND[id].name; paint(); }, 900);
+}
+
+/* ═══════════════════ A · artifact first ═══════════════════
+   No method question at all. One box: give it a thing. What you give it IS the
+   answer to "how does this arrive", so the question never gets asked. Everything
+   — what it found, what to call it, saving — happens in the same box.        */
+function variantA() {
+  const f = S.method ? FOUND[S.method] : null;
+
+  if (S.saved) return doneHTML();
+
+  if (!S.method) {
+    return card('dashed',
+      '<div class="drop" id="dz">' +
+        '<div class="big">Hand the harness something</div>' +
+        '<p class="note" style="margin:6px 0 0">Drop a statement or an export here, and it will work out ' +
+        'what it is, what it can read from it, and what to call it.</p>' +
+        '<div class="row" style="justify-content:center"><button class="btn primary" onclick="learn(\'document\')">Choose a document</button></div>' +
+        '<div class="or">— or the data isn’t a file you have —</div>' +
+        '<div class="row" style="justify-content:center;margin-top:0">' +
+          '<button class="btn" onclick="learn(\'website\')">&#8635; Show it a website</button>' +
+          '<button class="btn" onclick="learn(\'email\')">&#9993; Point it at an inbox</button>' +
+        '</div>' +
+      '</div>');
+  }
+
+  if (!S.learned) {
+    return card('', '<div class="doing"><span class="spin"></span>' + esc(M(S.method).doing) + '</div>' +
+      '<p class="note" style="margin:10px 0 0">' +
+      (S.method === 'website'
+        ? 'Nothing to type — it records where you go and what you click.'
+        : 'It reads the file itself; you don’t have to tell it the format.') + '</p>');
+  }
+
+  return card('',
+    '<div class="lbl">Here’s what I found</div>' + foundHTML(f) +
+    nameFieldHTML(S.name, 'a-name') + forkHTML() +
+    '<div class="row"><button class="btn primary" onclick="S.saved=true;paint()">Save it</button>' +
+    '<button class="btn" onclick="reset();paint()">Start over</button>' +
+    '<span class="sub">Nothing is live yet — it writes the code and tests it next, and you approve that.</span></div>');
+}
+
+/* ═══════════════════ B · three doors, then a stepper ═══════════════════
+   The classic: name the route first, let the agent learn it, then name and save.
+   Explicit and predictable; three screens where A has one.                    */
+function variantB() {
+  if (S.saved) return doneHTML();
+  const body =
+    S.step === 1 ? bStep1() :
+    S.step === 2 ? bStep2() : bStep3();
+  return card('dashed', stepper() + body);
+}
+
+function stepper() {
+  const labels = [[1,'How it arrives'],[2,'Let it learn the source'],[3,'Check it and name it']];
+  return '<div class="steps">' + labels.map(([n,t],i) =>
+    '<span class="stepdot' + (S.step === n ? ' on' : (S.step > n ? ' done' : '')) + '">' +
+    '<span class="n">' + (S.step > n ? '&#10003;' : n) + '</span>' + t + '</span>' +
+    (i < 2 ? '<span class="steparrow">&#8250;</span>' : '')).join('') + '</div>';
+}
+
+function bStep1() {
+  // CHOSEN: the box IS the button. A radio plus a Next is two clicks to say one
+  // thing, and there's nothing on this step to review before committing.
+  return METHODS.map(m =>
+    '<div class="opt" onclick="S.method=\'' + m.id + '\';S.learned=false;S.step=2;paint()">' +
+      '<span class="ico">' + m.ico + '</span>' +
+      '<span><div class="t">' + esc(m.t) + '</div><div class="d">' + esc(m.d) + '</div></span>' +
+      '<span class="w">' + esc(m.w) + ' &#8250;</span></div>').join('');
+}
+
+function bStep2() {
+  const m = M(S.method);
+  if (!S.learned) {
+    return '<p class="note" style="margin:0">' + esc(m.doing) + '</p>' +
+      (S.method === 'email'
+        ? '<div class="flag"><b>Worth knowing.</b> An inbox delivers a document — something still has to ' +
+          'read it. It will use the newest attachment it finds as its sample.</div>' : '') +
+      (S.method === 'website'
+        ? '<p class="sub" style="margin:8px 0 0">No address to type: closing the window is how you say you’re done, ' +
+          'and it keeps whatever you actually visited.</p>' : '') +
+      '<div class="row"><button class="btn" onclick="S.step=1;paint()">Back</button>' +
+      '<button class="btn primary" onclick="learn(\'' + m.id + '\')">' + esc(m.act) + '</button></div>';
+  }
+  return '<div class="doing"><span class="spin"></span>Reading what it captured…</div>' +
+    '<div class="row"><button class="btn primary" onclick="S.step=3;paint()">See what it found</button></div>';
+}
+
+function bStep3() {
+  return '<div class="lbl">What it found</div>' + foundHTML(FOUND[S.method]) +
+    nameFieldHTML(S.name, 'b-name') + forkHTML() +
+    '<div class="row"><button class="btn" onclick="S.step=2;paint()">Back</button>' +
+    '<button class="btn primary" onclick="S.saved=true;paint()">Save this source</button></div>';
+}
+
+/* ═══════════════════ C · conversation ═══════════════════
+   The harness asks, you answer, it reports back. No form and no steps: a
+   transcript, where the last turn is always the thing to do next. Fits a
+   product whose whole premise is that an agent does the work.                */
+function variantC() {
+  const turns = [];
+  turns.push(agentTurn('What have you got for me?',
+    'Anything a month of transactions could come out of — a statement, a portal, an inbox.'));
+
+  if (!S.method) {
+    return card('', '<div class="talk">' + turns.join('') + '</div>' +
+      '<div class="answers" style="margin-top:14px">' +
+      METHODS.map(m => '<button class="btn" onclick="learn(\'' + m.id + '\')">' + m.ico + ' ' + esc(m.t) + '</button>').join('') +
+      '</div>');
+  }
+
+  turns.push(meTurn(M(S.method).t));
+  turns.push(agentTurn(M(S.method).doing,
+    S.method === 'website' ? 'Close the window when your data is on screen — that’s the whole signal.' : ''));
+
+  if (!S.learned) {
+    return card('', '<div class="talk">' + turns.join('') + '</div>' +
+      '<div class="answers" style="margin-top:14px"><span class="doing"><span class="spin"></span>watching…</span></div>');
+  }
+
+  const f = FOUND[S.method];
+  turns.push(agentTurn(
+    'Done. It came from <b>' + esc(f.where) + '</b> — ' + f.rows + ' rows, ' + esc(f.span) +
+    ', columns ' + f.cols.map(c => '<span class="col">' + esc(c) + '</span>').join(' ') + '.',
+    esc(f.how) + '. I’d call it <b>' + esc(f.name) + '</b> — is that right?'));
+
+  return card('', '<div class="talk">' + turns.join('') + '</div>' +
+    '<div class="answers" style="margin-top:14px">' +
+      (S.saved
+        ? '<span class="note">Saved as <b>' + esc(S.name) + '</b>. Writing the code next — you’ll approve it before anything runs.</span>'
+        : '<button class="btn primary" onclick="S.saved=true;paint()">Yes, save it</button>' +
+          '<button class="btn" onclick="S.talk=1;paint()">Call it something else</button>' +
+          '<button class="btn" onclick="S.talk=2;paint()">It’s another way into a source I have</button>') +
+    '</div>' +
+    (S.talk === 1 && !S.saved ? nameFieldHTML(S.name, 'c-name') +
+      '<div class="row"><button class="btn primary" onclick="S.saved=true;paint()">Save it</button></div>' : '') +
+    (S.talk === 2 && !S.saved ? forkHTML() +
+      '<div class="row"><button class="btn primary" onclick="S.saved=true;paint()">Add that route</button></div>' : ''));
+}
+
+function agentTurn(text, sub) {
+  return '<div class="turn"><span class="who">K</span><div class="bub">' + text +
+    (sub ? '<div class="sub">' + sub + '</div>' : '') + '</div></div>';
+}
+function meTurn(text) { return '<div class="turn me"><div class="bub">' + esc(text) + '</div></div>'; }
+
+/* ═══════════════════ D · the row comes first ═══════════════════
+   There is no wizard. Clicking + drops a real (empty) source into the list and
+   you fill it in exactly where it will live for the rest of its life — same row
+   that later holds its routes, its data, and its build panel. The agent renames
+   the row from "Untitled source" once it knows what it is.                   */
+function variantD() {
+  if (!S.adding) {
+    return '<div class="row" style="margin-top:16px">' +
+      '<button class="btn" onclick="S.adding=true;paint()">+ Add a data source</button>' +
+      '<span class="sub">It appears in the list straight away, and you fill it in there.</span></div>';
+  }
+
+  const f = S.learned ? FOUND[S.method] : null;
+  const title = S.saved || S.learned
+    ? '<span>' + esc(S.name || (f && f.name) || '') + '</span><span class="tag">new</span>'
+    : '<span class="inplace-name">Untitled source</span>';
+
+  let body;
+  if (!S.method) {
+    body = '<p class="note" style="margin:0 0 12px">Tell it how this data reaches you.</p>' +
+      METHODS.map(m => '<div class="opt" onclick="learn(\'' + m.id + '\')">' +
+        '<span class="ico">' + m.ico + '</span>' +
+        '<span><div class="t">' + esc(m.t) + '</div><div class="d">' + esc(m.d) + '</div></span>' +
+        '<span class="w">' + esc(m.w) + '</span></div>').join('');
+  } else if (!S.learned) {
+    body = '<div class="doing"><span class="spin"></span>' + esc(M(S.method).doing) + '</div>';
+  } else if (!S.saved) {
+    body = '<div class="lbl">What it found</div>' + foundHTML(f) +
+      nameFieldHTML(S.name, 'd-name') + forkHTML() +
+      '<div class="row"><button class="btn primary" onclick="S.saved=true;paint()">Keep it</button>' +
+      '<button class="btn" onclick="reset();S.adding=true;paint()">Start this one over</button></div>';
+  } else {
+    body = '<p class="note" style="margin:0">Kept. Next it writes the code and a test for it — right here, ' +
+      'in this panel, with your approval before anything runs.</p>' +
+      '<div class="row"><button class="btn primary">Write the code</button>' +
+      '<button class="btn" onclick="reset();paint()">Not now</button></div>';
+  }
+
+  return '<div class="accitem ghost' + (S.learned ? ' named' : '') + '" style="margin-top:10px">' +
+    '<div class="acchead"><span class="sdot new"></span>' +
+      '<div><div class="nm">' + title + '</div>' +
+      '<div class="meta">' + (S.method ? esc(M(S.method).t.toLowerCase()) : 'not set up yet') + '</div></div>' +
+      '<span class="rt">' + (S.learned ? f.rows + ' rows found' : '—') + '</span></div>' +
+    '<div class="accbody">' + body + '</div></div>';
+}
+
+/* ─────────────────────────── frame ─────────────────────────── */
+function card(mod, inner) {
+  return '<div class="addcard ' + mod + '">' +
+    '<div class="addhead"><span class="plus">+</span>Add a data source</div>' +
+    '<div class="addbody">' + inner + '</div></div>';
+}
+
+function doneHTML() {
+  return card('', '<p class="note" style="margin:0"><b>' + esc(S.name) + '</b> is in the list. ' +
+    'Next it writes the code and a test for it — you approve that before anything runs.</p>' +
+    '<div class="row"><button class="btn" onclick="reset();paint()">Add another</button></div>');
+}
+
+function renderList() {
+  let rows = EXISTING.map(e =>
+    '<div class="accitem dim"><div class="acchead"><span class="sdot ready"></span>' +
+    '<div><div class="nm">' + esc(e.label) + '</div><div class="meta">' + esc(e.meta) + '</div></div>' +
+    '<span class="rt">' + esc(e.rt) + '</span></div></div>').join('');
+  // Only D shows the new source as a list row while it's being filled in.
+  if (V === 'D' && S.adding) rows += variantD();
+  if (V === 'D' && S.saved && !S.adding) rows += '';
+  document.getElementById('list').innerHTML = rows;
+}
+
+const VARIANTS = {
+  A: { name:'Artifact first — one box, no questions', fn:variantA },
+  B: { name:'Three doors, then a stepper',            fn:variantB },
+  C: { name:'A conversation with the harness',        fn:variantC },
+  D: { name:'The row comes first, filled in place',   fn:variantD },
+};
+let V = (new URLSearchParams(location.search).get('variant') || 'A').toUpperCase();
+if (!VARIANTS[V]) V = 'A';
+
+function paint() {
+  renderList();
+  document.getElementById('view').innerHTML = V === 'D' ? (S.adding ? '' : variantD()) : VARIANTS[V].fn();
+  document.getElementById('vkey').textContent = V;
+  document.getElementById('vname').textContent = VARIANTS[V].name;
+  paintState();
+}
+
+function paintState() {
+  document.getElementById('state').textContent =
+    'variant ' + V + '   ' + JSON.stringify(
+      { step:S.step, method:S.method, learned:S.learned, name:S.name, fork:S.fork, saved:S.saved });
+}
+
+function cycle(dir) {
+  const keys = Object.keys(VARIANTS);
+  V = keys[(keys.indexOf(V) + dir + keys.length) % keys.length];
+  const u = new URL(location.href);
+  u.searchParams.set('variant', V);
+  history.replaceState({}, '', u);
+  reset();
+  paint();
+}
+
+addEventListener('keydown', e => {
+  const t = e.target.tagName;
+  if (t === 'INPUT' || t === 'TEXTAREA' || e.target.isContentEditable) return;
+  if (e.key === 'ArrowLeft') cycle(-1);
+  if (e.key === 'ArrowRight') cycle(1);
+});
+
+// Follow the OS theme, like the real app does.
+if (matchMedia('(prefers-color-scheme: dark)').matches) document.documentElement.dataset.theme = 'dark';
+
+paint();
+</script>
+</body>
+</html>
