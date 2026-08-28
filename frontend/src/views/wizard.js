@@ -305,10 +305,15 @@ export async function saveWizard() {
           })).source_key
         : wiz.fork;
 
-      // "Another way into X" adds the email route to the source that already
-      // exists — the inbox is only where its document is found.
-      if (wiz.method === 'email' && wiz.fork !== 'new') {
-        await callTool('save_email_search', { source_key: key, ...emailArgs });
+      // "Another way into X" opens the chosen door on the source that already
+      // exists, so the Ingest screen shows it — without this it stayed hidden
+      // even though a sample/demo had just been attached for it below.
+      if (wiz.fork !== 'new') {
+        if (wiz.method === 'email') {
+          await callTool('save_email_search', { source_key: key, ...emailArgs });
+        } else {
+          await callTool('request_transport', { source_key: key, method: wiz.method });
+        }
       }
       if (wiz.method === 'email') delete emailRouteCache[key];
 

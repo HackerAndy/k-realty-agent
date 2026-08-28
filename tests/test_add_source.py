@@ -79,6 +79,66 @@ def test_a_website_source_is_marked_as_one(registry):
     assert _find(registry, "some_portal").input_type == "html_scrape"
 
 
+def test_a_new_source_only_shows_the_door_it_was_onboarded_with(registry):
+    """The bug this fixes: choosing 'website' in the wizard must not also leave
+    a 'File upload' chip on screen — the operator never asked for that door."""
+    mcp_tools.add_source("Some Portal", "website")
+
+    row = next(s for s in mcp_tools.list_sources() if s["key"] == "some_portal")
+    assert {r["id"] for r in row["transports"]} == {"scrape"}
+
+
+def test_a_document_source_only_shows_upload(registry):
+    mcp_tools.add_source("Chase Business Checking", "document")
+
+    row = next(s for s in mcp_tools.list_sources() if s["key"] == "chase_business_checking")
+    assert {r["id"] for r in row["transports"]} == {"upload"}
+
+
+# ── Adding a second door to a source that already exists ────────────────────
+
+def test_another_way_in_adds_the_new_door_without_losing_the_first(registry):
+    mcp_tools.add_source("Some Portal", "website")
+
+    mcp_tools.request_transport("some_portal", "document")
+
+    row = next(s for s in mcp_tools.list_sources() if s["key"] == "some_portal")
+    assert {r["id"] for r in row["transports"]} == {"scrape", "upload"}
+
+
+def test_requesting_the_same_door_twice_does_not_duplicate_it(registry):
+    mcp_tools.add_source("Some Portal", "website")
+
+    mcp_tools.request_transport("some_portal", "website")
+
+    assert _find(registry, "some_portal").requested_transports == ["scrape"]
+
+
+def test_requesting_a_door_for_an_unknown_source_is_refused(registry):
+    with pytest.raises(mcp_tools.ToolError, match="Unknown source"):
+        mcp_tools.request_transport("nope", "document")
+
+
+def test_requesting_email_this_way_is_refused(registry):
+    """Email gates itself by whether email_search is set — save_email_search is
+    the door for it, not this tool."""
+    mcp_tools.add_source("Some Portal", "website")
+    with pytest.raises(mcp_tools.ToolError, match="save_email_search"):
+        mcp_tools.request_transport("some_portal", "email")
+
+
+def test_requesting_a_door_on_a_source_older_than_this_field_keeps_what_it_had(registry, monkeypatch):
+    """A source with no requested_transports at all (written before the field
+    existed) shows every route it can back today; adding a new door must not
+    quietly narrow it down to just the one being added."""
+    registry.append(Service(key="old", label="Old", parser="old", status="implemented"))
+    monkeypatch.setattr(mcp_tools, "has_scraper", lambda k: k == "old")
+
+    mcp_tools.request_transport("old", "website")
+
+    assert set(_find(registry, "old").requested_transports) == {"upload", "scrape"}
+
+
 def test_adding_the_same_source_twice_is_refused(registry):
     mcp_tools.add_source("Chase Business Checking", "document")
     with pytest.raises(mcp_tools.ToolError, match="already here"):

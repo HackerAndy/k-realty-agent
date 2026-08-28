@@ -150,6 +150,44 @@ def test_a_source_with_nothing_working_has_no_unattended_route():
     assert not [r for r in _routes(nothing) if r["available"] and r["unattended"]]
 
 
+# --- which doors were actually asked for --------------------------------------
+#
+# A source onboarded for "website only" must not also show a "File upload" door
+# nobody chose. requested_transports is not a preferred/default route (rejected
+# above) — it is the record of which doors exist for this source at all.
+
+def test_a_source_shows_only_the_door_it_was_onboarded_with():
+    website_only = Service(key="new", label="New", requested_transports=[SCRAPE])
+    assert {r["id"] for r in _routes(website_only)} == {SCRAPE}
+
+
+def test_an_unrequested_door_is_absent_not_merely_disabled():
+    """The whole point: a source that only chose 'website' must not carry a
+    grayed-out 'File upload' chip either — it never asked for that door."""
+    website_only = Service(key="new", label="New", requested_transports=[SCRAPE])
+    routes = _routes(website_only, scraper=True)
+    assert UPLOAD not in {r["id"] for r in routes}
+
+
+def test_no_requested_transports_means_show_everything():
+    """A source written before this field existed carries no list at all —
+    that must read the same as before, not as 'nothing requested'."""
+    stale = Service(key="dfcu", label="DFCU", parser="dfcu")
+    assert stale.requested_transports is None
+    assert {r["id"] for r in _routes(stale)} == {UPLOAD, SCRAPE}
+
+
+def test_a_second_requested_door_can_be_unavailable_and_still_show():
+    """Asking for a door and it actually working are different questions —
+    requesting 'upload' before a parser exists must still show the chip,
+    disabled, with its usual reason."""
+    both = Service(key="new", label="New", requested_transports=[SCRAPE, UPLOAD])
+    routes = _by_id(_routes(both, scraper=True, built=False))
+    assert set(routes) == {SCRAPE, UPLOAD}
+    assert routes[UPLOAD]["available"] is False
+    assert "no parser built" in routes[UPLOAD]["reason"]
+
+
 # --- the tool surface --------------------------------------------------------
 
 @pytest.fixture

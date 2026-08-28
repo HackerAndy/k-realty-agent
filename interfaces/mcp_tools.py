@@ -547,6 +547,13 @@ NEW_SOURCE_METHODS = {
     },
 }
 
+# Which door (core/transports.py) each onboarding method opens.
+_TRANSPORT_FOR_METHOD = {
+    "website": transports.SCRAPE,
+    "document": transports.UPLOAD,
+    "email": transports.EMAIL,
+}
+
 # Where a source is learned before it has a name. The wizard asks the agent to
 # read the source FIRST and suggest what to call it, so the artifacts (a sample,
 # a demonstration, a browser profile with a live session) exist before there is a
@@ -778,7 +785,8 @@ def add_source(label: str, method: str, adopt_staged: bool = False, login_url: s
 
     service = Service(key=key, label=label, input_type=spec["input_type"],
                       access=spec["access"], status="planned",
-                      login_url=login_url.strip() or None)
+                      login_url=login_url.strip() or None,
+                      requested_transports=[_TRANSPORT_FOR_METHOD[method]])
     try:
         ServiceManifest().add(service)
     except ServiceManifestError as exc:
@@ -799,6 +807,43 @@ def add_source(label: str, method: str, adopt_staged: bool = False, login_url: s
     )
     return {"source_key": key, "label": label, "method": method,
             "next": spec["next"], **adopted, **_source_row(key)}
+
+
+def request_transport(source_key: str, method: str) -> dict:
+    """Open another door for a source that already exists — the wizard's
+    "another way into X" fork, for methods other than email (which gates
+    itself by whether Service.email_search is set; see save_email_search).
+
+    A source starts with exactly the door its onboarding method opened
+    (add_source). This is how a second one gets added later without
+    reaching for every possible door up front.
+    """
+    spec = NEW_SOURCE_METHODS.get(method)
+    if spec is None:
+        raise ToolError(f"Unknown method '{method}'. Use one of: {', '.join(NEW_SOURCE_METHODS)}.")
+    if method == "email":
+        raise ToolError("Use save_email_search to add an email route — it carries the inbox and search terms.")
+
+    services = _load_services()
+    source = next((s for s in services if s.key == source_key), None)
+    if source is None:
+        raise ToolError(f"Unknown source '{source_key}'.")
+
+    transport_id = _TRANSPORT_FOR_METHOD[method]
+    requested = source.requested_transports
+    if requested is None:
+        # An older source with no recorded doors — keep whatever it already
+        # showed (core/transports.py's None-means-everything rule) rather
+        # than narrowing it down to just the one being added now.
+        requested = []
+        if source.parser:
+            requested.append(transports.UPLOAD)
+        if has_scraper(source_key):
+            requested.append(transports.SCRAPE)
+    if transport_id not in requested:
+        requested = [*requested, transport_id]
+    ServiceManifest().update(source_key, requested_transports=requested)
+    return _source_row(source_key)
 
 
 def _adopt_staged(source_key: str) -> dict:
@@ -2048,6 +2093,7 @@ READ_TOOLS = [list_sources, source_methods, latest_transactions, source_transact
               pending_approvals, llm_status, status]
 ACTION_TOOLS = [
     add_source,
+    request_transport,
     suggest_source_name,
     preview_document,
     preview_demo,

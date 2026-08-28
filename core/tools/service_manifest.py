@@ -32,8 +32,8 @@ _yaml = YAML()
 _yaml.preserve_quotes = True
 _yaml.width = 4096  # don't hard-wrap long note lines
 
-_FIELD_ORDER = ["key", "label", "login_url", "notes", "input_type", "access", "provider",
-                "parser", "status", "email_search"]
+_FIELD_ORDER = ["key", "label", "login_url", "notes", "input_type", "access",
+                "requested_transports", "provider", "parser", "status", "email_search"]
 
 
 class EmailSearch(BaseModel):
@@ -82,6 +82,15 @@ class Service(BaseModel):
     parser: str | None = None
     status: str = "planned"
 
+    # Which doors the operator has actually asked for (core/transports.py's
+    # UPLOAD/SCRAPE ids) — NOT which one wins; several can be requested. None
+    # means "not tracked" (sources written before this field existed), and
+    # transports.py treats that the same as "everything's requested" so an
+    # older source doesn't lose a door it already had. A newly added source
+    # starts with exactly the one door the operator asked for, so the Ingest
+    # screen doesn't show a "File upload" chip nobody asked for.
+    requested_transports: list[str] | None = None
+
     # Inboxes only: how the harness gets into this one (gmail today; imap later).
     # An inbox is a way IN, not a body of data — it has no parser of its own.
     provider: str | None = None
@@ -91,6 +100,8 @@ class Service(BaseModel):
     # A stored pin was a second answer to the same question, and it went stale
     # silently: Epic's pin said "file upload" long after its website had taken
     # over, so the screen reported "needs you" about a source running itself.
+    # requested_transports (below) is not that pin — it doesn't say which route
+    # wins, only which ones exist for this source at all.
 
     # Set when this source's document ARRIVES BY EMAIL — which inbox to search
     # and what to look for. See EmailSearch: the inbox itself only holds access.

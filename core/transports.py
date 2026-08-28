@@ -15,9 +15,15 @@ One source, several doors:
                           <- portal scrape      (unattended)
                           <- file upload        (needs a human)
 
-Transports are DERIVED, not stored: a source can be uploaded to if it has a
-parser, scraped if it has a scraper, and emailed if some inbox routes to it.
-Nothing about them is persisted at all.
+Whether a requested route WORKS is derived, not stored: a source can be
+uploaded to if it has a parser, scraped if it has a scraper, and emailed if
+some inbox routes to it. Which routes were ever asked for IS stored
+(Service.requested_transports) — otherwise a source onboarded for "website
+only" showed a "File upload" door nobody chose, disabled but still claiming a
+place on screen. That is a record of what was asked for, never of which one
+wins: `None` (a source predating the field) means "don't filter, show every
+route this source could ever take," and every entry in the list is offered on
+equal footing.
 
 There is no default route, and no source-level "can be automated" flag. Both were
 one answer standing in for several, and both drifted: a stored default said "file
@@ -65,31 +71,40 @@ def transports_for(
     key = service.key
     routes: list[dict] = []
 
+    # Which doors were actually asked for (Service.requested_transports). None
+    # means an older source written before that field existed — treat it as
+    # "everything", so it keeps showing what it always showed. A source added
+    # since then only shows the door(s) chosen for it, until another is
+    # explicitly requested — the wizard's "another way into X" fork.
+    requested = getattr(service, "requested_transports", None)
+
     # Upload works when the source has an ACTIVE parser — which is not the same
     # question as "did the agent write a file named after this source". Epic's
     # parser is registered as `buildium_owner_statement`, so a filename check
     # would report Epic as unable to accept the very PDF it parses every month.
     # A built-but-unapproved parser is its own state, and worth saying out loud:
     # the fix is one click, not a build.
-    has_active_parser = bool(getattr(service, "parser", None))
-    awaiting_approval = not has_active_parser and bool(parser_built(key))
-    routes.append(_route(
-        UPLOAD,
-        available=has_active_parser,
-        unattended=False,   # no unattended version of "pick a file off my desk"
-        reason=None if has_active_parser else (
-            "a parser is built but not approved yet — approve it to use this route"
-            if awaiting_approval else "no parser built for this source yet"
-        ),
-    ))
+    if requested is None or UPLOAD in requested:
+        has_active_parser = bool(getattr(service, "parser", None))
+        awaiting_approval = not has_active_parser and bool(parser_built(key))
+        routes.append(_route(
+            UPLOAD,
+            available=has_active_parser,
+            unattended=False,   # no unattended version of "pick a file off my desk"
+            reason=None if has_active_parser else (
+                "a parser is built but not approved yet — approve it to use this route"
+                if awaiting_approval else "no parser built for this source yet"
+            ),
+        ))
 
-    can_scrape = bool(has_scraper(key))
-    routes.append(_route(
-        SCRAPE,
-        available=can_scrape,
-        unattended=True,
-        reason=None if can_scrape else "no scraper built yet — the agent can write one",
-    ))
+    if requested is None or SCRAPE in requested:
+        can_scrape = bool(has_scraper(key))
+        routes.append(_route(
+            SCRAPE,
+            available=can_scrape,
+            unattended=True,
+            reason=None if can_scrape else "no scraper built yet — the agent can write one",
+        ))
 
     # An inbox is not a source; it is a way IN. The source says which inbox to
     # search and what to look for (Service.email_search) — the inbox itself only
